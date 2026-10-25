@@ -10,4 +10,6 @@ Security notes:
 
 Verification:
 - pytest tests/test_ui.py passed (8/8).
-- app.ui imports cleanly.
+- pytest full suite passed (163/163).
+- agent evaluation passed (15/15).
+- app.ui and app.main import cleanly.
