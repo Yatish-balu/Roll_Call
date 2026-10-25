@@ -466,6 +466,39 @@ def replace_session_attendance(
         )
         for r in new_records
     ]
+
+    validated_records = []
+    for r in new_records:
+        if not isinstance(r, dict):
+            raise ValueError("Each attendance record must be a mapping with string keys.")
+        try:
+            usn = str(r.get("usn", "")).strip().upper()
+            room_id = str(r.get("room_id", "LH-101")).strip()
+            status = normalize_attendance_status(str(r.get("status", "UNREVIEWED")))
+            source = str(r.get("source", "UI_CONFIRMED")).strip()
+            confidence = float(r.get("confidence", 1.0))
+        except Exception as exc:
+            raise ValueError(f"Invalid attendance record: {exc}")
+
+        if not usn:
+            raise ValueError("Invalid attendance record: usn is empty.")
+
+        # Normalize missing room_id and status to sensible defaults so database writes stay consistent.
+        if not room_id:
+            room_id = "LH-101"
+        if not status:
+            status = "UNREVIEWED"
+        if not source:
+            source = "UI_CONFIRMED"
+        validated_records.append({
+            "session_id": session_id.strip(),
+            "usn": usn,
+            "room_id": room_id,
+            "status": status,
+            "source": source,
+            "confidence": confidence,
+        })
+
     with _get_conn(target) as conn:
         conn.execute("DELETE FROM attendance WHERE session_id = ?", (session_id.strip(),))
         query = """
@@ -473,10 +506,14 @@ def replace_session_attendance(
         VALUES (?, ?, ?, ?, ?, ?)
         """
         cursor = conn.cursor()
-        cursor.executemany(query, formatted_records)
+        insert_rows = [
+            (v["session_id"], v["usn"], v["room_id"], v["status"], v["source"], v["confidence"])
+            for v in validated_records
+        ]
+        cursor.executemany(query, insert_rows)
         if isinstance(target, sqlite3.Connection):
             conn.commit()
-        return cursor.rowcount
+        return len(validated_records)
 
 
 def reconcile_session_roster(
@@ -589,7 +626,22 @@ def get_attendance_by_session(
     """
     with _get_conn(target) as conn:
         cursor = conn.execute(query, (actual_id.strip(),))
-        return _rows_to_dicts(cursor.fetchall())
+        rows = cursor.fetchall()
+
+    if isinstance(rows, list) and rows and isinstance(rows[0], sqlite3.Row):
+        return _rows_to_dicts(rows)
+
+    return [
+        {
+            "session_id": r[0],
+            "usn": r[1],
+            "room_id": r[2],
+            "status": r[3],
+            "source": r[4],
+            "confidence": r[5],
+        }
+        for r in rows
+    ]
 
 
 def get_attendance_by_student(

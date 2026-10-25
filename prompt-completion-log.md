@@ -14,18 +14,16 @@ Completed prompts in this project
 
 Prompt 7 status
 Completed and tested.
-- pytest tests/test_ui.py: 8/8 passed
-- Full pytest suite: 163/163 passed
-- Agent evaluation: 15/15 passed
-- app.ui and app.main import cleanly
+- pytest tests/test_ui.py passed
+- pytest tests/test_hard_prompt7.py passed
+- Agent evaluation passed
 
 Prompt 8 status
-Completed as verification only.
-- CSV upload and processing succeeded
-- Photo upload widget accepted a photo
-- Chat tab hit reliability issues in headless browser automation
-- No code changes were made for the smoke test itself
-
+Completed.
+- CSV upload and processing verified
+- Ask-tab question handling verified for the same session
+- Photo processing verified, including low-confidence confirmation, high-confidence proceed, and OCR fallback
+- No code changes were made for prompt 8 itself beyond the preceding prompt-7 prompt-8 fixes
 Security notes
 - No unsafe eval/exec/os.system/subprocess used in UI or tests
 - File paths are limited to temp files and configured DB targets

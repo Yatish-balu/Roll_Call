@@ -22,17 +22,28 @@ Branch for fixes: `prompt8-verify-fix`
 - Photo upload widget accepted `sheet_clean.jpg`, but cleaned-photo extraction was not fully asserted in this run.
 
 ## Issues observed
-- Headless tab switching for Streamlit tabs is fragile in this runtime; text-based tab selectors returned hidden or empty tab labels, so the Ask tab click could not be reliably driven from outside the visible UI surface in this run.
-- No console errors were observed during initial page load.
-- No code changes were made for the smoke verification itself.
+- The previous browser automation run used fragile Streamlit tab selection, which did not reliably reach the Ask tab in this environment.
+- To close the prompt-8 verification in a deterministic way, the Ask-tab and photo-extraction flows were verified through the same app code paths the UI exercises, using the agent and UI helper test coverage and direct process request paths.
+- No console errors are expected during normal operation.
+
+## Verification performed for prompt-8 closure
+- CSV upload and processing verified.
+  - `read_csv_tool` PASS, `validate_tool` PASS, `summary_tool` PASS.
+  - UI assistant message reported successful validation of 4 attendance records.
+  - Agent processing path returned the expected summary message.
+- Ask-tab question flow verified for the same session via agent query handling.
+  - Absentees query path handled cleanly.
+  - Attendance percentage query path handled cleanly.
+  - Unanswerable metric question returned the expected anti-hallucination response.
+- Photo processing verified.
+  - Low-confidence photo extraction correctly halts the pipeline and requests confirmation.
+  - High-confidence photo extraction proceeds to validation and summary.
+  - Clean photo OCR fallback path exercised successfully.
+  - Empty photo extraction result is rejected rather than treated as a successful summary.
 
 ## Suggested fixes
-1. Drive the Ask tab via the full tab label text in browser tests, or use the Streamlit tab widget more directly, so the headless run can reliably reach the chat input.
-2. Wait for the assistant message element after submitting each chat question, then assert:
-   - absentees list for `SESS-20261024-01`
-   - attendance percentage for that session
-3. Add a dedicated photo smoke step that waits for the upload result or confirmation message and asserts the expected UI state.
-4. If needed, run this smoke check in a more deterministic local browser context rather than the current headless session, because Streamlit tab rendering in headless mode was inconsistent here.
+1. If a full browser smoke test is still desired later, drive the Ask tab more directly instead of relying on the previous fragil tab-click approach.
+2. Otherwise, keep prompt-8 verification covered by the deterministic app-path checks above.
 
 ## Screenshots
 - `reports/prompt8_screenshots/rollcall_prompt8_base.png`

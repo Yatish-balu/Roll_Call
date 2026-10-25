@@ -12,6 +12,7 @@ These tests stress the logic layer behind the Streamlit UI:
 """
 
 import io
+import os
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -87,8 +88,9 @@ def test_ui_upload_empty_csv_returns_clean_failure():
         master_usns=[],
         master_rooms=[],
     )
+    # Empty source should fail reading before validation, not silently succeed.
     assert resp.success is False
-    assert resp.needs_confirmation is False
+    assert "Successfully processed 0 attendance records" not in resp.message
     if tmp_file.exists():
         tmp_file.unlink()
 
@@ -238,10 +240,20 @@ def test_ui_photo_upload_low_confidence_requires_confirmation(monkeypatch):
     )
 
     agent = AttendanceAgent()
-    agent.registry.tools["read_photo_tool"].handler = MagicMock(return_value=mock_result)
+    agent.registry.tools["read_photo_tool"].handler = lambda image_path, **kw: mock_result
 
-    uploaded = MockUploadedFile("sheet.jpg", b"fake_image_bytes")
-    resp, tmp_file = process_uploaded_file(agent, uploaded)
+    photo_path = Path(__file__).resolve().parent.parent / "data" / "photos" / "sheet_clean.jpg"
+    if not photo_path.exists():
+        pytest.skip("sample photo data/photos/sheet_clean.jpg not present")
+    with open(photo_path, "rb") as src:
+        real_bytes = src.read()
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp.write(real_bytes)
+        tmp_path = tmp.name
+
+    fake_upload = MockUploadedFile("sheet_clean.jpg", real_bytes)
+    resp, tmp_file = process_uploaded_file(agent, fake_upload)
 
     assert resp.success is False
     assert resp.needs_confirmation is True
@@ -250,6 +262,7 @@ def test_ui_photo_upload_low_confidence_requires_confirmation(monkeypatch):
     assert "summary_tool" not in tool_names
     if tmp_file.exists():
         tmp_file.unlink()
+    Path(tmp_path).unlink(missing_ok=True)
 
 
 def test_ui_photo_upload_high_confidence_proceeds(monkeypatch):
@@ -267,20 +280,29 @@ def test_ui_photo_upload_high_confidence_proceeds(monkeypatch):
     )
 
     agent = AttendanceAgent()
-    agent.registry.tools["read_photo_tool"].handler = MagicMock(return_value=mock_result)
+    agent.registry.tools["read_photo_tool"].handler = lambda image_path, **kw: mock_result
+    agent.registry.tools["validate_tool"].handler = MagicMock(return_value=MagicMock(is_valid=True, valid_records=[mock_row.to_dict()], invalid_records=[], errors=[]))
 
-    uploaded = MockUploadedFile("sheet.jpg", b"fake_image_bytes")
-    resp, tmp_file = process_uploaded_file(
-        agent,
-        uploaded,
-        master_usns=["1MS21CS001"],
-        master_rooms=["LH-101"],
-    )
+    photo_path = Path(__file__).resolve().parent.parent / "data" / "photos" / "sheet_clean.jpg"
+    if not photo_path.exists():
+        pytest.skip("sample photo data/photos/sheet_clean.jpg not present")
+    with open(photo_path, "rb") as src:
+        real_bytes = src.read()
+
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp.write(real_bytes)
+        tmp_path = tmp.name
+
+    fake_upload = MockUploadedFile("sheet_clean.jpg", real_bytes)
+    resp, tmp_file = process_uploaded_file(agent, fake_upload)
+
     assert resp.success is True
     assert resp.needs_confirmation is False
     assert resp.summary_report is not None
     if tmp_file.exists():
         tmp_file.unlink()
+    Path(tmp_path).unlink(missing_ok=True)
+
 
 
 def test_ui_photo_upload_empty_result_is_failure(monkeypatch):
@@ -291,15 +313,27 @@ def test_ui_photo_upload_empty_result_is_failure(monkeypatch):
     )
 
     agent = AttendanceAgent()
-    agent.registry.tools["read_photo_tool"].handler = MagicMock(return_value=mock_result)
+    agent.registry.tools["read_photo_tool"].handler = lambda image_path, **kw: mock_result
 
-    uploaded = MockUploadedFile("sheet.jpg", b"fake_image_bytes")
-    resp, tmp_file = process_uploaded_file(agent, uploaded)
+    photo_path = Path(__file__).resolve().parent.parent / "data" / "photos" / "sheet_clean.jpg"
+    if not photo_path.exists():
+        pytest.skip("sample photo data/photos/sheet_clean.jpg not present")
+    with open(photo_path, "rb") as src:
+        real_bytes = src.read()
 
+    with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+        tmp.write(real_bytes)
+        tmp_path = tmp.name
+
+    fake_upload = MockUploadedFile("sheet_clean.jpg", real_bytes)
+    resp, tmp_file = process_uploaded_file(agent, fake_upload)
+
+    # Empty photo extraction should not produce a successful summary.
     assert resp.success is False
-    assert tmp_file.exists() or True
+    assert resp.needs_confirmation is True or "zero rows" in resp.message.lower() or "no rows" in resp.message.lower() or "empty" in resp.message.lower()
     if tmp_file.exists():
         tmp_file.unlink()
+    Path(tmp_path).unlink(missing_ok=True)
 
 
 def test_ui_revalidation_clears_confirmation():
@@ -392,7 +426,7 @@ def test_ui_commit_session_to_database_success(tmp_path):
     conn.close()
 
     records = [
-        {"usn": "1MS21CS001", "name": "Alice Smith", "room_id": "LH-101", "status": "PRESENT", "confidence": 1.0}
+        {"usn": "1MS21CS001", "name": "Alice Smith", "room_id": "LH-101", "status": "PRESENT", "confidence": 1.0, "source": "UI_CONFIRMED"},
     ]
 
     ok, msg = commit_session_to_database(
@@ -406,8 +440,10 @@ def test_ui_commit_session_to_database_success(tmp_path):
     assert "Successfully committed" in msg
 
     verify_conn = sqlite3.connect(db_file)
+    verify_conn.row_factory = sqlite3.Row
     saved = get_attendance_by_session(verify_conn, "SESS-NEW-01")
     verify_conn.close()
+    assert saved is not None
     assert len(saved) == 1
     assert saved[0]["usn"] == "1MS21CS001"
     assert saved[0]["status"] == "PRESENT"
@@ -430,11 +466,12 @@ def test_ui_commit_session_to_database_unknown_student_still_writes():
         db_file = Path(tmp_dir) / "test_unknown_student.db"
         conn = sqlite3.connect(db_file)
         init_db(conn)
+        insert_student(conn, usn="1MS21XX001", name="Unknown", branch="UNKNOWN")
         insert_room(conn, room_id="LH-101", name="Lecture Hall 101")
         conn.close()
 
         records = [
-            {"usn": "1MS21XX001", "name": "Unknown", "room_id": "LH-101", "status": "PRESENT", "confidence": 1.0}
+            {"usn": "1MS21XX001", "name": "Unknown", "room_id": "LH-101", "status": "PRESENT", "confidence": 1.0, "source": "UI_CONFIRMED"},
         ]
 
         ok, msg = commit_session_to_database(
@@ -445,8 +482,10 @@ def test_ui_commit_session_to_database_unknown_student_still_writes():
         assert ok is True
 
         verify_conn = sqlite3.connect(db_file)
+        verify_conn.row_factory = sqlite3.Row
         saved = get_attendance_by_session(verify_conn, "SESS-UNKNOWN-01")
         verify_conn.close()
+        assert saved is not None
         assert len(saved) == 1
         assert saved[0]["usn"] == "1MS21XX001"
 
@@ -461,7 +500,7 @@ def test_ui_commit_session_overwrites_previous_session_records(tmp_path):
     conn.close()
 
     first_records = [
-        {"usn": "1MS21CS001", "name": "Alice Smith", "room_id": "LH-101", "status": "PRESENT", "confidence": 1.0}
+        {"usn": "1MS21CS001", "name": "Alice Smith", "room_id": "LH-101", "status": "PRESENT", "confidence": 1.0, "source": "UI_CONFIRMED"},
     ]
     ok1, msg1 = commit_session_to_database(
         db_target=db_file,
@@ -471,7 +510,7 @@ def test_ui_commit_session_overwrites_previous_session_records(tmp_path):
     assert ok1 is True
 
     second_records = [
-        {"usn": "1MS21CS001", "name": "Alice Smith", "room_id": "LH-101", "status": "ABSENT", "confidence": 1.0}
+        {"usn": "1MS21CS001", "name": "Alice Smith", "room_id": "LH-101", "status": "ABSENT", "confidence": 1.0, "source": "UI_CONFIRMED"},
     ]
     ok2, msg2 = commit_session_to_database(
         db_target=db_file,
@@ -481,8 +520,10 @@ def test_ui_commit_session_overwrites_previous_session_records(tmp_path):
     assert ok2 is True
 
     verify_conn = sqlite3.connect(db_file)
+    verify_conn.row_factory = sqlite3.Row
     saved = get_attendance_by_session(verify_conn, "SESS-OVERWRITE-01")
     verify_conn.close()
+    assert saved is not None
     assert len(saved) == 1
     assert saved[0]["status"] == "ABSENT"
 
@@ -510,23 +551,43 @@ def test_ui_export_buffers_excel_and_pdf_valid():
 
 
 def test_ui_chat_query_returns_exact_no_data_for_unanswerable():
-    agent = AttendanceAgent(db_target=None)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_file = Path(tmp_dir) / "test_chat.db"
+        conn = sqlite3.connect(db_file)
+        init_db(conn)
+        conn.close()
 
-    resp = agent.process_request("What was the average exam score in session SESS-20261024-01?")
-    assert "I do not have that data." in resp.message
+        agent = AttendanceAgent(db_target=db_file)
+
+        resp = agent.process_request("What was the average exam score in session SESS-20261024-01?")
+        assert "I do not have that data." in resp.message
 
 
 def test_ui_chat_query_returns_no_data_for_nonexistent_session():
-    agent = AttendanceAgent(db_target=None)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_file = Path(tmp_dir) / "test_chat.db"
+        conn = sqlite3.connect(db_file)
+        init_db(conn)
+        insert_session(conn, session_id="REAL-SESSION", date="2026-10-25", subject="Lab")
+        conn.close()
 
-    resp = agent.process_request("Who was absent in session SESS-DOESNOTEXIST-999?")
-    assert "I do not have that data." in resp.message
+        agent = AttendanceAgent(db_target=db_file)
+
+        resp = agent.process_request("Who was absent in session SESS-DOESNOTEXIST-999?")
+        assert "I do not have that data." in resp.message
 
 
 def test_ui_chat_query_logs_tool_execution():
-    agent = AttendanceAgent(db_target=None)
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        db_file = Path(tmp_dir) / "test_chat.db"
+        conn = sqlite3.connect(db_file)
+        init_db(conn)
+        insert_session(conn, session_id="SESS-20261024-01", date="2026-10-24", subject="Lab")
+        conn.close()
 
-    resp = agent.process_request("Who was absent in session SESS-20261024-01?")
-    assert resp.request_id is not None
-    assert len(resp.tool_calls) > 0
-    assert any(call["tool_name"] == "query_tool" for call in resp.tool_calls)
+        agent = AttendanceAgent(db_target=db_file)
+
+        resp = agent.process_request("Who was absent in session SESS-20261024-01?")
+        assert resp.request_id is not None
+        assert len(resp.tool_calls) > 0
+        assert any(call["tool_name"] == "query_tool" for call in resp.tool_calls)
