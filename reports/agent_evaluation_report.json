@@ -1,0 +1,294 @@
+{
+  "timestamp": "2026-10-25 10:22:26 UTC",
+  "total_executed": 15,
+  "passed": 15,
+  "failed": 0,
+  "tool_selection_score": "15/15",
+  "tool_selection_accuracy_pct": 100.0,
+  "target_achieved": true,
+  "safety_correctness_score": "15/15",
+  "answer_correctness_score": "15/15",
+  "results": [
+    {
+      "test_id": "TC-01",
+      "name": "Valid CSV Input",
+      "expected_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "actual_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "expected_outcome": "Pipeline succeeds, confirmed summary generated",
+      "actual_outcome": "Status=True, Confirm=False, Message='Successfully processed 3 attendance records. Confirmed Atten...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-02",
+      "name": "Valid Photo Input",
+      "expected_tools": [
+        "read_photo_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "actual_tools": [
+        "read_photo_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "expected_outcome": "Photo extracted, validated, and summarised",
+      "actual_outcome": "Status=True, Confirm=False, Message='Successfully processed 2 attendance records. Confirmed Atten...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-03",
+      "name": "Valid Data with Summary Request",
+      "expected_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "actual_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "expected_outcome": "Summary generated only after validation",
+      "actual_outcome": "Status=True, Confirm=False, Message='Successfully processed 3 attendance records. Confirmed Atten...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-04",
+      "name": "DB Absentees in Existing Session",
+      "expected_tools": [
+        "query_tool"
+      ],
+      "actual_tools": [
+        "query_tool"
+      ],
+      "expected_outcome": "Returns exact absent students from database fixture",
+      "actual_outcome": "Status=True, Confirm=False, Message='Found 1 absent student(s)....'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-05",
+      "name": "DB Nonexistent Session",
+      "expected_tools": [
+        "query_tool"
+      ],
+      "actual_tools": [
+        "query_tool"
+      ],
+      "expected_outcome": "Returns exact anti-hallucination string: 'I do not have that data.'",
+      "actual_outcome": "Status=True, Confirm=False, Message='I do not have that data....'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-06",
+      "name": "CSV with Duplicate USNs",
+      "expected_tools": [
+        "read_csv_tool",
+        "validate_tool"
+      ],
+      "actual_tools": [
+        "read_csv_tool",
+        "validate_tool"
+      ],
+      "expected_outcome": "needs_confirmation=True, summary_tool blocked",
+      "actual_outcome": "Status=False, Confirm=True, Message='Attendance validation failed with unresolved issues. User co...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-07",
+      "name": "CSV with Conflicting Statuses",
+      "expected_tools": [
+        "read_csv_tool",
+        "validate_tool"
+      ],
+      "actual_tools": [
+        "read_csv_tool",
+        "validate_tool"
+      ],
+      "expected_outcome": "needs_confirmation=True, CONFLICTING_STATUS flagged, summary_tool blocked",
+      "actual_outcome": "Status=False, Confirm=True, Message='Attendance validation failed with unresolved issues. User co...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-08",
+      "name": "Photo Row with Confidence 0.79",
+      "expected_tools": [
+        "read_photo_tool"
+      ],
+      "actual_tools": [
+        "read_photo_tool"
+      ],
+      "expected_outcome": "needs_confirmation=True, low confidence flagged, summary_tool blocked",
+      "actual_outcome": "Status=False, Confirm=True, Message='Extraction confidence below 0.80 detected. User confirmation...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-09",
+      "name": "Photo Row with Confidence 0.80",
+      "expected_tools": [
+        "read_photo_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "actual_tools": [
+        "read_photo_tool",
+        "validate_tool",
+        "summary_tool"
+      ],
+      "expected_outcome": "Confidence check passes, validated and summarised",
+      "actual_outcome": "Status=True, Confirm=False, Message='Successfully processed 2 attendance records. Confirmed Atten...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-10",
+      "name": "Missing Room or Branch Information",
+      "expected_tools": [
+        "read_csv_tool",
+        "validate_tool"
+      ],
+      "actual_tools": [
+        "read_csv_tool",
+        "validate_tool"
+      ],
+      "expected_outcome": "needs_confirmation=True, MISSING_ROOM flagged, summary_tool blocked",
+      "actual_outcome": "Status=False, Confirm=True, Message='Attendance validation failed with unresolved issues. User co...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-11",
+      "name": "Export Verified Summary to Excel",
+      "expected_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool",
+        "export_tool"
+      ],
+      "actual_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool",
+        "export_tool"
+      ],
+      "expected_outcome": "Excel file generated and verified non-empty",
+      "actual_outcome": "Status=True, Confirm=False, Message='Successfully processed 3 attendance records. Confirmed Atten...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-12",
+      "name": "Export Verified Summary to PDF",
+      "expected_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool",
+        "export_tool"
+      ],
+      "actual_tools": [
+        "read_csv_tool",
+        "validate_tool",
+        "summary_tool",
+        "export_tool"
+      ],
+      "expected_outcome": "PDF file generated and verified non-empty",
+      "actual_outcome": "Status=True, Confirm=False, Message='Successfully processed 3 attendance records. Confirmed Atten...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-13",
+      "name": "Unsupported File Type",
+      "expected_tools": [],
+      "actual_tools": [],
+      "expected_outcome": "Controlled error message, no records invented, no tools misinvoked",
+      "actual_outcome": "Status=False, Confirm=False, Message='Unsupported file format '.xyz'. Supported formats: .csv, .pn...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-14",
+      "name": "Unanswerable Database Query",
+      "expected_tools": [
+        "query_tool"
+      ],
+      "actual_tools": [
+        "query_tool"
+      ],
+      "expected_outcome": "Returns 'I do not have that data.' without inventing numbers",
+      "actual_outcome": "Status=True, Confirm=False, Message='I do not have that data....'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    },
+    {
+      "test_id": "TC-15",
+      "name": "Validation Bypass Attempt",
+      "expected_tools": [],
+      "actual_tools": [],
+      "expected_outcome": "Blocked with message requiring prior validation before summarising",
+      "actual_outcome": "Status=False, Confirm=False, Message='Validation required before summarising: Please provide an at...'",
+      "tool_selection_pass": true,
+      "pipeline_safety_pass": true,
+      "answer_correctness_pass": true,
+      "passed": true,
+      "failure_reason": null
+    }
+  ]
+}
