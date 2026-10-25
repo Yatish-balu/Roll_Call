@@ -208,12 +208,20 @@ def summary_tool(
             },
         )
 
-    # Optional symbol configuration: if an explicit map is supplied, isolate the
-    # inferred/ambiguous remainder so the summary can be reported separately later. If no
-    # map is supplied, keep the existing default behavior.
+    # Symbol configuration: if an explicit map is supplied, isolate the inferred/ambiguous
+    # remainder so the summary can be reported separately later. If no map is supplied, keep
+    # the existing default behavior.
     _symbol_map = symbol_map if symbol_map is not None else _DEFAULT_SYMBOL_MAP
     _default_unknown = default_unknown
     _default_blank = default_blank
+
+    # NOTE: `_symbol_map.get(clean, default_unknown)` in normalize_status above can be
+    # read as "if the mark is not in the map, use default_unknown". That is not the same
+    # as "look up the mark in the map, and if there is no entry treat it as unknown." If a
+    # caller passes an explicit map but the mark is still missing from that map, the mark is
+    # treated as unknown rather than falling back to the default RollCall map. This matches the
+    # requirement that custom maps are authoritative: a mark not in a custom map is ambiguous,
+    # not silently remapped by the project default.
 
     # Standardize column names if needed
     col_mapping = {
@@ -227,7 +235,7 @@ def summary_tool(
     # Normalize status column using the configured symbol path so summary counts match
     # the sheet semantics rather than a single hardcoded global rule.
     status_col = "status" if "status" in df.columns else df.columns[0]
-    df["norm_status"] = df[status_col].apply(
+    df["norm_status"] = df[status_col].map(
         lambda v: normalize_status(v, _symbol_map, default_unknown=_default_unknown, default_blank=_default_blank)
     )
 
