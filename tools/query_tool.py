@@ -60,13 +60,15 @@ def _get_readonly_conn(
     if not resolved_path.exists():
         raise FileNotFoundError(f"Database file not found: {db_path}")
 
-    # Use URI mode=ro for strict OS/SQLite-level read-only protection
+    # Use URI mode=ro for strict OS/SQLite-level read-only protection.
+    # AUDIT FIX (M-2): there is NO silent fallback to a writable connection.
     uri_path = f"file:{resolved_path.as_posix()}?mode=ro"
     try:
         conn = sqlite3.connect(uri_path, uri=True)
-    except sqlite3.OperationalError:
-        # Fallback to standard connect if URI fails
-        conn = sqlite3.connect(str(resolved_path))
+    except sqlite3.OperationalError as exc:
+        raise sqlite3.OperationalError(
+            f"Could not open database '{db_path}' in read-only mode: {exc}"
+        ) from exc
     conn.row_factory = sqlite3.Row
     return conn, True
 
@@ -90,17 +92,38 @@ def validate_read_only_sql(sql: str) -> None:
     if not cleaned:
         raise ValueError("Query cannot be empty after stripping comments.")
 
+    # Must start with SELECT or WITH (for CTE read queries)
+    # AUDIT FIX (L-3): string literals and quoted identifiers must not defeat
+    # or falsely trip validation.
+    # - Single-quoted literals are runtime values (e.g. LIKE '%delete%'): masked so
+    #   they cannot trigger the mutation-keyword check and cannot smuggle
+    #   semicolons past the multi-statement split.
+    # - Double-quoted segments are identifiers in SQLite: unquoted so content such
+    #   as FROM "sqlite_master" stays checkable (closes the quoted-identifier
+    #   bypass of the table allow-list).
+
+    def _mask_single_quoted_literals(text: str) -> str:
+        return re.sub(r"'(?:[^']|'')*'", "''", text)
+
+    def _unquote_double_quoted_identifiers(text: str) -> str:
+        return re.sub(r'"([^"]*)"', r"\1", text)
+
+    masked = _mask_single_quoted_literals(cleaned)
+    masked = _unquote_double_quoted_identifiers(masked).strip()
+
+    if not masked:
+        raise ValueError("Query cannot be empty after stripping comments and literals.")
+
     # Disallow multiple statements (semicolon separating statements)
-    statements = [s.strip() for s in cleaned.split(";") if s.strip()]
+    statements = [s.strip() for s in masked.split(";") if s.strip()]
     if len(statements) > 1:
         raise ValueError("Multiple SQL statements are not permitted.")
 
-    # Must start with SELECT or WITH (for CTE read queries)
     single_stmt = statements[0]
     if not re.match(r"^(SELECT|WITH)\b", single_stmt, re.IGNORECASE):
         raise ValueError("Only SELECT or WITH (read-only) queries are allowed.")
 
-    # Disallow mutation keywords anywhere in statement
+    # Disallow mutation keywords anywhere in statement (outside string literals)
     if DISALLOWED_SQL_KEYWORDS.search(single_stmt):
         match = DISALLOWED_SQL_KEYWORDS.search(single_stmt)
         disallowed = match.group(0) if match else "MUTATION"
@@ -125,8 +148,10 @@ def safe_sql_query(
     """
     validate_read_only_sql(sql)
 
-    conn, should_close = _get_readonly_conn(db_target)
+    conn = None
+    should_close = False
     try:
+        conn, should_close = _get_readonly_conn(db_target)
         cursor = conn.cursor()
         cursor.execute(sql, tuple(params))
         rows = cursor.fetchmany(max(1, limit))
@@ -149,7 +174,7 @@ def safe_sql_query(
             metadata={"query": sql, "error": str(exc)},
         )
     finally:
-        if should_close:
+        if conn is not None and should_close:
             conn.close()
 
 
@@ -166,8 +191,10 @@ def query_attendance(
     Query attendance records with optional filtering by session, room, branch, USN, and status.
     Returns structured results joining student and room metadata.
     """
-    conn, should_close = _get_readonly_conn(db_target)
+    conn = None
+    should_close = False
     try:
+        conn, should_close = _get_readonly_conn(db_target)
         clauses = []
         params: List[Any] = []
 
@@ -239,7 +266,7 @@ def query_attendance(
             metadata={"error": str(exc)},
         )
     finally:
-        if should_close:
+        if conn is not None and should_close:
             conn.close()
 
 
@@ -253,8 +280,10 @@ def query_students(
     """
     Query student records with optional filters.
     """
-    conn, should_close = _get_readonly_conn(db_target)
+    conn = None
+    should_close = False
     try:
+        conn, should_close = _get_readonly_conn(db_target)
         clauses = []
         params: List[Any] = []
 
@@ -293,7 +322,7 @@ def query_students(
             metadata={"error": str(exc)},
         )
     finally:
-        if should_close:
+        if conn is not None and should_close:
             conn.close()
 
 
@@ -317,8 +346,10 @@ def query_session_stats(
         )
 
     clean_id = str(session_id).strip()
-    conn, should_close = _get_readonly_conn(db_target)
+    conn = None
+    should_close = False
     try:
+        conn, should_close = _get_readonly_conn(db_target)
         # Check session metadata
         sess_cursor = conn.cursor()
         sess_cursor.execute(
@@ -399,7 +430,7 @@ def query_session_stats(
             metadata={"session_id": clean_id, "error": str(exc)},
         )
     finally:
-        if should_close:
+        if conn is not None and should_close:
             conn.close()
 
 

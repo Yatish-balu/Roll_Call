@@ -1,1 +1,17 @@
 # Existing gitignore content above kept intact
+
+# Local secrets & environment files (AUDIT L-1)
+.env
+.env.*
+!.env.example
+
+# SQLite databases & generated runtime data (AUDIT L-1)
+*.db
+*.sqlite
+*.sqlite3
+data/exports/
+
+# Python artifacts
+__pycache__/
+*.py[cod]
+.pytest_cache/

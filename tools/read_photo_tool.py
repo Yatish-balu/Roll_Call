@@ -153,7 +153,8 @@ def preprocess_image(image_path: str | Path) -> np.ndarray:
       2. Denoise (fastNlMeansDenoising).
       3. Deskew by detecting the dominant rotation angle from Hough lines.
       4. Apply adaptive thresholding on the grayscale copy to sharpen text.
-      5. Return the deskewed *colour* image (PIL-ready, uint8 RGB).
+      5. Return (RGB colour image for the vision LLM, thresholded grayscale for
+         the OCR fallback).
     """
     path = Path(image_path)
     if not path.exists():
@@ -515,7 +516,12 @@ def read_photo_tool(
     image_path = str(image_path)
     resolved_key = api_key or os.getenv("GEMINI_API_KEY", "")
     resolved_model = model or os.getenv("PHOTO_LLM_MODEL", DEFAULT_MODEL)
-    resolved_min_conf = min_confidence or float(os.getenv("PHOTO_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE)))
+    # AUDIT FIX (L-8): use an explicit None check — 0.0 is a valid threshold and
+    # must not be silently replaced by the environment/default value because it
+    # is falsy.
+    if min_confidence is None:
+        min_confidence = float(os.getenv("PHOTO_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE)))
+    resolved_min_conf = float(min_confidence)
     warn: List[str] = []
 
     # Step 1: Preprocess

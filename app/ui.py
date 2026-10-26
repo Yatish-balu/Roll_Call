@@ -97,14 +97,19 @@ def process_uploaded_file(
                 tmp_path.write_bytes(b"")
 
     query = f"Process attendance file: {filename}"
-    response = agent.process_request(
-        user_input=query,
-        file_path=tmp_path,
-        default_room=default_room,
-        default_branch=default_branch,
-        master_usns=master_usns,
-        master_rooms=master_rooms,
-    )
+    try:
+        response = agent.process_request(
+            user_input=query,
+            file_path=tmp_path,
+            default_room=default_room,
+            default_branch=default_branch,
+            master_usns=master_usns,
+            master_rooms=master_rooms,
+        )
+    finally:
+        # AUDIT FIX (L-4): delete the temporary upload after processing so a
+        # long-lived Streamlit server does not accumulate files on disk.
+        tmp_path.unlink(missing_ok=True)
     return response, tmp_path
 
 
@@ -128,14 +133,18 @@ def revalidate_and_summarise(
         df.to_csv(tmp.name, index=False)
         tmp_path = Path(tmp.name)
 
-    response = agent.process_request(
-        user_input="Revalidate corrected records from preview table",
-        file_path=tmp_path,
-        default_room=default_room,
-        default_branch=default_branch,
-        master_usns=master_usns,
-        master_rooms=master_rooms,
-    )
+    try:
+        response = agent.process_request(
+            user_input="Revalidate corrected records from preview table",
+            file_path=tmp_path,
+            default_room=default_room,
+            default_branch=default_branch,
+            master_usns=master_usns,
+            master_rooms=master_rooms,
+        )
+    finally:
+        # AUDIT FIX (L-4): delete the temporary CSV after revalidation.
+        tmp_path.unlink(missing_ok=True)
     return response, tmp_path
 
 

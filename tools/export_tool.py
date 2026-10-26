@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 import pandas as pd
 
 from tools.summary_tool import SummaryReport, summary_tool
@@ -29,6 +29,33 @@ from reportlab.platypus import (
     TableStyle,
     KeepTogether,
 )
+
+
+# Characters that spreadsheet applications interpret as formula/call triggers when
+# they are the first character of a cell value. Neutralizing them prevents
+# CSV-injection style attacks in exported .xlsx workbooks
+# (e.g. a CSV row 'name,"=cmd|' /C calc'!A0' opening a command when the admin
+# opens the Excel report).
+_FORMULA_TRIGGER_CHARS = ("=", "+", "-", "@")
+
+
+def _neutralize_spreadsheet_formula(value: Any) -> Any:
+    """Escape string cell values whose first character would be interpreted
+    as a formula by Excel/LibreOffice (`=`, `+`, `-`, `@`).
+    Non-string values (numbers, NaN, dates) pass through untouched."""
+    if isinstance(value, str) and value and value.startswith(_FORMULA_TRIGGER_CHARS):
+        return "'" + value
+    return value
+
+
+def _sanitize_for_excel(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Return a copy of *df* with formula-injection strings neutralized."""
+    if df is None:
+        return None
+    df = df.copy()
+    for col in df.columns:
+        df[col] = df[col].map(_neutralize_spreadsheet_formula)
+    return df
 
 
 @dataclass
@@ -118,6 +145,11 @@ def export_to_excel(
     """
     target_path = _validate_output_path(output_path, overwrite=overwrite)
     detail_df, room_df, branch_df = _prepare_export_dataframes(data)
+
+    # Neutralize Excel formula-injection payloads in user-supplied strings before writing.
+    room_df = _sanitize_for_excel(room_df)
+    branch_df = _sanitize_for_excel(branch_df)
+    detail_df = _sanitize_for_excel(detail_df)
 
     sheets_written: List[str] = []
     total_rows = 0
@@ -337,7 +369,7 @@ def export_tool(
     data: Union[pd.DataFrame, List[Dict[str, Any]], SummaryReport, Dict[str, Any]],
     format: str = "excel",
     output_path: Optional[Union[str, Path]] = None,
-    overwrite: bool = True,
+    overwrite: bool = False,
     title: str = "RollCall AI Attendance Report",
     include_branch_summary: bool = True,
     include_overall_summary: bool = True,
