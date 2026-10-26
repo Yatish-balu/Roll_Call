@@ -147,6 +147,7 @@ def summary_tool(
                 "confirmed": 0,
                 "total": 0,
                 "percentage": 0.0,
+                "confirmed_percentage": 0.0,
             },
         )
 
@@ -197,6 +198,7 @@ def summary_tool(
         "confirmed": total_confirmed,
         "total": total_all,
         "percentage": overall_pct,
+        "confirmed_percentage": overall_pct,
     }
 
     return SummaryReport(

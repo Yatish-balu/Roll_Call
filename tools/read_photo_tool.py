@@ -447,10 +447,15 @@ def _ocr_fallback(thresh: np.ndarray, min_confidence: float, warn: List[str]) ->
         ]
         name = " ".join(name_tokens).title().strip() or ""
 
-        # Determine status
-        if _TICK_PATTERN.search(all_text):
+        # Determine status from tokens not part of USN or student name
+        status_candidate_text = non_usn
+        for tok in name_tokens:
+            status_candidate_text = re.sub(rf"\b{re.escape(tok)}\b", "", status_candidate_text, flags=re.IGNORECASE)
+        status_candidate_text = status_candidate_text.strip()
+
+        if _TICK_PATTERN.search(status_candidate_text):
             status = "PRESENT"
-        elif _CROSS_PATTERN.search(all_text):
+        elif _CROSS_PATTERN.search(status_candidate_text):
             status = "ABSENT"
         elif avg_prob < 0.5:
             status = "UNREVIEWED"
