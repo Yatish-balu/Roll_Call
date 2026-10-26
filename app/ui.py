@@ -28,6 +28,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from app.agent import AttendanceAgent, AgentResponse, CONFIDENCE_CONFIRMATION_THRESHOLD
+import app.agent  # noqa: F401; makes app.agent module available for threat radar
 from app.db import (
     DEFAULT_DB_PATH,
     get_connection,
@@ -612,6 +613,31 @@ def main() -> None:
         st.sidebar.success(f"🟢 Database Connected\n- Students: {len(students)}\n- Sessions: {len(sessions)}\n- Rooms: {len(rooms)}")
     except Exception as exc:
         st.sidebar.error(f"🔴 DB Error: {exc}")
+
+# ── Real‑time Threat Radar (sidebar) ─────────────────────────────────────
+    with st.sidebar.expander("🛡️ Threat Radar", expanded=False):
+        # Pull the global threat log from the agent's module; fall back to empty list.
+        import datetime as _dt
+        threat_log = getattr(app.agent, "THREAT_LOG", []) or []
+        threat_counter = getattr(app.agent, "THREAT_COUNTER", {}) or {}
+
+        if threat_log:
+            df = pd.DataFrame(threat_log)
+            # Show last 20 threats
+            recent = df.tail(20)
+            st.caption(f"Last {len(recent)} threat detections")
+            for _, row in recent.iterrows():
+                detected = row.get("detected", [])
+                st.caption(f"🔍 {_dt.datetime.fromisoformat(row['timestamp']).strftime('%H:%M:%S')} — {', '.join(detected)}")
+        else:
+            st.caption("No threats detected yet.")
+
+        # Summary bar chart of keyword frequencies
+        if threat_counter:
+            counts = pd.Series(threat_counter).sort_values(ascending=False).head(10)
+            st.bar_chart(counts.rename("attempts"))
+        else:
+            st.caption("Keyword frequency: none")
 
     if st.sidebar.button("🔄 Reset App State"):
         for key in list(st.session_state.keys()):

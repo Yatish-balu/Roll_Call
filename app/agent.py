@@ -40,6 +40,25 @@ from tools.export_tool import export_tool, ExportResult
 
 logger = logging.getLogger("rollcall.agent")
 
+# ── Real‑time Threat Radar ──────────────────────────────────────────────
+# Keywords that signal an attempted injection, formula payload, or command injection.
+# Every request is screened against this list; hits are logged and exposed in the
+# Streamlit UI so operators can see attacks as they happen.
+THREAT_KEYWORDS = [
+    "DROP", "DELETE", "INSERT", "UPDATE", "CREATE", "ALTER",
+    "sqlite_master", "sqlite_schema", "pragma",
+    "=", "+", "@",
+    "HYPERLINK", "DDE", "CMD",
+    ";", "|", "&", "&&", "|",
+    "cd ", "chdir", "system", "exec", "eval",
+    "ignore", "forget", "disregard", "override",
+    "system prompt", "persona", "role", "instructions",
+    "\\r\\n", "\\n", "content‑type", "boundary",
+]
+
+THREAT_COUNTER: Dict[str, int] = {}
+THREAT_LOG: List[Dict[str, Any]] = []
+
 SYSTEM_INSTRUCTION = (
     "You are the RollCall AI attendance assistant. Select the appropriate registered "
     "tool for each request. Always validate extracted attendance before summarising. "
@@ -459,6 +478,23 @@ class AttendanceAgent:
         """
         req_id = request_id or str(uuid.uuid4())
         input_str = (user_input or "").strip()
+
+        # ── Real‑time Threat Radar screen ───────────────────────────────────
+        # Scan the raw input for any threat keyword; record & expose hits.
+        lowered = input_str.lower()
+        detected: List[str] = []
+        for kw in THREAT_KEYWORDS:
+            if kw.lower() in lowered:
+                detected.append(kw)
+        if detected:
+            THREAT_COUNTER[str.lower(" ".join(detected))] = THREAT_COUNTER.get(str.lower(" ".join(detected)), 0) + 1
+            THREAT_LOG.append({
+                "request_id": req_id,
+                "input": input_str,
+                "detected": detected,
+                "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+            })
+        # ----------------------------------------------------------------
 
         # 1. Determine input mode
         resolved_file = Path(file_path) if file_path else self._detect_file_in_text(input_str)
