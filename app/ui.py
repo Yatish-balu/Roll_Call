@@ -13,6 +13,7 @@ and anti-hallucination guardrails.
 from __future__ import annotations
 
 import os
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
@@ -70,10 +71,30 @@ def process_uploaded_file(
     """
     filename = uploaded_file.name
     suffix = Path(filename).suffix.lower()
-    
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read())
-        tmp_path = Path(tmp.name)
+
+    if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+        raw_bytes = uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read()
+        if not isinstance(raw_bytes, bytes) or not raw_bytes:
+            return AttendanceAgent().process_request(
+                user_input=f"Process attendance file: {filename}",
+                file_path=None,
+            ), Path(filename)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(raw_bytes)
+            tmp_path = Path(tmp.name)
+
+        # Photo processing: call the agent directly on the saved temp file.
+        pass
+    else:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            raw_bytes = uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read()
+            if isinstance(raw_bytes, bytes) and raw_bytes:
+                tmp.write(raw_bytes)
+                tmp_path = Path(tmp.name)
+            else:
+                tmp_path = Path(tmp.name)
+                tmp_path.write_bytes(b"")
 
     query = f"Process attendance file: {filename}"
     response = agent.process_request(
@@ -161,8 +182,11 @@ def commit_session_to_database(
     conn = get_connection(db_target)
     try:
         init_db(conn)
-        # Ensure session exists
-        insert_session(conn, session_id=session_id, date=date, subject=subject)
+        # Ensure session exists; ignore duplicate insert if it already exists.
+        try:
+            insert_session(conn, session_id=session_id, date=date, subject=subject)
+        except sqlite3.IntegrityError:
+            pass
         
         # Prepare attendance rows
         formatted_records = []
@@ -172,15 +196,17 @@ def commit_session_to_database(
                 "usn": str(r.get("usn", "")).strip().upper(),
                 "room_id": str(r.get("room_id", r.get("room", "LH-101"))).strip(),
                 "status": str(r.get("status", "UNREVIEWED")).strip().upper(),
-                "source": r.get("source", "UI_CONFIRMED"),
+                "source": str(r.get("source", "UI_CONFIRMED")).strip(),
                 "confidence": float(r.get("confidence", 1.0)),
             })
-        replace_session_attendance(conn, session_id, formatted_records)
-        return True, f"Successfully committed {len(formatted_records)} records for session '{session_id}'."
-    except Exception as exc:
-        return False, f"Failed to commit attendance: {exc}"
+        try:
+            rows_affected = replace_session_attendance(conn, session_id=session_id, records=formatted_records)
+            return True, f"Successfully committed {rows_affected} records for session '{session_id}'."
+        except Exception as exc:
+            return False, f"Failed to commit attendance: {exc}"
     finally:
         conn.close()
+
 
 
 def generate_export_buffers(summary_report_obj: SummaryReport) -> Tuple[bytes, bytes]:
