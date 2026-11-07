@@ -92,6 +92,18 @@ def init_db(db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH) ->
         db_target.commit()
         return db_target
 
+    # If SQLAlchemy Engine is passed
+    if hasattr(db_target, "connect") and hasattr(db_target, "begin"):
+        try:
+            from sqlalchemy import text
+            with db_target.begin() as conn:
+                statements = [s.strip() for s in POSTGRES_SCHEMA_SQL.split(";") if s.strip()]
+                for stmt in statements:
+                    conn.execute(text(stmt))
+            return db_target
+        except Exception:
+            raise
+
     # Check backend
     backend = get_backend()
     if backend == "supabase" and (db_target == DEFAULT_DB_PATH or db_target is None):
