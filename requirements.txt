@@ -6,3 +6,5 @@ reportlab
 pytest
 python-dotenv
 streamlit
+sqlalchemy
+psycopg2-binary

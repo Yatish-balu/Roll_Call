@@ -2,7 +2,7 @@
 
 Enforces read-only operations, parameterized queries, and strict validation
 against SQL injection, multi-statement executions, schema mutations, and
-unauthorized table access.
+unauthorized table access across both Supabase and SQLite backends.
 """
 
 from __future__ import annotations
@@ -14,7 +14,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from app.db.connection import DEFAULT_DB_PATH, get_connection
+from app.db.connection import (
+    DEFAULT_DB_PATH,
+    READONLY_DATABASE_URL,
+    DATABASE_URL,
+    get_backend,
+    get_connection,
+)
 
 NO_DATA_MESSAGE = "I do not have that data."
 
@@ -41,44 +47,110 @@ class QueryResult:
         return asdict(self)
 
 
+class _ReadOnlyDB:
+    """Unified read-only connection wrapper for SQLite or Supabase (SQLAlchemy)."""
+
+    def __init__(self, mode: str, conn: Any, should_close: bool = True):
+        self.mode = mode
+        self.conn = conn
+        self.should_close = should_close
+
+    def execute(self, sql: str, params: Union[Tuple[Any, ...], List[Any], Dict[str, Any]] = ()):
+        if self.mode == "sqlalchemy":
+            from sqlalchemy import text
+            if isinstance(params, (list, tuple)):
+                # Convert ? to positional or named if needed, or pass tuple
+                # In SQLAlchemy text(), :p0, :p1 can be used or sqlite positional
+                p_dict = {f"p{i}": v for i, v in enumerate(params)}
+                named_sql = sql
+                for i in range(len(params)):
+                    named_sql = re.sub(r"\?", f":p{i}", named_sql, count=1)
+                return self.conn.execute(text(named_sql), p_dict)
+            else:
+                return self.conn.execute(text(sql), params)
+        else:
+            cursor = self.conn.cursor()
+            cursor.execute(sql, tuple(params) if isinstance(params, (list, tuple)) else params)
+            return cursor
+
+    def close(self):
+        if self.should_close:
+            self.conn.close()
+
+
 def _get_readonly_conn(
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH
-) -> Tuple[sqlite3.Connection, bool]:
+    db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH
+) -> _ReadOnlyDB:
     """
-    Get a database connection. If a file path is provided, opens in read-only URI mode.
-    Returns (connection, should_close).
+    Get a read-only database connection.
+    In supabase mode: uses READONLY_DATABASE_URL (or DATABASE_URL).
+    In sqlite mode: opens the file strictly in read-only URI mode (?mode=ro).
     """
     if isinstance(db_target, sqlite3.Connection):
-        return db_target, False
+        return _ReadOnlyDB("sqlite", db_target, should_close=False)
 
-    db_path = str(db_target)
-    if db_path == ":memory:":
-        conn = get_connection(db_path)
-        return conn, True
+    # Check backend first if default or supabase target
+    backend = get_backend()
+    if backend == "supabase" and (db_target == DEFAULT_DB_PATH or db_target == "default"):
+        ro_url = os.getenv("READONLY_DATABASE_URL") or os.getenv("DATABASE_URL", DATABASE_URL)
+        if not ro_url:
+            raise ConnectionError("Database connection failed: READONLY_DATABASE_URL or DATABASE_URL not configured.")
+        try:
+            from sqlalchemy import create_engine
+            if ro_url.startswith("postgres://"):
+                ro_url = ro_url.replace("postgres://", "postgresql://", 1)
+            engine = create_engine(ro_url, pool_pre_ping=True)
+            conn = engine.connect()
+            return _ReadOnlyDB("sqlalchemy", conn, should_close=True)
+        except Exception as exc:
+            raise ConnectionError(f"Database connection failed: {exc}")
 
-    resolved_path = Path(db_path).resolve()
+    # Check if a custom non-default sqlite path or :memory: was passed
+    if isinstance(db_target, str) and db_target != DEFAULT_DB_PATH and db_target != "default":
+        if db_target == ":memory:":
+            conn = get_connection(db_target)
+            return _ReadOnlyDB("sqlite", conn, should_close=True)
+        resolved = Path(db_target).resolve()
+        if not resolved.exists():
+            raise FileNotFoundError(f"Database file not found: {db_target}")
+        uri_path = f"file:{resolved.as_posix()}?mode=ro"
+        try:
+            conn = sqlite3.connect(uri_path, uri=True)
+        except sqlite3.OperationalError:
+            conn = sqlite3.connect(str(resolved))
+        conn.row_factory = sqlite3.Row
+        return _ReadOnlyDB("sqlite", conn, should_close=True)
+
+    # SQLite default path
+    resolved_path = Path(DEFAULT_DB_PATH).resolve()
     if not resolved_path.exists():
-        raise FileNotFoundError(f"Database file not found: {db_path}")
+        raise FileNotFoundError(f"Database file not found: {DEFAULT_DB_PATH}")
 
-    # Use URI mode=ro for strict OS/SQLite-level read-only protection
     uri_path = f"file:{resolved_path.as_posix()}?mode=ro"
     try:
         conn = sqlite3.connect(uri_path, uri=True)
     except sqlite3.OperationalError:
-        # Fallback to standard connect if URI fails
         conn = sqlite3.connect(str(resolved_path))
     conn.row_factory = sqlite3.Row
-    return conn, True
+    return _ReadOnlyDB("sqlite", conn, should_close=True)
 
 
-def _rows_to_dicts(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
-    return [dict(row) for row in rows]
+def _rows_to_dicts(rows: Any) -> List[Dict[str, Any]]:
+    results = []
+    for r in rows:
+        if isinstance(r, dict):
+            results.append(r)
+        elif hasattr(r, "_mapping"):
+            results.append(dict(r._mapping))
+        else:
+            results.append(dict(r))
+    return results
 
 
 def validate_read_only_sql(sql: str) -> None:
     """
     Validate that an SQL string is strictly a single, read-only SELECT statement
-    querying only allowed tables.
+    querying only allowed tables (students, rooms, sessions, attendance).
     """
     if not sql or not isinstance(sql, str):
         raise ValueError("Query must be a non-empty string.")
@@ -95,12 +167,12 @@ def validate_read_only_sql(sql: str) -> None:
     if len(statements) > 1:
         raise ValueError("Multiple SQL statements are not permitted.")
 
-    # Must start with SELECT or WITH (for CTE read queries)
+    # Must start with SELECT only (one SELECT statement)
     single_stmt = statements[0]
-    if not re.match(r"^(SELECT|WITH)\b", single_stmt, re.IGNORECASE):
-        raise ValueError("Only SELECT or WITH (read-only) queries are allowed.")
+    if not re.match(r"^SELECT\b", single_stmt, re.IGNORECASE):
+        raise ValueError("Only a single SELECT query is allowed.")
 
-    # Disallow mutation keywords anywhere in statement
+    # Disallow mutation or administrative keywords
     if DISALLOWED_SQL_KEYWORDS.search(single_stmt):
         match = DISALLOWED_SQL_KEYWORDS.search(single_stmt)
         disallowed = match.group(0) if match else "MUTATION"
@@ -109,6 +181,9 @@ def validate_read_only_sql(sql: str) -> None:
     # Extract referenced table names from FROM / JOIN clauses
     table_pattern = re.compile(r"\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)", re.IGNORECASE)
     tables_found = set(table_pattern.findall(single_stmt))
+    if not tables_found:
+        raise ValueError("Query must reference at least one valid table.")
+
     for tbl in tables_found:
         if tbl.lower() not in ALLOWED_TABLES:
             raise ValueError(f"Access to table '{tbl}' is not permitted. Allowed tables: {sorted(ALLOWED_TABLES)}")
@@ -117,7 +192,7 @@ def validate_read_only_sql(sql: str) -> None:
 def safe_sql_query(
     sql: str,
     params: Union[Tuple[Any, ...], List[Any]] = (),
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH,
+    db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     limit: int = 500,
 ) -> QueryResult:
     """
@@ -125,11 +200,13 @@ def safe_sql_query(
     """
     validate_read_only_sql(sql)
 
-    conn, should_close = _get_readonly_conn(db_target)
+    ro_db = _get_readonly_conn(db_target)
     try:
-        cursor = conn.cursor()
-        cursor.execute(sql, tuple(params))
-        rows = cursor.fetchmany(max(1, limit))
+        res = ro_db.execute(sql, params)
+        if ro_db.mode == "sqlalchemy":
+            rows = res.fetchmany(max(1, limit))
+        else:
+            rows = res.fetchmany(max(1, limit))
         results = _rows_to_dicts(rows)
         found = len(results) > 0
         message = f"Found {len(results)} records." if found else NO_DATA_MESSAGE
@@ -149,8 +226,7 @@ def safe_sql_query(
             metadata={"query": sql, "error": str(exc)},
         )
     finally:
-        if should_close:
-            conn.close()
+        ro_db.close()
 
 
 def query_attendance(
@@ -160,13 +236,13 @@ def query_attendance(
     usn: Optional[str] = None,
     status: Optional[str] = None,
     limit: int = 500,
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH,
+    db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
 ) -> QueryResult:
     """
     Query attendance records with optional filtering by session, room, branch, USN, and status.
     Returns structured results joining student and room metadata.
     """
-    conn, should_close = _get_readonly_conn(db_target)
+    ro_db = _get_readonly_conn(db_target)
     try:
         clauses = []
         params: List[Any] = []
@@ -208,13 +284,12 @@ def query_attendance(
         LEFT JOIN rooms rm ON a.room_id = rm.room_id
         {where_sql}
         ORDER BY a.session_id ASC, a.room_id ASC, stu.name ASC
-        LIMIT ?
         """
-        params.append(max(1, limit))
-
-        cursor = conn.cursor()
-        cursor.execute(sql, tuple(params))
-        records = _rows_to_dicts(cursor.fetchall())
+        res = ro_db.execute(sql, tuple(params))
+        if ro_db.mode == "sqlalchemy":
+            records = _rows_to_dicts(res.fetchmany(max(1, limit)))
+        else:
+            records = _rows_to_dicts(res.fetchmany(max(1, limit)))
         found = len(records) > 0
 
         return QueryResult(
@@ -239,8 +314,7 @@ def query_attendance(
             metadata={"error": str(exc)},
         )
     finally:
-        if should_close:
-            conn.close()
+        ro_db.close()
 
 
 def query_students(
@@ -248,12 +322,10 @@ def query_students(
     branch: Optional[str] = None,
     name: Optional[str] = None,
     limit: int = 500,
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH,
+    db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
 ) -> QueryResult:
-    """
-    Query student records with optional filters.
-    """
-    conn, should_close = _get_readonly_conn(db_target)
+    """Query student directory with optional filters."""
+    ro_db = _get_readonly_conn(db_target)
     try:
         clauses = []
         params: List[Any] = []
@@ -265,23 +337,21 @@ def query_students(
             clauses.append("LOWER(branch) = LOWER(?)")
             params.append(str(branch).strip())
         if name:
-            clauses.append("name LIKE ?")
+            clauses.append("LOWER(name) LIKE LOWER(?)")
             params.append(f"%{str(name).strip()}%")
 
         where_sql = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-        sql = f"SELECT usn, name, branch FROM students {where_sql} ORDER BY usn ASC LIMIT ?"
-        params.append(max(1, limit))
+        sql = f"SELECT usn, name, branch FROM students {where_sql} ORDER BY usn ASC"
 
-        cursor = conn.cursor()
-        cursor.execute(sql, tuple(params))
-        records = _rows_to_dicts(cursor.fetchall())
+        res = ro_db.execute(sql, tuple(params))
+        records = _rows_to_dicts(res.fetchmany(max(1, limit)))
         found = len(records) > 0
 
         return QueryResult(
             found=found,
             data=records,
             total_count=len(records),
-            message=f"Found {len(records)} student records." if found else NO_DATA_MESSAGE,
+            message=f"Found {len(records)} students." if found else NO_DATA_MESSAGE,
             metadata={"usn": usn, "branch": branch, "name": name},
         )
     except Exception as exc:
@@ -293,70 +363,63 @@ def query_students(
             metadata={"error": str(exc)},
         )
     finally:
-        if should_close:
-            conn.close()
+        ro_db.close()
 
 
 def query_session_stats(
     session_id: str,
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH,
+    db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
 ) -> QueryResult:
-    """
-    Calculate deterministic summary statistics for a given session.
-    Confirmed attendance percentage is strictly: PRESENT / (PRESENT + ABSENT) * 100.
-    Handles zero denominator without division errors.
-    Returns NO_DATA_MESSAGE if session or session attendance does not exist.
-    """
-    if not session_id or not str(session_id).strip():
+    """Calculate attendance statistics for a given session."""
+    clean_id = str(session_id).strip()
+    if not clean_id:
         return QueryResult(
             found=False,
             data=[],
             total_count=0,
-            message="session_id is required.",
-            metadata={"session_id": session_id},
+            message="session_id cannot be empty.",
+            metadata={},
         )
 
-    clean_id = str(session_id).strip()
-    conn, should_close = _get_readonly_conn(db_target)
+    ro_db = _get_readonly_conn(db_target)
     try:
-        # Check session metadata
-        sess_cursor = conn.cursor()
-        sess_cursor.execute(
-            "SELECT session_id, date, subject FROM sessions WHERE session_id = ?",
-            (clean_id,),
-        )
-        sess_row = sess_cursor.fetchone()
-        if not sess_row:
+        sql_session = "SELECT session_id, date, subject FROM sessions WHERE session_id = ?"
+        res = ro_db.execute(sql_session, (clean_id,))
+        row = res.fetchone()
+        if not row:
             return QueryResult(
                 found=False,
                 data=[],
                 total_count=0,
                 message=NO_DATA_MESSAGE,
-                metadata={"session_id": clean_id, "reason": "session not found"},
+                metadata={"session_id": clean_id, "reason": "Session does not exist"},
             )
 
-        # Count attendance states
-        att_cursor = conn.cursor()
-        att_cursor.execute(
-            """
-            SELECT
-                status,
-                COUNT(*) as count
-            FROM attendance
-            WHERE session_id = ?
-            GROUP BY status
-            """,
-            (clean_id,),
-        )
-        counts = {row["status"]: row["count"] for row in att_cursor.fetchall()}
+        sess_dict = dict(row._mapping) if hasattr(row, "_mapping") else dict(row)
 
-        present = counts.get("PRESENT", 0)
-        absent = counts.get("ABSENT", 0)
-        pending = counts.get("PENDING", 0)
-        unreviewed = counts.get("UNREVIEWED", 0)
-        unresolved = pending + unreviewed
-        confirmed = present + absent
-        total = present + absent + pending + unreviewed
+        sql_stats = """
+        SELECT
+            status,
+            COUNT(*) AS count
+        FROM attendance
+        WHERE session_id = ?
+        GROUP BY status
+        """
+        res_stats = ro_db.execute(sql_stats, (clean_id,))
+        status_rows = res_stats.fetchall()
+        status_counts: Dict[str, int] = {
+            "PRESENT": 0,
+            "ABSENT": 0,
+            "PENDING": 0,
+            "UNREVIEWED": 0,
+        }
+        total = 0
+        for r in status_rows:
+            mapping = dict(r._mapping) if hasattr(r, "_mapping") else dict(r)
+            st = str(mapping["status"]).upper()
+            cnt = int(mapping["count"])
+            status_counts[st] = status_counts.get(st, 0) + cnt
+            total += cnt
 
         if total == 0:
             return QueryResult(
@@ -364,43 +427,53 @@ def query_session_stats(
                 data=[],
                 total_count=0,
                 message=NO_DATA_MESSAGE,
-                metadata={"session_id": clean_id, "reason": "no attendance recorded for session"},
+                metadata={"session_id": clean_id, "reason": "No attendance records found"},
             )
 
-        confirmed_percentage = round((present / confirmed * 100), 2) if confirmed > 0 else 0.0
+        present = status_counts.get("PRESENT", 0)
+        absent = status_counts.get("ABSENT", 0)
+        pending = status_counts.get("PENDING", 0)
+        unreviewed = status_counts.get("UNREVIEWED", 0)
+        confirmed = present + absent
+        confirmed_percentage = round((present / confirmed) * 100, 2) if confirmed > 0 else 0.0
+        attendance_percentage = round((present / total) * 100, 2) if total > 0 else 0.0
 
-        stats_dict = {
+        stats_payload = {
             "session_id": clean_id,
-            "date": sess_row["date"],
-            "subject": sess_row["subject"],
-            "present": present,
-            "absent": absent,
-            "pending": pending,
-            "unreviewed": unreviewed,
-            "unresolved": unresolved,
-            "confirmed": confirmed,
+            "date": sess_dict.get("date"),
+            "subject": sess_dict.get("subject"),
             "total": total,
+            "total_students": total,
+            "present": present,
+            "present_count": present,
+            "absent": absent,
+            "absent_count": absent,
+            "pending": pending,
+            "pending_count": pending,
+            "unreviewed": unreviewed,
+            "unreviewed_count": unreviewed,
+            "confirmed": confirmed,
             "confirmed_percentage": confirmed_percentage,
+            "attendance_percentage": attendance_percentage,
         }
 
         return QueryResult(
             found=True,
-            data=[stats_dict],
+            data=[stats_payload],
             total_count=1,
-            message=f"Session {clean_id}: Present={present}, Absent={absent}, Total={total}, Attendance={confirmed_percentage}%.",
-            metadata=stats_dict,
+            message=f"Statistics calculated for session '{clean_id}'. Attendance rate: {attendance_percentage}%.",
+            metadata=stats_payload,
         )
     except Exception as exc:
         return QueryResult(
             found=False,
             data=[],
             total_count=0,
-            message=f"Error computing session stats: {exc}",
-            metadata={"session_id": clean_id, "error": str(exc)},
+            message=f"Error calculating session stats: {exc}",
+            metadata={"error": str(exc)},
         )
     finally:
-        if should_close:
-            conn.close()
+        ro_db.close()
 
 
 def query_absentees(
@@ -408,11 +481,9 @@ def query_absentees(
     room_id: Optional[str] = None,
     branch: Optional[str] = None,
     limit: int = 500,
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH,
+    db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
 ) -> QueryResult:
-    """
-    Query all absent students for a given session, room, or branch.
-    """
+    """Retrieve absent students for a given session or room/branch combination."""
     return query_attendance(
         session_id=session_id,
         room_id=room_id,
@@ -424,8 +495,7 @@ def query_absentees(
 
 
 def query_tool(
-    query_type: str,
-    *,
+    query_type: str = "attendance",
     session_id: Optional[str] = None,
     room_id: Optional[str] = None,
     branch: Optional[str] = None,
@@ -434,19 +504,10 @@ def query_tool(
     sql: Optional[str] = None,
     params: Optional[Union[Tuple[Any, ...], List[Any]]] = None,
     limit: int = 500,
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH,
+    db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     **kwargs: Any,
 ) -> QueryResult:
-    """
-    Unified dispatcher for read-only database query operations.
-
-    Supported query_type values:
-    - 'attendance': Query attendance records with filters.
-    - 'session_stats': Calculate stats (present, absent, percentage) for session_id.
-    - 'absentees': List absent students.
-    - 'students': Query student master directory.
-    - 'sql': Execute validated read-only SQL SELECT statement.
-    """
+    """Universal dispatcher for database query operations."""
     clean_type = str(query_type).strip().lower()
 
     if clean_type in ("attendance", "records"):

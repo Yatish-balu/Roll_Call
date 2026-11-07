@@ -1,6 +1,16 @@
 """Database package initialization and unified exports."""
 
-from app.db.connection import DEFAULT_DB_PATH, get_connection, get_db_cursor
+from app.db.connection import (
+    DEFAULT_DB_PATH,
+    DB_BACKEND,
+    DATABASE_URL,
+    READONLY_DATABASE_URL,
+    SQLITE_PATH,
+    get_backend,
+    get_engine,
+    get_connection,
+    get_db_cursor,
+)
 from app.db.schema import SCHEMA_SQL, init_db
 from app.db.crud import (
     # Students
