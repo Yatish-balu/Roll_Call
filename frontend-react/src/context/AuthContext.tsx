@@ -19,6 +19,8 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     });
 
     if (getAuthSession().token) {
+      setIsLoading(false);
+      void silentRefreshOnStartup();
       return unsubscribe;
     }
 

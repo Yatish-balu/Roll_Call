@@ -109,8 +109,7 @@ export class ApiClient {
 
   public getEffectiveBaseUrl(): string {
     if (typeof window !== "undefined") {
-      const host = window.location.hostname || "localhost";
-      return `http://${host}:8000`;
+      return "";
     }
     return "http://127.0.0.1:8000";
   }

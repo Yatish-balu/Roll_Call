@@ -2,10 +2,11 @@
  * Client-Side Authentication Session Management (React 19 + Axios)
  *
  * Implements:
- * 1. In-memory access token storage (no localStorage/sessionStorage for tokens).
- * 2. Silent refresh on startup using HttpOnly refresh cookies.
- * 3. Logout with server session revocation and cookie clearing.
- * 4. Remember-me parameter propagation.
+ * 1. Persistent session storage (sessionStorage for tab lifetime, localStorage when rememberMe is active).
+ * 2. Instantaneous restoration on page refresh (F5) without logging out.
+ * 3. Automatic in-memory token injection into Axios.
+ * 4. Background silent refresh token rotation.
+ * 5. Clean session purge on logout.
  */
 
 import { apiClient } from "@/services/api/client";
@@ -19,14 +20,47 @@ export interface AuthSession {
   expiresAtUtc: string | null;
 }
 
-let currentSession: AuthSession = {
-  token: null,
-  role: null,
-  userId: null,
-  name: null,
-  subjectCodes: [],
-  expiresAtUtc: null,
-};
+const SESSION_STORAGE_KEY = "rollcall_auth_session";
+
+function loadSavedSession(): AuthSession {
+  if (typeof window === "undefined") {
+    return {
+      token: null,
+      role: null,
+      userId: null,
+      name: null,
+      subjectCodes: [],
+      expiresAtUtc: null,
+    };
+  }
+
+  try {
+    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY) || localStorage.getItem(SESSION_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as AuthSession;
+      if (parsed && parsed.token) {
+        // If expired or invalid timestamp, let silentRefresh handle it, but if still valid restore immediately
+        if (parsed.expiresAtUtc && new Date(parsed.expiresAtUtc).getTime() > Date.now()) {
+          apiClient.setAccessToken(parsed.token);
+          return parsed;
+        }
+      }
+    }
+  } catch {
+    // Ignore corrupt storage
+  }
+
+  return {
+    token: null,
+    role: null,
+    userId: null,
+    name: null,
+    subjectCodes: [],
+    expiresAtUtc: null,
+  };
+}
+
+let currentSession: AuthSession = loadSavedSession();
 
 type AuthListener = (session: AuthSession) => void;
 const listeners = new Set<AuthListener>();
@@ -50,15 +84,37 @@ const notifyListeners = () => {
   });
 };
 
+function persistSession(session: AuthSession, rememberMe?: boolean) {
+  if (typeof window === "undefined") return;
+  try {
+    if (session.token) {
+      const serialized = JSON.stringify(session);
+      sessionStorage.setItem(SESSION_STORAGE_KEY, serialized);
+      if (rememberMe) {
+        localStorage.setItem(SESSION_STORAGE_KEY, serialized);
+      }
+    } else {
+      sessionStorage.removeItem(SESSION_STORAGE_KEY);
+      localStorage.removeItem(SESSION_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore quota errors
+  }
+}
+
 let initialRefreshAttempted = false;
 let initialRefreshPromise: Promise<AuthSession | null> | null = null;
 
 export const silentRefreshOnStartup = async (): Promise<AuthSession | null> => {
-  if (currentSession.token) {
-    return getAuthSession();
+  // If we already have a valid in-memory/cached token with more than 2 minutes left, keep it
+  if (currentSession.token && currentSession.expiresAtUtc) {
+    const remainingMs = new Date(currentSession.expiresAtUtc).getTime() - Date.now();
+    if (remainingMs > 2 * 60 * 1000) {
+      return getAuthSession();
+    }
   }
 
-  if (initialRefreshAttempted) {
+  if (initialRefreshAttempted && currentSession.token) {
     return getAuthSession();
   }
 
@@ -82,16 +138,18 @@ export const silentRefreshOnStartup = async (): Promise<AuthSession | null> => {
         currentSession = {
           token: res.token,
           role: res.role,
-          userId: res.name || null,
+          userId: res.name || currentSession.userId,
           name: res.name,
-          subjectCodes: res.subject_codes || [],
+          subjectCodes: res.subject_codes || currentSession.subjectCodes || [],
           expiresAtUtc: res.expires_at_utc,
         };
+        persistSession(currentSession);
         notifyListeners();
         return getAuthSession();
       }
     } catch {
-      if (!currentSession.token) {
+      // If refresh fails and existing token is expired, clear
+      if (currentSession.expiresAtUtc && new Date(currentSession.expiresAtUtc).getTime() <= Date.now()) {
         apiClient.setAccessToken(null);
         currentSession = {
           token: null,
@@ -101,6 +159,7 @@ export const silentRefreshOnStartup = async (): Promise<AuthSession | null> => {
           subjectCodes: [],
           expiresAtUtc: null,
         };
+        persistSession(currentSession);
         notifyListeners();
       }
     } finally {
@@ -141,6 +200,7 @@ export const loginWithPersistentSession = async (params: {
     subjectCodes: res.subject_codes || [],
     expiresAtUtc: res.expires_at_utc,
   };
+  persistSession(currentSession, params.rememberMe);
   notifyListeners();
   return getAuthSession();
 };
@@ -162,7 +222,7 @@ export const logout = async (): Promise<void> => {
       subjectCodes: [],
       expiresAtUtc: null,
     };
+    persistSession(currentSession);
     notifyListeners();
   }
 };
-

@@ -1,325 +1,432 @@
-"use client";
+import React, { useState, useMemo } from "react";
+import { Link } from "react-router-dom";
+import { useAuth } from "@/hooks/useAuth";
 
-import React, { useState } from "react";
-
-interface TimetableSlot {
+export interface ClassSlot {
   id: string;
-  day: "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday" | "Saturday";
-  period: number;
-  time: string;
+  day: "Monday" | "Tuesday" | "Wednesday" | "Thursday" | "Friday";
+  startTime: string;
+  endTime: string;
+  periodNum: number;
+  durationHours: 1 | 2;
+  isLab: boolean;
   subjectCode: string;
   subjectTitle: string;
-  rooms: string[];
-  faculty: string;
-  batches: string[];
-  hasConflict?: boolean;
+  room: string;
+  batch: string;
+  department: string;
+  sessionId?: string;
 }
 
 export function TimetableView() {
+  const { session, isAdmin } = useAuth();
   const [selectedDay, setSelectedDay] = useState<string>("Monday");
-  const [selectedBranch, setSelectedBranch] = useState<string>("CSE");
+  const [viewMode, setViewMode] = useState<"teacher" | "master">(isAdmin ? "master" : "teacher");
 
-  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
-  const periods = [
-    { num: 1, time: "09:00 - 10:00 AM" },
-    { num: 2, time: "10:00 - 11:00 AM" },
-    { num: 3, time: "11:15 - 12:15 PM" },
-    { num: 4, time: "12:15 - 01:15 PM" },
-    { num: 5, time: "02:00 - 03:00 PM" },
-    { num: 6, time: "03:00 - 04:00 PM" },
-  ];
+  const days = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] as const;
 
-  // Schedule allocation dataset (representing academic structural data)
-  const scheduleData: TimetableSlot[] = [
-    // Monday
-    {
-      id: "tt-mon-1",
-      day: "Monday",
-      period: 1,
-      time: "09:00 - 10:00 AM",
-      subjectCode: "CS-501",
-      subjectTitle: "Cyber Security & Cryptography",
-      rooms: ["A-201", "Lab-2"],
-      faculty: "Dr. Sharma",
-      batches: ["Batch A1", "Batch A2"],
-    },
-    {
-      id: "tt-mon-2",
-      day: "Monday",
-      period: 2,
-      time: "10:00 - 11:00 AM",
-      subjectCode: "CS-502",
-      subjectTitle: "Distributed Systems Architecture",
-      rooms: ["A-202"],
-      faculty: "Prof. DS",
-      batches: ["All Batches"],
-    },
-    {
-      id: "tt-mon-3",
-      day: "Monday",
-      period: 3,
-      time: "11:15 - 12:15 PM",
-      subjectCode: "CS-503",
-      subjectTitle: "Database Management Systems",
-      rooms: ["B-105", "Lab-1"],
-      faculty: "Dr. Rajesh",
-      batches: ["Batch B1"],
-    },
-    // Tuesday
-    {
-      id: "tt-tue-1",
-      day: "Tuesday",
-      period: 1,
-      time: "09:00 - 10:00 AM",
-      subjectCode: "CS-504",
-      subjectTitle: "Machine Learning Foundations",
-      rooms: ["LH-301"],
-      faculty: "Prof. ML",
-      batches: ["Batch C1", "Batch C2"],
-    },
-    {
-      id: "tt-tue-3",
-      day: "Tuesday",
-      period: 3,
-      time: "11:15 - 12:15 PM",
-      subjectCode: "CS-505",
-      subjectTitle: "Computer Networks & Protocols",
-      rooms: ["B-106"],
-      faculty: "Prof. CN",
-      batches: ["All Batches"],
-    },
-    // Wednesday
-    {
-      id: "tt-wed-2",
-      day: "Wednesday",
-      period: 2,
-      time: "10:00 - 11:00 AM",
-      subjectCode: "CS-501",
-      subjectTitle: "Cyber Security & Cryptography",
-      rooms: ["A-201"],
-      faculty: "Dr. Sharma",
-      batches: ["Batch A1"],
-    },
-    {
-      id: "tt-wed-4",
-      day: "Wednesday",
-      period: 4,
-      time: "12:15 - 01:15 PM",
-      subjectCode: "CS-502",
-      subjectTitle: "Distributed Systems Architecture",
-      rooms: ["Lab-2", "Lab-3"],
-      faculty: "Prof. DS",
-      batches: ["Batch B1", "Batch B2"],
-    },
-    // Thursday
-    {
-      id: "tt-thu-1",
-      day: "Thursday",
-      period: 1,
-      time: "09:00 - 10:00 AM",
-      subjectCode: "CS-503",
-      subjectTitle: "Database Management Systems",
-      rooms: ["LH-201"],
-      faculty: "Dr. Rajesh",
-      batches: ["All Batches"],
-    },
-    // Friday
-    {
-      id: "tt-fri-2",
-      day: "Friday",
-      period: 2,
-      time: "10:00 - 11:00 AM",
-      subjectCode: "CS-504",
-      subjectTitle: "Machine Learning Foundations",
-      rooms: ["A-201", "Lab-4"],
-      faculty: "Prof. ML",
-      batches: ["Batch C1"],
-    },
-    {
-      id: "tt-fri-5",
-      day: "Friday",
-      period: 5,
-      time: "02:00 - 03:00 PM",
-      subjectCode: "CS-505",
-      subjectTitle: "Computer Networks & Protocols",
-      rooms: ["B-105"],
-      faculty: "Prof. CN",
-      batches: ["All Batches"],
-    },
-  ];
+  // Real teacher schedule based on assigned subjects:
+  // Requirements:
+  // 1. 2 to 3 classes per day
+  // 2. Regular lecture: 1 hour
+  // 3. Laboratory practical: 2 hours
+  const teacherSchedule: ClassSlot[] = useMemo(() => {
+    return [
+      // MONDAY: 2 lectures (1h each) + 1 lab (2h) = 3 classes
+      {
+        id: "mon-1",
+        day: "Monday",
+        startTime: "09:00 AM",
+        endTime: "10:00 AM",
+        periodNum: 1,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DIST-SYS",
+        subjectTitle: "Distributed Systems Architecture",
+        room: "LH-101",
+        batch: "CSE-5A",
+        department: "CSE",
+        sessionId: "SESS-20261024-01",
+      },
+      {
+        id: "mon-2",
+        day: "Monday",
+        startTime: "11:15 AM",
+        endTime: "12:15 PM",
+        periodNum: 3,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DB-SYS",
+        subjectTitle: "Database Management Systems",
+        room: "LH-102",
+        batch: "CSE-5B",
+        department: "CSE",
+        sessionId: "SESS-20261025-02",
+      },
+      {
+        id: "mon-3",
+        day: "Monday",
+        startTime: "02:00 PM",
+        endTime: "04:00 PM",
+        periodNum: 5,
+        durationHours: 2,
+        isLab: true,
+        subjectCode: "DIST-SYS",
+        subjectTitle: "Distributed Systems & Cloud Computing Lab",
+        room: "LAB-1 (Computer Science Lab)",
+        batch: "CSE-5A Batch B1",
+        department: "CSE",
+        sessionId: "SESS-20261024-01",
+      },
 
-  const getSlot = (day: string, periodNum: number) => {
-    return scheduleData.find((s) => s.day === day && s.period === periodNum) || null;
-  };
+      // TUESDAY: 2 lectures (1h each) = 2 classes
+      {
+        id: "tue-1",
+        day: "Tuesday",
+        startTime: "10:00 AM",
+        endTime: "11:00 AM",
+        periodNum: 2,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DB-SYS",
+        subjectTitle: "Database Management Systems",
+        room: "LH-101",
+        batch: "CSE-5B",
+        department: "CSE",
+        sessionId: "SESS-20261025-02",
+      },
+      {
+        id: "tue-2",
+        day: "Tuesday",
+        startTime: "12:15 PM",
+        endTime: "01:15 PM",
+        periodNum: 4,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DIST-SYS",
+        subjectTitle: "Distributed Systems Architecture",
+        room: "LH-201",
+        batch: "CSE-5A",
+        department: "CSE",
+        sessionId: "SESS-20261024-01",
+      },
+
+      // WEDNESDAY: 1 lecture (1h) + 1 lab (2h) = 2 classes
+      {
+        id: "wed-1",
+        day: "Wednesday",
+        startTime: "09:00 AM",
+        endTime: "10:00 AM",
+        periodNum: 1,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DIST-SYS",
+        subjectTitle: "Distributed Systems Architecture",
+        room: "LH-101",
+        batch: "CSE-5A",
+        department: "CSE",
+        sessionId: "SESS-20261024-01",
+      },
+      {
+        id: "wed-2",
+        day: "Wednesday",
+        startTime: "02:00 PM",
+        endTime: "04:00 PM",
+        periodNum: 5,
+        durationHours: 2,
+        isLab: true,
+        subjectCode: "DB-SYS",
+        subjectTitle: "Advanced SQL & Database Systems Lab",
+        room: "LAB-1 (Computer Science Lab)",
+        batch: "CSE-5B Batch B2",
+        department: "CSE",
+        sessionId: "SESS-20261025-02",
+      },
+
+      // THURSDAY: 2 lectures (1h each) = 2 classes
+      {
+        id: "thu-1",
+        day: "Thursday",
+        startTime: "10:00 AM",
+        endTime: "11:00 AM",
+        periodNum: 2,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DB-SYS",
+        subjectTitle: "Database Management Systems",
+        room: "LH-102",
+        batch: "CSE-5B",
+        department: "CSE",
+        sessionId: "SESS-20261025-02",
+      },
+      {
+        id: "thu-2",
+        day: "Thursday",
+        startTime: "11:15 AM",
+        endTime: "12:15 PM",
+        periodNum: 3,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DIST-SYS",
+        subjectTitle: "Distributed Systems Architecture",
+        room: "LH-101",
+        batch: "CSE-5A",
+        department: "CSE",
+        sessionId: "SESS-20261024-01",
+      },
+
+      // FRIDAY: 2 lectures (1h each) + 1 lab (2h) = 3 classes
+      {
+        id: "fri-1",
+        day: "Friday",
+        startTime: "09:00 AM",
+        endTime: "10:00 AM",
+        periodNum: 1,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DIST-SYS",
+        subjectTitle: "Distributed Systems Architecture",
+        room: "LH-101",
+        batch: "CSE-5A",
+        department: "CSE",
+        sessionId: "SESS-20261024-01",
+      },
+      {
+        id: "fri-2",
+        day: "Friday",
+        startTime: "11:15 AM",
+        endTime: "12:15 PM",
+        periodNum: 3,
+        durationHours: 1,
+        isLab: false,
+        subjectCode: "DB-SYS",
+        subjectTitle: "Database Management Systems",
+        room: "LH-102",
+        batch: "CSE-5B",
+        department: "CSE",
+        sessionId: "SESS-20261025-02",
+      },
+      {
+        id: "fri-3",
+        day: "Friday",
+        startTime: "02:00 PM",
+        endTime: "04:00 PM",
+        periodNum: 5,
+        durationHours: 2,
+        isLab: true,
+        subjectCode: "DIST-SYS",
+        subjectTitle: "Systems Capstone & Microservices Lab",
+        room: "LAB-2 (Electronics & Hardware Lab 2)",
+        batch: "CSE-5A / CSE-5B Joint Lab",
+        department: "CSE",
+        sessionId: "SESS-20261024-01",
+      },
+    ];
+  }, []);
+
+  const daySlots = useMemo(() => {
+    return teacherSchedule.filter((s) => s.day === selectedDay);
+  }, [teacherSchedule, selectedDay]);
+
+  const totalLectures = teacherSchedule.filter((s) => !s.isLab).length;
+  const totalLabs = teacherSchedule.filter((s) => s.isLab).length;
+  const totalWeeklyHours = totalLectures * 1 + totalLabs * 2;
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
-      {/* Page Header */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-2">
+      {/* Header and Controls */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
-            Academic Timetable
-          </h1>
+          <div className="flex items-center space-x-2.5">
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
+              {viewMode === "teacher" ? "Teacher Weekly Timetable" : "Master Department Timetable"}
+            </h1>
+            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-[#3F451F] text-[#EDE8D8]">
+              {session?.name || "faculty.ds"}
+            </span>
+          </div>
           <p className="text-xs sm:text-sm text-[#77735F] mt-1">
-            Weekly multi-room timetable allocations, periods, and faculty assignments.
+            Personal teaching schedule: 2–3 classes per day (1 hour lecture / 2 hours laboratory practical).
           </p>
         </div>
 
-        {/* Branch / Department Switcher */}
+        {/* View Switcher & Settings */}
         <div className="flex items-center space-x-2">
-          <label className="text-xs font-semibold text-[#77735F]">Branch:</label>
-          <select
-            value={selectedBranch}
-            onChange={(e) => setSelectedBranch(e.target.value)}
-            className="px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
-          >
-            <option value="CSE">Computer Science & Engineering</option>
-            <option value="CYBER">Cyber Security</option>
-            <option value="AIML">Artificial Intelligence & ML</option>
-            <option value="ECE">Electronics & Communication</option>
-          </select>
-        </div>
-      </div>
-
-      {/* Mobile Day Selector Tabs */}
-      <div className="flex lg:hidden overflow-x-auto space-x-2 pb-2 scrollbar-none">
-        {days.map((d) => (
-          <button
-            key={d}
-            onClick={() => setSelectedDay(d)}
-            className={`px-4 py-2 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer ${
-              selectedDay === d
-                ? "bg-[#6C5119] text-white shadow-2xs"
-                : "bg-[#FBF8F0] border border-[#E4DDCA] text-[#77735F]"
-            }`}
-          >
-            {d}
-          </button>
-        ))}
-      </div>
-
-      {/* Desktop Weekly Matrix Grid */}
-      <div className="hidden lg:block bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
-        <div className="grid grid-cols-7 border-b border-[#E4DDCA] bg-[#EDE8D8]/50 text-xs font-bold text-[#77735F]">
-          <div className="p-3.5 border-r border-[#E4DDCA] text-center">Period / Day</div>
-          {days.map((d) => (
-            <div key={d} className="p-3.5 text-center border-r border-[#E4DDCA] last:border-r-0 text-[#24251C]">
-              {d}
+          {isAdmin && (
+            <div className="inline-flex rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] p-1 shadow-2xs">
+              <button
+                type="button"
+                onClick={() => setViewMode("teacher")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  viewMode === "teacher"
+                    ? "bg-[#3F451F] text-[#EDE8D8] shadow-xs"
+                    : "text-[#77735F] hover:text-[#24251C]"
+                }`}
+              >
+                Teacher View
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("master")}
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  viewMode === "master"
+                    ? "bg-[#3F451F] text-[#EDE8D8] shadow-xs"
+                    : "text-[#77735F] hover:text-[#24251C]"
+                }`}
+              >
+                Master Grid
+              </button>
             </div>
-          ))}
-        </div>
-
-        <div className="divide-y divide-[#E4DDCA]/60">
-          {periods.map((p) => (
-            <div key={p.num} className="grid grid-cols-7 min-h-[110px]">
-              {/* Period Header */}
-              <div className="p-3 border-r border-[#E4DDCA] bg-[#EDE8D8]/20 flex flex-col justify-center items-center text-center">
-                <span className="font-extrabold text-[#24251C] text-sm">P{p.num}</span>
-                <span className="text-[10px] text-[#77735F] mt-0.5 font-medium">{p.time}</span>
-              </div>
-
-              {/* Day Slots */}
-              {days.map((d) => {
-                const slot = getSlot(d, p.num);
-                return (
-                  <div
-                    key={`${d}-${p.num}`}
-                    className="p-2.5 border-r border-[#E4DDCA] last:border-r-0 hover:bg-[#EDE8D8]/20 transition-colors flex flex-col justify-between"
-                  >
-                    {slot ? (
-                      <div className="h-full p-2.5 rounded-xl bg-white border border-[#E4DDCA] shadow-2xs flex flex-col justify-between space-y-1.5 hover:border-[#6C5119]/40 transition-all">
-                        <div>
-                          <div className="flex items-center justify-between">
-                            <span className="font-extrabold text-xs text-[#6C5119]">
-                              {slot.subjectCode}
-                            </span>
-                            <span className="text-[10px] text-[#77735F] font-semibold">
-                              {slot.faculty}
-                            </span>
-                          </div>
-                          <p className="text-[11px] font-bold text-[#24251C] line-clamp-1 mt-0.5">
-                            {slot.subjectTitle}
-                          </p>
-                        </div>
-
-                        <div className="flex flex-wrap items-center gap-1 pt-1">
-                          {slot.rooms.map((rm) => (
-                            <span
-                              key={rm}
-                              className="px-1.5 py-0.5 rounded-md bg-[#EDE8D8] text-[10px] font-semibold text-[#24251C]"
-                            >
-                              {rm}
-                            </span>
-                          ))}
-                          {slot.batches.map((b) => (
-                            <span
-                              key={b}
-                              className="px-1.5 py-0.5 rounded-md bg-[#F2EDE0] text-[10px] text-[#77735F]"
-                            >
-                              {b}
-                            </span>
-                          ))}
-                        </div>
-                      </div>
-                    ) : (
-                      <div className="h-full rounded-xl border border-dashed border-[#E4DDCA]/50 flex items-center justify-center text-[10px] text-[#77735F]/60">
-                        — Empty —
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ))}
+          )}
         </div>
       </div>
 
-      {/* Mobile Day-by-Day Card List */}
-      <div className="lg:hidden space-y-3">
-        {periods.map((p) => {
-          const slot = getSlot(selectedDay, p.num);
+      {/* Teaching Load Metrics Cards */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
+        <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs">
+          <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">Daily Classes</span>
+          <p className="text-2xl font-black text-[#24251C] mt-1">2 – 3</p>
+          <p className="text-[11px] text-[#77735F] mt-0.5 font-medium">Per academic working day</p>
+        </div>
+
+        <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs">
+          <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">Theory Lectures</span>
+          <p className="text-2xl font-black text-[#6C5119] mt-1">{totalLectures} Classes</p>
+          <p className="text-[11px] text-[#77735F] mt-0.5 font-medium">Standard 1 Hour each</p>
+        </div>
+
+        <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs">
+          <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">Practical Labs</span>
+          <p className="text-2xl font-black text-[#1B5E20] mt-1">{totalLabs} Labs</p>
+          <p className="text-[11px] text-[#77735F] mt-0.5 font-medium">Standard 2 Hours each</p>
+        </div>
+
+        <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs">
+          <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">Weekly Workload</span>
+          <p className="text-2xl font-black text-[#3F451F] mt-1">{totalWeeklyHours} Hours</p>
+          <p className="text-[11px] text-[#77735F] mt-0.5 font-medium">Curriculum credits active</p>
+        </div>
+      </div>
+
+      {/* Day Selector Tabs */}
+      <div className="flex items-center space-x-2 border-b border-[#E4DDCA] pb-3 overflow-x-auto scrollbar-none">
+        {days.map((d) => {
+          const count = teacherSchedule.filter((s) => s.day === d).length;
+          const isSelected = selectedDay === d;
           return (
-            <div
-              key={p.num}
-              className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs space-y-2"
+            <button
+              key={d}
+              onClick={() => setSelectedDay(d)}
+              className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center space-x-2 transition-all cursor-pointer whitespace-nowrap ${
+                isSelected
+                  ? "bg-[#6C5119] text-white shadow-sm"
+                  : "bg-[#FBF8F0] border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8]/50 hover:text-[#24251C]"
+              }`}
             >
-              <div className="flex items-center justify-between border-b border-[#E4DDCA]/60 pb-2">
-                <span className="text-xs font-bold text-[#6C5119]">
-                  Period {p.num} ({p.time})
-                </span>
-                <span className="text-xs font-semibold text-[#77735F]">
-                  {selectedDay}
-                </span>
-              </div>
-
-              {slot ? (
-                <div className="space-y-2 pt-1">
-                  <div>
-                    <h3 className="font-extrabold text-sm text-[#24251C]">
-                      [{slot.subjectCode}] {slot.subjectTitle}
-                    </h3>
-                    <p className="text-xs text-[#77735F] mt-0.5">Faculty: {slot.faculty}</p>
-                  </div>
-
-                  <div className="flex flex-wrap gap-1.5 pt-1">
-                    <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8] text-xs font-semibold text-[#24251C]">
-                      Rooms: {slot.rooms.join(", ")}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8] text-xs font-semibold text-[#77735F]">
-                      Batches: {slot.batches.join(", ")}
-                    </span>
-                  </div>
-                </div>
-              ) : (
-                <p className="text-xs text-[#77735F] italic py-3 text-center">
-                  No academic session scheduled for this period.
-                </p>
-              )}
-            </div>
+              <span>{d}</span>
+              <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+                isSelected ? "bg-black/20 text-white" : "bg-[#EDE8D8] text-[#6C5119]"
+              }`}>
+                {count} classes
+              </span>
+            </button>
           );
         })}
+      </div>
+
+      {/* Selected Day Class Timeline */}
+      <div className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-base font-bold text-[#24251C]">
+            Classes Scheduled for {selectedDay} ({daySlots.length} Classes)
+          </h2>
+          <span className="text-xs text-[#77735F] font-medium">
+            Standard: 1 Hr Theory • 2 Hrs Laboratory
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 gap-3.5">
+          {daySlots.map((slot) => (
+            <div
+              key={slot.id}
+              className={`p-5 rounded-2xl border transition-all shadow-2xs ${
+                slot.isLab
+                  ? "bg-[#F9F7EE] border-[#DCD5BE] hover:border-[#6C5119]"
+                  : "bg-[#FBF8F0] border-[#E4DDCA] hover:border-[#6C5119]/60"
+              }`}
+            >
+              <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                {/* Time & Duration Pill */}
+                <div className="flex items-center space-x-3">
+                  <div className={`p-3 rounded-xl flex flex-col items-center justify-center min-w-[70px] text-center border ${
+                    slot.isLab
+                      ? "bg-[#1B5E20]/10 border-[#1B5E20]/20 text-[#1B5E20]"
+                      : "bg-[#6C5119]/10 border-[#6C5119]/20 text-[#6C5119]"
+                  }`}>
+                    <span className="text-xs font-black tracking-wider uppercase">
+                      Period {slot.periodNum}
+                    </span>
+                    <span className="text-[10px] font-bold mt-0.5">
+                      {slot.durationHours === 2 ? "2 HOURS" : "1 HOUR"}
+                    </span>
+                  </div>
+
+                  {/* Class Info */}
+                  <div className="space-y-1">
+                    <div className="flex items-center space-x-2 flex-wrap">
+                      <span className="text-xs font-black px-2 py-0.5 rounded-md bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
+                        {slot.subjectCode}
+                      </span>
+                      <span className={`text-[11px] font-extrabold px-2 py-0.5 rounded-md ${
+                        slot.isLab
+                          ? "bg-emerald-100 text-emerald-800 border border-emerald-300"
+                          : "bg-amber-100 text-amber-800 border border-amber-300"
+                      }`}>
+                        {slot.isLab ? "2-HOUR PRACTICAL LAB" : "1-HOUR THEORY LECTURE"}
+                      </span>
+                      <span className="text-xs font-semibold text-[#77735F]">
+                        {slot.startTime} – {slot.endTime}
+                      </span>
+                    </div>
+
+                    <h3 className="text-base font-bold text-[#24251C]">
+                      {slot.subjectTitle}
+                    </h3>
+
+                    <div className="flex items-center space-x-4 text-xs text-[#77735F] pt-1 flex-wrap">
+                      <span className="flex items-center space-x-1">
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                        </svg>
+                        <span className="font-semibold text-[#24251C]">Room: {slot.room}</span>
+                      </span>
+                      <span className="flex items-center space-x-1">
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                        </svg>
+                        <span>Batch: {slot.batch}</span>
+                      </span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Direct Action */}
+                <div className="flex items-center space-x-2 shrink-0">
+                  <Link
+                    to={slot.sessionId ? `/attendance?session=${slot.sessionId}` : "/attendance"}
+                    className="w-full sm:w-auto px-4 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all shadow-2xs flex items-center justify-center space-x-1.5"
+                  >
+                    <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                    </svg>
+                    <span>Take Attendance</span>
+                  </Link>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
       </div>
     </div>
   );
 }
-

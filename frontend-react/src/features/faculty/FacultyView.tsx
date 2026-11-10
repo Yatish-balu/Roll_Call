@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback } from "react";
+import { Link } from "react-router-dom";
 import {
   fetchTeacherSubjects,
   assignTeacherSubject,
@@ -71,6 +72,10 @@ export function FacultyView() {
   const [formError, setFormError] = useState<string | null>(null);
 
   const loadMappings = useCallback(async () => {
+    if (!isAdmin) {
+      setIsLoading(false);
+      return;
+    }
     setIsLoading(true);
     setError(null);
     try {
@@ -85,7 +90,7 @@ export function FacultyView() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     let isMounted = true;
@@ -127,6 +132,27 @@ export function FacultyView() {
   };
 
   const isAdminOrCoordinator = isAdmin;
+
+  if (!isAdmin) {
+    return (
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-8 max-w-xl mx-auto text-center space-y-4 shadow-sm my-12">
+        <div className="w-12 h-12 rounded-2xl bg-amber-100 text-amber-800 flex items-center justify-center mx-auto">
+          <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+        </div>
+        <h2 className="text-xl font-bold text-[#24251C]">Administrator Privilege Required</h2>
+        <p className="text-xs text-[#77735F] leading-relaxed">
+          Faculty and department coordinator management is restricted to institutional administrators. As a Course Faculty member, your assigned subjects and timetable can be accessed directly in <strong>My Timetable</strong> and <strong>Settings</strong>.
+        </p>
+        <div className="pt-2">
+          <Link to="/" className="px-4 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors shadow-2xs inline-block">
+            Return to Teacher Dashboard
+          </Link>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
