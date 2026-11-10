@@ -1,0 +1,74 @@
+"""FastAPI dependencies for JWT authentication and role-based authorization."""
+
+from __future__ import annotations
+
+import logging
+from typing import Callable, Optional
+
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+
+from app.auth.jwt import AuthenticationError, decode_and_verify_token
+from app.auth.roles import Role, role_satisfies
+from app.schemas.auth import AuthenticatedUser
+
+logger = logging.getLogger("rollcall.auth.dependencies")
+
+# Bearer token extractor without auto_error to control response format cleanly
+bearer_scheme = HTTPBearer(auto_error=False)
+
+
+def get_current_user(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+) -> AuthenticatedUser:
+    """
+    Extract, decode, and cryptographically verify the Bearer JWT token from the Authorization header.
+    Returns the AuthenticatedUser with identity and role strictly from verified claims.
+    Raises 401 Unauthorized on missing, invalid, or expired tokens.
+    """
+    if credentials is None or not credentials.credentials:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing or invalid authentication token. Bearer token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token = credentials.credentials
+    try:
+        user = decode_and_verify_token(token)
+        return user
+    except AuthenticationError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail=exc.message,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def require_roles(*allowed_roles: Role) -> Callable[[AuthenticatedUser], AuthenticatedUser]:
+    """
+    Generate a dependency that verifies the authenticated user possesses one of the allowed roles
+    or higher according to the authorization hierarchy (ADMIN > FACULTY > VIEWER).
+    Raises 403 Forbidden if user lacks sufficient privileges.
+    """
+    def role_verifier(
+        user: AuthenticatedUser = Depends(get_current_user),
+    ) -> AuthenticatedUser:
+        # Check if user's role satisfies at least one required role
+        has_permission = any(role_satisfies(user.role, req_role) for req_role in allowed_roles)
+        if not has_permission:
+            roles_str = ", ".join(r.value for r in allowed_roles)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Forbidden: Insufficient privileges. Required role: {roles_str}. Your role: {user.role.value}.",
+            )
+        return user
+
+    return role_verifier
+
+
+# Common convenience role dependencies
+require_admin = require_roles(Role.ADMIN)
+require_faculty = require_roles(Role.FACULTY)
+require_viewer = require_roles(Role.VIEWER)
+

@@ -1,0 +1,109 @@
+"""Database package initialization and unified exports."""
+
+from app.db.connection import (
+    DEFAULT_DB_PATH,
+    get_connection,
+    get_db_cursor,
+    create_sync_engine,
+    create_async_engine_instance,
+    get_sync_session_factory,
+    get_async_session_factory,
+)
+from app.db.base import Base
+from app.db.models import (
+    Student,
+    Room,
+    Session,
+    Attendance,
+    AttendanceStatus,
+)
+from app.db.schema import SCHEMA_SQL, init_db
+from app.db.crud import (
+    # Students
+    insert_student,
+    insert_students_bulk,
+    get_student,
+    get_all_students,
+    get_students_by_branch,
+    get_students_paginated,
+    # Rooms
+    insert_room,
+    insert_rooms_bulk,
+    get_room,
+    get_all_rooms,
+    get_rooms_paginated,
+    # Sessions
+    insert_session,
+    insert_sessions_bulk,
+    get_session,
+    get_all_sessions,
+    get_sessions_by_date,
+    get_sessions_paginated,
+    # Attendance
+    VALID_ATTENDANCE_STATUSES,
+    normalize_attendance_status,
+    insert_attendance,
+    insert_attendance_bulk,
+    delete_session_attendance,
+    replace_session_attendance,
+    reconcile_session_roster,
+    get_attendance_record,
+    get_existing_attendance_usns,
+    get_attendance_by_session,
+    get_attendance_by_student,
+    get_session_attendance_details,
+)
+
+__all__ = [
+    # Legacy connection helpers
+    "DEFAULT_DB_PATH",
+    "get_connection",
+    "get_db_cursor",
+    "SCHEMA_SQL",
+    "init_db",
+    # Modern SQLAlchemy 2.0 connection factories & Base
+    "Base",
+    "create_sync_engine",
+    "create_async_engine_instance",
+    "get_sync_session_factory",
+    "get_async_session_factory",
+    # Modern ORM Models
+    "Student",
+    "Room",
+    "Session",
+    "Attendance",
+    "AttendanceStatus",
+    # Students CRUD
+    "insert_student",
+    "insert_students_bulk",
+    "get_student",
+    "get_all_students",
+    "get_students_by_branch",
+    "get_students_paginated",
+    # Rooms CRUD
+    "insert_room",
+    "insert_rooms_bulk",
+    "get_room",
+    "get_all_rooms",
+    "get_rooms_paginated",
+    # Sessions CRUD
+    "insert_session",
+    "insert_sessions_bulk",
+    "get_session",
+    "get_all_sessions",
+    "get_sessions_by_date",
+    "get_sessions_paginated",
+    # Attendance CRUD
+    "VALID_ATTENDANCE_STATUSES",
+    "normalize_attendance_status",
+    "insert_attendance",
+    "insert_attendance_bulk",
+    "delete_session_attendance",
+    "replace_session_attendance",
+    "reconcile_session_roster",
+    "get_attendance_record",
+    "get_existing_attendance_usns",
+    "get_attendance_by_session",
+    "get_attendance_by_student",
+    "get_session_attendance_details",
+]
