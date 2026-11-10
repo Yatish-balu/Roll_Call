@@ -30,6 +30,7 @@ from app.db.base import Base
 from app.db import crud
 from app.dependencies import get_db
 from app.main import app, get_allowed_origins, DEFAULT_ALLOWED_ORIGINS
+from tests.conftest import seed_test_admin_user
 
 
 @pytest.fixture
@@ -42,6 +43,7 @@ def test_db_engine():
         echo=False,
     )
     Base.metadata.create_all(engine)
+    seed_test_admin_user(engine)
     yield engine
     engine.dispose()
 

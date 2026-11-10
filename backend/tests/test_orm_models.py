@@ -15,12 +15,12 @@ def test_models_metadata_registered():
 
 
 def test_attendance_table_constraints():
-    """Verify attendance composite primary key, foreign keys, indexes, and check constraint."""
+    """Verify attendance surrogate primary key, foreign keys, indexes, and check constraint."""
     att_table = Base.metadata.tables["attendance"]
 
-    # Composite PK
+    # Surrogate PK
     pk_cols = [c.name for c in att_table.primary_key.columns]
-    assert pk_cols == ["session_id", "usn"]
+    assert pk_cols == ["attendance_id"]
 
     # Foreign Keys
     fks = {fk.column.table.name: (fk.parent.name, fk.ondelete) for fk in att_table.foreign_keys}
@@ -36,6 +36,7 @@ def test_attendance_table_constraints():
     assert "idx_attendance_session" in idx_names
     assert "idx_attendance_usn" in idx_names
     assert "idx_attendance_room" in idx_names
+    assert "idx_attendance_allocation" in idx_names
 
     # Check constraint
     ck_names = [ck.name for ck in att_table.constraints if hasattr(ck, "sqltext")]
@@ -49,7 +50,8 @@ def test_sqlite_in_memory_engine_creation():
 
     inspector = inspect(engine)
     tables = inspector.get_table_names()
-    assert set(tables) == {"students", "rooms", "sessions", "attendance"}
+    assert {"students", "rooms", "sessions", "attendance"}.issubset(set(tables))
+
 
     # Basic insert & query smoke test
     SessionLocal = get_sync_session_factory(engine)

@@ -8,11 +8,13 @@ Designed as a modular monorepo, RollCall AI decouples a deterministic Python/Fas
 
 ## Database Architecture & Dual-Backend Setup
 
-- **Dual-Backend Architecture**: RollCall AI supports unified execution on Supabase PostgreSQL with an automatic or manual local SQLite fallback via SQLAlchemy.
-- **Environment Variables**: Managed in `.env` using `DB_BACKEND` (`supabase` | `sqlite`), `DATABASE_URL`, `READONLY_DATABASE_URL`, and `SQLITE_PATH` (`data/attendance.db`).
-- **How to Switch Backends**: Set `DB_BACKEND=supabase` or `DB_BACKEND=sqlite` in `.env`; all application and query layers seamlessly adapt without code modifications.
-- **Data Synchronization**: Run `python backend/scripts/sync.py` to copy all tables from Supabase into SQLite without duplicates, or `python backend/scripts/sync.py --init` for the initial load from SQLite into Supabase.
-- **Run Sync Before Demo**: Always run `python backend/scripts/sync.py` before presentations or demos to ensure SQLite has the freshest copy of institutional data for offline fallback.
+- **Cloud-first production**: Supabase PostgreSQL is the production source of truth. SQLite is retained for local development, isolated tests, and optional offline capabilities only.
+- **Environment Variables**: Managed in `.env` using `DB_BACKEND` (`supabase` | `sqlite`), `DATABASE_URL_SYNC` (authoritative write URL for production), `READONLY_DATABASE_URL` (read-only replica), `SQLITE_PATH` (`data/attendance.db`), and `APP_ENV` (`development` | `production`).
+- **Production requirements**: When `APP_ENV=production`, `DB_BACKEND=supabase` and `DATABASE_URL_SYNC` are mandatory. A deliberate connectivity check runs at startup; a failed Supabase connection is reported clearly and never silently falls back to SQLite.
+- **SSL**: PostgreSQL connections require SSL (`sslmode=require` for psycopg, `ssl=require` for asyncpg).
+- **How to Switch Backends**: Set `DB_BACKEND=supabase` or `DB_BACKEND=sqlite` in `.env`; all application and query layers adapt without code modifications.
+- **Data Synchronization**: No automatic dual writes or SQLite-to-Supabase synchronization. Run `python backend/scripts/sync.py` only for manual, operator-initiated copies between environments.
+- **Alembic Migrations**: Alembic manages schema for both backends using `DATABASE_URL_SYNC`.
 
 ---
 
@@ -155,12 +157,16 @@ cp .env.example .env
 ```
 
 Key environment variables:
-- `APP_ENV`: `development` (or `production`)
+- `APP_ENV`: `development` (default) or `production`.
 - `JWT_SECRET_KEY`: Minimum 32-character secret key for JWT authentication.
-- `DATABASE_PATH`: Defaults to `data/attendance.db`. Canonical path resolution automatically handles execution from any directory.
+- `DATABASE_URL_SYNC`: Authoritative synchronous write URL for production (Supabase PostgreSQL). Required when `APP_ENV=production` and `DB_BACKEND=supabase`.
+- `DATABASE_URL_ASYNC`: Asynchronous URL for Supabase (not currently wired into the FastAPI request path).
+- `READONLY_DATABASE_URL`: Read-only replica URL for secure queries. Must not equal `DATABASE_URL_SYNC`.
+- `SQLITE_PATH`: Defaults to `data/attendance.db`. Canonical path resolution automatically handles execution from any directory.
 - `GEMINI_API_KEY`: Optional; enables Gemini Vision extraction for photo attendance.
 - `ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (default: safe localhost ports).
 - `RATE_LIMIT_ENABLED`: `true` to enforce rate limits on expensive operations.
+- `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_RECYCLE`: Connection pool tunables for PostgreSQL.
 
 ---
 
@@ -187,6 +193,10 @@ Once started, navigate to:
 - **Interactive Swagger Docs:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
 - **ReDoc Documentation:** [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
 - **Health Check:** [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
+
+### Startup Failure Behaviour (Production)
+
+When `APP_ENV=production`, the application performs a deliberate database connectivity check during startup. If `DB_BACKEND` is not `supabase`, or `DATABASE_URL_SYNC` is missing, or the Supabase connection cannot be established, the application fails to start with a clear error message. SQLite is never used as a silent fallback in production.
 
 ---
 

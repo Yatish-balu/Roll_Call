@@ -22,6 +22,15 @@ from app.db.models import (
     Session,
     Attendance,
     AttendanceStatus,
+    College,
+    Department,
+    AcademicYear,
+    Semester,
+    Section,
+    Batch,
+    Subject,
+    FacultySubject,
+    DepartmentStaff,
 )
 from app.db.schema import SCHEMA_SQL, init_db
 from app.db.crud import (
@@ -85,6 +94,15 @@ __all__ = [
     "Session",
     "Attendance",
     "AttendanceStatus",
+    "College",
+    "Department",
+    "AcademicYear",
+    "Semester",
+    "Section",
+    "Batch",
+    "Subject",
+    "FacultySubject",
+    "DepartmentStaff",
     # Students CRUD
     "insert_student",
     "insert_students_bulk",

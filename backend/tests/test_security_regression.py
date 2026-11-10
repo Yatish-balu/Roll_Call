@@ -331,13 +331,22 @@ def test_faculty_cannot_create_master_data_or_delete_attendance(sec_client):
     )
     assert res2.status_code == 403
 
-    # Cannot create session
+    # Cannot create session for an unassigned subject (N4: faculty are scoped
+    # to their own assigned subject codes; this teacher has none assigned)
     res3 = sec_client.post(
+        "/api/v1/sessions",
+        json={"session_id": "SESS-099", "date": "2026-04-01", "subject": "Math", "subject_code": "ML"},
+        headers=headers,
+    )
+    assert res3.status_code == 403
+
+    # Faculty session creation without a subject code is rejected
+    res3b = sec_client.post(
         "/api/v1/sessions",
         json={"session_id": "SESS-099", "date": "2026-04-01", "subject": "Math"},
         headers=headers,
     )
-    assert res3.status_code == 403
+    assert res3b.status_code == 422
 
     # Cannot delete attendance records
     res4 = sec_client.delete("/api/v1/attendance/sessions/SESS-001", headers=headers)

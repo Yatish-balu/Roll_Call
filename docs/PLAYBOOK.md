@@ -22,10 +22,10 @@
 ### Roadmap Prompts Summary
 
 #### Wave 1: Database, Login, Protected Routes, Mapping
-- **N1**: Database changes (`users`, `teacher_subjects`, `audit_log`, `login_attempts`, `pending_edits`, `sessions` columns, triggers).
-- **N2**: Login with tokens, rate limit (bcrypt, JWT valid 8h, 5 failed attempts in 10m -> 429).
-- **N3**: Protect every route, scope the chat reader, error format (require_login, require_role, UserContext for query_tool).
-- **N4**: Teacher-subject mapping, session create, meta config (`/api/me/subjects`, `/api/admin/teacher-subjects`, `/api/meta/config`).
+- **N1**: Database changes (`users`, `teacher_subjects`, `audit_log`, `login_attempts`, `pending_edits`, `sessions` columns, triggers). **DONE** (migrations `0002_rbac_tables`, `0003_auth_sessions`; append-only audit triggers verified by tests)
+- **N2**: Login with tokens, rate limit (bcrypt, JWT valid 15 min with rotation, 7-day session family, refresh-cookie rotation with reuse detection, 5 failed attempts in 10m -> 429). **DONE**
+- **N3**: Protect every route, scope the chat reader, error format (require_login, require_role, UserContext for query_tool). **DONE** (all routers behind `get_current_user` / `require_roles`; D15 error body via global handlers)
+- **N4**: Teacher-subject mapping, session create, meta config (`/api/me/subjects`, `/api/admin/teacher-subjects`, `/api/meta/config`). **DONE** (faculty session-create scoped to assigned subject codes; teacher_id bound to token; audit rows for `SESSION_CREATE` / `TEACHER_SUBJECT_ASSIGN`; dev DB migrated to head + users seeded)
 
 #### Wave 2: Lock, Safe Edits, Chat Edits
 - **N5**: 24-hour lock policy (pure function `is_editable(session_created_at_utc, role, now_utc)`).

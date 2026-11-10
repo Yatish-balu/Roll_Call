@@ -29,14 +29,19 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.routers import (
+    admin_router,
     agent_router,
     analytics_router,
     attendance_router,
+    auth_router,
+    me_router,
+    meta_router,
     reports_router,
     rooms_router,
     sessions_router,
     students_router,
 )
+
 
 load_dotenv()
 
@@ -47,8 +52,22 @@ logger = logging.getLogger("rollcall.api")
 async def lifespan(app: FastAPI):
     """Application lifespan context for startup and shutdown events."""
     logger.info("RollCall AI FastAPI application starting up...")
+
+    # Validate JWT configuration on startup
+    from app.auth.jwt import validate_jwt_secret_configuration
+    env = os.getenv("APP_ENV", "development").lower()
+    secret = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY")
+    if env == "production" or secret:
+        validate_jwt_secret_configuration(secret, env)
+
+    # Deliberate database connectivity check for production startup.
+    # A failed Supabase connection must not be mistaken for a successful startup.
+    from app.db.connection import verify_database_connectivity
+    verify_database_connectivity()
+
     yield
     logger.info("RollCall AI FastAPI application shutting down...")
+
 
 
 # ==============================================================================
@@ -225,6 +244,10 @@ def health_check():
 # ==============================================================================
 
 # API v1 Routers
+app.include_router(auth_router, prefix="/api/v1")
+app.include_router(me_router, prefix="/api/v1")
+app.include_router(meta_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api/v1")
 app.include_router(students_router, prefix="/api/v1")
 app.include_router(rooms_router, prefix="/api/v1")
 app.include_router(sessions_router, prefix="/api/v1")
@@ -234,6 +257,10 @@ app.include_router(reports_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
+app.include_router(auth_router, prefix="/api")
+app.include_router(me_router, prefix="/api")
+app.include_router(meta_router, prefix="/api")
+app.include_router(admin_router, prefix="/api")
 app.include_router(students_router, prefix="/api")
 app.include_router(rooms_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
@@ -241,6 +268,7 @@ app.include_router(attendance_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+
 
 
 # ==============================================================================

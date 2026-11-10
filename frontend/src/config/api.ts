@@ -2,8 +2,18 @@
  * Centralized API Configuration for RollCall AI Frontend
  */
 
-export const API_BASE_URL =
-  process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, "") || "http://127.0.0.1:8000";
+export function getApiBaseUrl(): string {
+  if (process.env.NEXT_PUBLIC_API_URL) {
+    return process.env.NEXT_PUBLIC_API_URL.replace(/\/+$/, "");
+  }
+  if (typeof window !== "undefined") {
+    const host = window.location.hostname || "localhost";
+    return `http://${host}:8000`;
+  }
+  return "http://127.0.0.1:8000";
+}
+
+export const API_BASE_URL = getApiBaseUrl();
 
 export const APP_ENV = process.env.NEXT_PUBLIC_APP_ENV || "development";
 

@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 from sqlalchemy import engine_from_config
 from sqlalchemy import pool
+from sqlalchemy import text
 
 from alembic import context
 
@@ -18,10 +19,18 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Override sqlalchemy.url with environment variable if present
+# Override sqlalchemy.url with environment variable if present.
+# If not present and config url is unconfigured or points to default postgres placeholder, default to local SQLite DB.
 sync_db_url = os.getenv("DATABASE_URL_SYNC")
+current_url = config.get_main_option("sqlalchemy.url")
 if sync_db_url:
     config.set_main_option("sqlalchemy.url", sync_db_url)
+elif not current_url or "localhost:5432/postgres" in current_url:
+    from app.db.connection import DEFAULT_DB_PATH
+    db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path_posix}")
+
+
 
 target_metadata = Base.metadata
 
@@ -50,6 +59,9 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+        # Disable FK enforcement during migrations to prevent cascade data loss
+        # when rebuilding tables (e.g. attendance surrogate->composite PK changes).
+        connection.execute(text("PRAGMA foreign_keys = OFF"))
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

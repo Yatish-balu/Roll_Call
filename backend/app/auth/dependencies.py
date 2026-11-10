@@ -9,8 +9,11 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.auth.jwt import AuthenticationError, decode_and_verify_token
-from app.auth.roles import Role, role_satisfies
+from app.auth.roles import Role, normalize_role, role_satisfies
+from app.db.connection import get_sync_session_factory
+from app.db.models import User
 from app.schemas.auth import AuthenticatedUser
+
 
 logger = logging.getLogger("rollcall.auth.dependencies")
 
@@ -23,8 +26,8 @@ def get_current_user(
 ) -> AuthenticatedUser:
     """
     Extract, decode, and cryptographically verify the Bearer JWT token from the Authorization header.
-    Returns the AuthenticatedUser with identity and role strictly from verified claims.
-    Raises 401 Unauthorized on missing, invalid, or expired tokens.
+    Authoritatively loads active status and role from database if user exists.
+    Raises 401 Unauthorized on missing, invalid, expired tokens, or deactivated accounts.
     """
     if credentials is None or not credentials.credentials:
         raise HTTPException(
@@ -36,13 +39,35 @@ def get_current_user(
     token = credentials.credentials
     try:
         user = decode_and_verify_token(token)
-        return user
     except AuthenticationError as exc:
         raise HTTPException(
             status_code=exc.status_code,
             detail=exc.message,
             headers={"WWW-Authenticate": "Bearer"},
         )
+
+    # Check authoritative database record if user exists locally
+    try:
+        SessionLocal = get_sync_session_factory()
+        with SessionLocal() as db:
+            db_user = db.get(User, user.user_id)
+            if db_user is not None:
+                if not db_user.is_active:
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="User account is deactivated.",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+                # Database role is authoritative
+                user.role = normalize_role(db_user.role)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.debug("Database user lookup during token verification skipped: %s", exc)
+
+
+    return user
+
 
 
 def require_roles(*allowed_roles: Role) -> Callable[[AuthenticatedUser], AuthenticatedUser]:

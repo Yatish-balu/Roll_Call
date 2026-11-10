@@ -5,11 +5,79 @@
 import { API_BASE_URL } from "@/config/api";
 import { ApiError, type ApiErrorDetail, type RequestOptions } from "@/types/api";
 
+export interface ExtendedRequestOptions extends RequestOptions {
+  _retried?: boolean;
+}
+
 export class ApiClient {
   private readonly baseUrl: string;
+  private accessToken: string | null = null;
+  private refreshPromise: Promise<string | null> | null = null;
 
   constructor(baseUrl: string = API_BASE_URL) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
+  }
+
+  /**
+   * Set in-memory access token (never stored in localStorage/sessionStorage).
+   */
+  setAccessToken(token: string | null): void {
+    this.accessToken = token;
+  }
+
+  /**
+   * Retrieve current in-memory access token.
+   */
+  getAccessToken(): string | null {
+    return this.accessToken;
+  }
+
+  /**
+   * Resolve dynamic base URL to prevent cookie/CORS domain mismatches in browsers.
+   */
+  private getEffectiveBaseUrl(): string {
+    if (typeof window !== "undefined" && !process.env.NEXT_PUBLIC_API_URL) {
+      const host = window.location.hostname || "localhost";
+      return `http://${host}:8000`;
+    }
+    return this.baseUrl;
+  }
+
+  /**
+   * Single-flight token refresh using HttpOnly cookie credentials.
+   */
+  private async performRefresh(): Promise<string | null> {
+    try {
+      const cleanEndpoint = "/api/v1/auth/refresh";
+      const url = `${this.getEffectiveBaseUrl()}${cleanEndpoint}`;
+      const response = await fetch(url, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+          "Accept": "application/json",
+          "X-Requested-With": "XMLHttpRequest",
+        },
+      });
+
+      if (!response.ok) {
+        if (response.status === 401 || response.status === 403) {
+          this.setAccessToken(null);
+        }
+        return null;
+      }
+
+      const data = await response.json();
+      if (data && typeof data.token === "string") {
+        this.setAccessToken(data.token);
+        return data.token;
+      }
+      return null;
+    } catch {
+      return null;
+    } finally {
+      this.refreshPromise = null;
+    }
   }
 
   /**
@@ -20,7 +88,7 @@ export class ApiClient {
     params?: Record<string, string | number | boolean | undefined | null>
   ): string {
     const cleanEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
-    const url = new URL(`${this.baseUrl}${cleanEndpoint}`);
+    const url = new URL(`${this.getEffectiveBaseUrl()}${cleanEndpoint}`);
 
     if (params) {
       Object.entries(params).forEach(([key, value]) => {
@@ -34,17 +102,23 @@ export class ApiClient {
   }
 
   /**
-   * Execute an HTTP request with error handling and serialization.
+   * Execute an HTTP request with error handling, serialization, and single-flight refresh retry.
    */
-  async request<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-    const { token, params, headers: customHeaders, body, ...restOptions } = options;
+  async request<T>(endpoint: string, options: ExtendedRequestOptions = {}): Promise<T> {
+    const { token, params, headers: customHeaders, body, _retried, ...restOptions } = options;
     const url = this.buildUrl(endpoint, params);
 
     const headers = new Headers(customHeaders);
 
-    // Attach Authorization Bearer token if provided
-    if (token) {
-      headers.set("Authorization", `Bearer ${token.trim()}`);
+    // Prefer explicitly passed token, or fall back to in-memory access token
+    const effectiveToken = token || this.accessToken;
+    if (effectiveToken) {
+      headers.set("Authorization", `Bearer ${effectiveToken.trim()}`);
+    }
+
+    // Include custom CSRF header on requests
+    if (!headers.has("X-Requested-With")) {
+      headers.set("X-Requested-With", "XMLHttpRequest");
     }
 
     // Set JSON headers unless sending FormData multipart
@@ -62,6 +136,7 @@ export class ApiClient {
     let response: Response;
     try {
       response = await fetch(url, {
+        credentials: "include",
         ...restOptions,
         headers,
         body: serializedBody,
@@ -76,6 +151,27 @@ export class ApiClient {
         0,
         { originalError: networkError }
       );
+    }
+
+    // Intercept 401 for automatic single-flight token renewal
+    const isAuthEndpoint =
+      endpoint.includes("/auth/login") ||
+      endpoint.includes("/auth/refresh") ||
+      endpoint.includes("/auth/logout");
+
+    if (response.status === 401 && !_retried && !isAuthEndpoint) {
+      if (!this.refreshPromise) {
+        this.refreshPromise = this.performRefresh();
+      }
+      const newToken = await this.refreshPromise;
+      if (newToken) {
+        // Retry original request exactly once with new token
+        return this.request<T>(endpoint, {
+          ...options,
+          token: newToken,
+          _retried: true,
+        });
+      }
     }
 
     // Parse response body

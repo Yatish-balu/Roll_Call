@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -73,19 +74,31 @@ def get_session_by_id(
     return session
 
 
+def _utcnow_iso() -> str:
+    """Current UTC timestamp in canonical ISO 8601 Z format."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 @router.post(
     "",
     response_model=SessionResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Create session",
-    description="Add a new session record.",
+    description=(
+        "Add a new session record. FACULTY users may only create sessions for their assigned "
+        "subject codes (teacher_id is always bound to the verified token subject). ADMIN users "
+        "may create sessions for any subject and optionally attribute them to a teacher (N4)."
+    ),
     responses={
+        403: {"description": "Subject code not assigned to the current teacher"},
+        404: {"description": "Target teacher does not exist"},
         409: {"description": "Session already exists with this session_id"},
+        422: {"description": "Missing subject code for FACULTY, or target teacher is not a FACULTY user"},
     },
 )
 def create_session(
     payload: SessionCreate,
-    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     existing = crud.get_session(db, session_id=payload.session_id)
@@ -95,15 +108,68 @@ def create_session(
             detail=f"Session with ID '{payload.session_id}' already exists.",
         )
 
+    now_iso = _utcnow_iso()
+
+    if current_user.role == Role.ADMIN:
+        # ADMIN: unrestricted subject; optional attribution to an existing teacher.
+        target_teacher = payload.teacher_id
+        if target_teacher is not None:
+            teacher = crud.get_user(db, user_id=target_teacher)
+            if teacher is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Teacher with user ID '{target_teacher}' not found.",
+                )
+            if str(teacher.get("role", "")).upper() != "FACULTY":
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Sessions can only be attributed to FACULTY users.",
+                )
+        subject_code = payload.subject_code
+    else:
+        # FACULTY: subject_code is mandatory and must be one of the teacher's assigned codes.
+        if not payload.subject_code:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="subject_code is required for faculty session creation.",
+            )
+        assigned_codes = crud.get_teacher_subjects(db, user_id=current_user.user_id)
+        if payload.subject_code not in assigned_codes:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"Subject code '{payload.subject_code}' is not assigned to you. "
+                    "You can only create sessions for your own subjects."
+                ),
+            )
+        # Never trust a client-supplied teacher_id: bind to the verified token subject.
+        target_teacher = current_user.user_id
+        subject_code = payload.subject_code
+
     try:
         created = crud.insert_session(
             db,
             session_id=payload.session_id,
             date=payload.date,
             subject=payload.subject,
+            teacher_id=target_teacher,
+            subject_code=subject_code,
+            created_at=now_iso,
+        )
+        crud.create_audit_entry(
+            db,
+            actor_id=current_user.user_id,
+            action="SESSION_CREATE",
+            entity_type="session",
+            entity_id=payload.session_id,
+            new_value=subject_code,
+            timestamp=now_iso,
         )
         db.commit()
         return created
+    except HTTPException:
+        db.rollback()
+        raise
     except IntegrityError:
         db.rollback()
         raise HTTPException(

@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import uuid
 from typing import Any, Dict, List, Optional
 
 import jwt
@@ -38,20 +39,59 @@ class AuthenticationError(Exception):
         self.status_code = status_code
 
 
+def validate_jwt_secret_configuration(
+    secret: Optional[str] = None,
+    env: Optional[str] = None,
+) -> str:
+    """
+    Validate that JWT_SECRET is configured and meets security requirements (>= 32 chars).
+    Raises ValueError on missing or short secrets.
+    """
+    candidate = secret if secret is not None else (os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY"))
+    current_env = (env or os.getenv("APP_ENV", "development")).lower()
+
+    if not candidate or len(candidate.strip()) == 0:
+        raise ValueError("JWT secret key is missing or empty. Please set JWT_SECRET.")
+
+    clean = candidate.strip()
+    if len(clean) < 32:
+        raise ValueError(
+            f"JWT secret key is too short ({len(clean)} characters). "
+            "It must be at least 32 characters long."
+        )
+    return clean
+
+
+def get_local_jwt_secret() -> str:
+    """
+    Retrieve configured secret key specifically for signing local RollCall AI JWT tokens.
+    Reads JWT_SECRET from environment (or falls back to JWT_SECRET_KEY).
+    """
+    secret = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY")
+    if secret:
+        return validate_jwt_secret_configuration(secret)
+
+    env = os.getenv("APP_ENV", "development").lower()
+    if env == "production":
+        raise RuntimeError("Production security violation: JWT_SECRET must be configured and >= 32 characters.")
+
+    return "rollcall-dev-secret-key-change-in-production-32bytes-min"
+
+
 def get_jwt_secret() -> str:
     """
     Retrieve configured JWT secret for signature verification.
-    Reads JWT_SECRET_KEY or SUPABASE_JWT_SECRET from environment.
+    Reads JWT_SECRET, JWT_SECRET_KEY, or SUPABASE_JWT_SECRET from environment.
     Enforces strict security checks in production.
     """
-    secret = os.getenv("JWT_SECRET_KEY") or os.getenv("SUPABASE_JWT_SECRET")
+    secret = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY") or os.getenv("SUPABASE_JWT_SECRET")
     env = os.getenv("APP_ENV", "development").lower()
     is_production = env == "production"
 
     if not secret:
         if not is_production:
             return "rollcall-dev-secret-key-change-in-production-32bytes-min"
-        raise RuntimeError("Production security violation: JWT secret key is not configured. Set JWT_SECRET_KEY or SUPABASE_JWT_SECRET.")
+        raise RuntimeError("Production security violation: JWT secret key is not configured. Set JWT_SECRET or SUPABASE_JWT_SECRET.")
 
     clean_secret = secret.strip()
     if is_production:
@@ -61,6 +101,7 @@ def get_jwt_secret() -> str:
             raise RuntimeError("Production security violation: JWT secret key must be at least 32 characters long in production.")
 
     return clean_secret
+
 
 
 def get_jwt_public_key() -> Optional[str]:
@@ -132,14 +173,22 @@ def decode_and_verify_token(
             f"Token algorithm '{token_alg}' is not in allowed algorithms: {allowed_algorithms}."
         )
 
-    # 2. Select appropriate verification key (asymmetric vs symmetric)
+    # 2. Select appropriate verification keys (asymmetric vs symmetric with Supabase compatibility)
     if token_alg.upper().startswith(("RS", "ES", "PS")):
-        signing_key = public_key or get_jwt_public_key()
-        if not signing_key:
-            # Fall back to secret parameter if supplied specifically in test scenarios
-            signing_key = secret or get_jwt_secret()
+        signing_key = public_key or get_jwt_public_key() or secret or get_jwt_secret()
+        candidate_keys = [signing_key]
     else:
-        signing_key = secret or get_jwt_secret()
+        if secret:
+            candidate_keys = [secret]
+        else:
+            # Separate local signing secret from Supabase / legacy verification secret
+            local_secret = get_local_jwt_secret()
+            supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
+            legacy_secret = os.getenv("JWT_SECRET_KEY")
+            candidate_keys = [local_secret]
+            for extra in (supabase_secret, legacy_secret):
+                if extra and extra.strip() and extra.strip() not in candidate_keys:
+                    candidate_keys.append(extra.strip())
 
     issuer = get_jwt_issuer()
     audience = get_jwt_audience()
@@ -153,30 +202,42 @@ def decode_and_verify_token(
         "require": ["exp", "sub"],
     }
 
-    try:
-        claims = jwt.decode(
-            clean_token,
-            signing_key,
-            algorithms=allowed_algorithms,
-            issuer=issuer,
-            audience=audience,
-            options=options,
-        )
-    except ExpiredSignatureError:
-        raise AuthenticationError("Token has expired.")
-    except ImmatureSignatureError:
-        raise AuthenticationError("Token not yet valid.")
-    except InvalidSignatureError:
-        raise AuthenticationError("Token signature verification failed.")
-    except InvalidIssuerError:
-        raise AuthenticationError("Token issuer is invalid.")
-    except InvalidAudienceError:
-        raise AuthenticationError("Token audience is invalid.")
-    except InvalidTokenError as exc:
-        raise AuthenticationError(f"Invalid token: {exc}")
-    except Exception as exc:
-        logger.error("Unexpected error during JWT verification: %s", exc)
+    claims = None
+    last_sig_error = None
+
+    for key in candidate_keys:
+        try:
+            claims = jwt.decode(
+                clean_token,
+                key,
+                algorithms=allowed_algorithms,
+                issuer=issuer,
+                audience=audience,
+                options=options,
+            )
+            break
+        except ExpiredSignatureError:
+            raise AuthenticationError("Token has expired.")
+        except ImmatureSignatureError:
+            raise AuthenticationError("Token not yet valid.")
+        except InvalidSignatureError as sig_exc:
+            last_sig_error = sig_exc
+            continue
+        except InvalidIssuerError:
+            raise AuthenticationError("Token issuer is invalid.")
+        except InvalidAudienceError:
+            raise AuthenticationError("Token audience is invalid.")
+        except InvalidTokenError as exc:
+            raise AuthenticationError(f"Invalid token: {exc}")
+        except Exception as exc:
+            logger.error("Unexpected error during JWT verification: %s", exc)
+            raise AuthenticationError("Could not validate authentication token.")
+
+    if claims is None:
+        if last_sig_error:
+            raise AuthenticationError("Token signature verification failed.")
         raise AuthenticationError("Could not validate authentication token.")
+
 
     # 3. Subject extraction (user ID)
     sub = str(claims.get("sub", "")).strip()
@@ -230,21 +291,28 @@ def create_access_token(
     algorithm: Optional[str] = None,
 ) -> str:
     """
-    Helper to generate signed JWT tokens for testing and development.
+    Generate signed JWT tokens for local login and development.
+    Defaults to 15-minute expiration per N2.1 requirements.
     """
     to_encode = data.copy()
     now = datetime.datetime.now(datetime.timezone.utc)
     if expires_delta:
         expire = now + expires_delta
     else:
-        expire = now + datetime.timedelta(minutes=60)
+        expire = now + datetime.timedelta(minutes=15)
 
     to_encode.setdefault("exp", int(expire.timestamp()))
     to_encode.setdefault("iat", int(now.timestamp()))
     if "sub" not in to_encode:
         to_encode["sub"] = "default-user-uuid"
 
-    signing_secret = secret or get_jwt_secret()
+    # Unique JWT ID guarantees distinct tokens even when issued within the
+    # same second (e.g. login immediately followed by refresh), preventing
+    # byte-identical access tokens for distinct authentication events.
+    to_encode.setdefault("jti", uuid.uuid4().hex)
+
+    signing_secret = secret or get_local_jwt_secret()
     alg = algorithm or get_jwt_algorithms()[0]
     return jwt.encode(to_encode, signing_secret, algorithm=alg)
+
 

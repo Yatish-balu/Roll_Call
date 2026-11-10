@@ -1,6 +1,6 @@
 # Prompt completion log
 
-Current branch: prompt8-verify-fix
+Current branch: kk
 
 Completed prompts in this project
 - Prompt 1: Phase 1 foundation and core engine
@@ -11,6 +11,10 @@ Completed prompts in this project
 - Prompt 6: Evaluation harness and benchmark runner
 - Prompt 7: Streamlit UI
 - Prompt 8: Browser smoke test of the running app
+- Expansion Wave 1 N1: RBAC tables, audit triggers, session columns (migrations 0002/0003)
+- Expansion Wave 1 N2: Login, JWT (15 min), refresh rotation, DB rate limiting (429), seed users
+- Expansion Wave 1 N3: Route protection + D15 standard error body on all routers
+- Expansion Wave 1 N4: /api/me/subjects, /api/admin/teacher-subjects, /api/meta/config, faculty session-create scoping
 
 Prompt 7 status
 Completed and tested.
@@ -34,3 +38,9 @@ Plan
 - Finish remaining prompts/review items first
 - Keep the project working and tested on each step
 - After all prompts are complete, improve the agent or efficiency if desired
+
+Wave 1 status (branch kk)
+- N1-N4 implemented and tested; full pytest suite green after each step
+- Dev database data/attendance.db migrated to 0003_auth_sessions (head) and seeded via backend/scripts/seed_users.py
+- Faculty session creation is scoped to assigned subject codes; identity always comes from the verified token
+- Next: Wave 2 (N5 lock policy, N6 safe update_attendance + audit, N6b lock fields on reads, N7 chat edit confirmation)

@@ -1,0 +1,608 @@
+"""Integration and unit tests for Wave 1 Prompt N1: RBAC tables, triggers, backfill, and atomic edits."""
+
+import os
+import shutil
+import sqlite3
+import tempfile
+from datetime import datetime, timezone, timedelta
+from uuid import uuid4
+
+import pytest
+from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError, OperationalError
+from sqlalchemy.orm import Session as SqlSession
+
+from alembic.config import Config
+from alembic import command
+
+from app.db.base import Base
+from app.db.connection import get_connection
+from app.db.models import (
+    User,
+    TeacherSubject,
+    AuditLog,
+    LoginAttempt,
+    PendingEdit,
+    Session as DbSession,
+    Attendance,
+    Student,
+    Room,
+)
+from app.db.crud import (
+    create_user,
+    get_user,
+    assign_teacher_subject,
+    get_teacher_subjects,
+    create_audit_entry,
+    record_login_attempt,
+    create_pending_edit,
+    consume_pending_edit_atomic,
+    apply_attendance_edit_atomic,
+)
+
+
+@pytest.fixture
+def disposable_sqlite_db():
+    """Create a completely disposable, isolated SQLite database in a temp directory."""
+    temp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(temp_dir, "disposable_test.db")
+    engine = create_engine(f"sqlite:///{db_path}")
+
+    # Set up tables using Base metadata
+    Base.metadata.create_all(bind=engine)
+
+    yield db_path, engine
+
+    engine.dispose()
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_five_new_tables_crud_and_schema(disposable_sqlite_db):
+    """Test 1: Verify CRUD operations and column constraints across all 5 new tables."""
+    db_path, engine = disposable_sqlite_db
+
+    with SqlSession(engine) as session:
+        # 1. users
+        u = create_user(session, user_id="prof_oak", email="oak@kanto.edu", role="FACULTY", is_active=1)
+        session.commit()
+        assert u["user_id"] == "prof_oak"
+        assert u["role"] == "FACULTY"
+
+        fetched_user = get_user(session, user_id="prof_oak")
+        assert fetched_user is not None
+        assert fetched_user["email"] == "oak@kanto.edu"
+
+        # 2. teacher_subjects
+        ts = assign_teacher_subject(session, user_id="prof_oak", subject_code="ML")
+        session.commit()
+        assert ts["subject_code"] == "ML"
+        subjects = get_teacher_subjects(session, user_id="prof_oak")
+        assert "ML" in subjects
+
+        # Unique constraint on (user_id, subject_code)
+        with pytest.raises(IntegrityError):
+            assign_teacher_subject(session, user_id="prof_oak", subject_code="ML")
+        session.rollback()
+
+        # 3. audit_log
+
+        audit = create_audit_entry(
+            session,
+            actor_id="prof_oak",
+            action="LOGIN",
+            entity_type="user",
+            entity_id="prof_oak",
+            reason="Routine sign-in",
+        )
+        assert audit["log_id"] is not None
+        assert audit["action"] == "LOGIN"
+
+        # 4. login_attempts (both known user and NULL user for unknown attempt)
+        att1 = record_login_attempt(session, user_id="prof_oak", ip_address="192.168.1.1", success=1)
+        assert att1["id"] is not None
+        assert att1["success"] == 1
+
+        att2 = record_login_attempt(session, user_id=None, ip_address="10.0.0.99", success=0)
+        assert att2["user_id"] is None
+        assert att2["success"] == 0
+
+        # 5. pending_edits
+        # First ensure parent session, student, and room exist for FK integrity
+        stud = Student(usn="1DS24CY001", name="Ash Ketchum", branch="CSE")
+        room = Room(room_id="R101", name="Auditorium")
+        sess = DbSession(session_id="SESS-001", date="2026-10-24", subject="Machine Learning", subject_code="ML")
+        session.add_all([stud, room, sess])
+        session.flush()
+
+        attendance = Attendance(
+            session_id="SESS-001",
+            usn="1DS24CY001",
+            room_id="R101",
+            status="PRESENT",
+            source="AI",
+            confidence=0.98,
+        )
+        session.add(attendance)
+        session.flush()
+
+        pe = create_pending_edit(
+            session,
+            user_id="prof_oak",
+            session_id="SESS-001",
+            usn="1DS24CY001",
+            old_status="PRESENT",
+            new_status="ABSENT",
+        )
+        assert pe["edit_id"] is not None
+        assert pe["consumed"] == 0
+        session.commit()
+
+
+def test_audit_log_append_only_triggers(disposable_sqlite_db):
+    """Test 2: Verify database-level triggers strictly forbid UPDATE and DELETE on audit_log."""
+    db_path, engine = disposable_sqlite_db
+
+    # Manually install the triggers on the test DB
+    with engine.connect() as conn:
+        conn.execute(
+            text(
+                """
+                CREATE TRIGGER trg_audit_log_no_update
+                BEFORE UPDATE ON audit_log
+                BEGIN
+                    SELECT RAISE(ABORT, 'audit_log is append-only: updates forbidden');
+                END;
+                """
+            )
+        )
+        conn.execute(
+            text(
+                """
+                CREATE TRIGGER trg_audit_log_no_delete
+                BEFORE DELETE ON audit_log
+                BEGIN
+                    SELECT RAISE(ABORT, 'audit_log is append-only: deletions forbidden');
+                END;
+                """
+            )
+        )
+        conn.commit()
+
+    with SqlSession(engine) as session:
+        # Create actor user
+        create_user(session, user_id="admin_1", email="admin@rollcall.edu", role="ADMIN")
+        session.commit()
+
+        # Insert audit log
+        entry = create_audit_entry(
+            session,
+            actor_id="admin_1",
+            action="CREATE_SESSION",
+            entity_type="session",
+            entity_id="SESS-100",
+        )
+        session.commit()
+        log_id = entry["log_id"]
+
+        # Attempt UPDATE -> must be rejected by trigger
+        with pytest.raises((OperationalError, IntegrityError)) as excinfo:
+            session.execute(
+                text("UPDATE audit_log SET action = 'MUTATED' WHERE log_id = :log_id"),
+                {"log_id": log_id},
+            )
+            session.commit()
+        session.rollback()
+        assert "append-only" in str(excinfo.value).lower()
+
+        # Attempt DELETE -> must be rejected by trigger
+        with pytest.raises((OperationalError, IntegrityError)) as excinfo:
+            session.execute(
+                text("DELETE FROM audit_log WHERE log_id = :log_id"),
+                {"log_id": log_id},
+            )
+            session.commit()
+        session.rollback()
+        assert "append-only" in str(excinfo.value).lower()
+
+        # Verify entry remains completely unchanged
+        log_row = session.get(AuditLog, log_id)
+        assert log_row is not None
+        assert log_row.action == "CREATE_SESSION"
+
+
+def test_legacy_subject_backfill_and_sentinel_teacher():
+    """Test 3: Verify explicit CASE mapping, sentinel user properties, and session backfill via Alembic."""
+    temp_dir = tempfile.mkdtemp()
+    db_path = os.path.join(temp_dir, "alembic_test.db")
+
+    # Set up Alembic configuration pointing to temp db
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    alembic_cfg = Config(ini_path)
+    db_url = f"sqlite:///{db_path.replace(os.sep, '/')}"
+    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+
+    # 1. Upgrade to 0001_initial_schema
+    command.upgrade(alembic_cfg, "0001_initial_schema")
+
+    # 2. Populate the 5 canonical historical sessions
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    sessions_data = [
+        ("SESS-20261024-01", "2026-10-24", "Distributed Systems"),
+        ("SESS-20261024-02", "2026-10-24", "Machine Learning"),
+        ("SESS-20261025-01", "2026-10-25", "Computer Networks"),
+        ("SESS-20261025-02", "2026-10-25", "Database Systems"),
+        ("SESS-20261026-01", "2026-10-26", "Embedded Systems"),
+    ]
+    cur.executemany("INSERT INTO sessions (session_id, date, subject) VALUES (?, ?, ?)", sessions_data)
+    conn.commit()
+    conn.close()
+
+    # 3. Upgrade to 0002_rbac_tables
+    command.upgrade(alembic_cfg, "0002_rbac_tables")
+
+    # 4. Validate backfill assertions
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+
+    # Sentinel user assertions
+    cur.execute("SELECT user_id, email, role, hashed_password, is_active FROM users WHERE user_id = 'legacy'")
+    sentinel = cur.fetchone()
+    assert sentinel is not None
+    assert sentinel[0] == "legacy"
+    assert sentinel[1] == "legacy@rollcall.internal"
+    assert sentinel[2] == "ADMIN"
+    assert sentinel[3] is None  # hashed_password MUST be NULL
+    assert sentinel[4] == 0     # is_active MUST be 0 (inactive)
+
+    # Explicit subject_code mapping assertions
+    expected_mapping = {
+        "Distributed Systems": "DIST-SYS",
+        "Machine Learning": "ML",
+        "Computer Networks": "CN",
+        "Database Systems": "DB-SYS",
+        "Embedded Systems": "ES",
+    }
+
+    cur.execute("SELECT session_id, subject, subject_code, teacher_id, created_at FROM sessions ORDER BY date")
+    rows = cur.fetchall()
+    assert len(rows) == 5
+
+    for sess_id, subj, code, teacher, created_at in rows:
+        assert code == expected_mapping[subj], f"Expected {expected_mapping[subj]} for {subj}, got {code}"
+        assert teacher == "legacy"
+        assert created_at.endswith("T00:00:00Z")
+
+    # SQLite integrity and foreign key checks
+    cur.execute("PRAGMA integrity_check")
+    assert cur.fetchone()[0] == "ok"
+    cur.execute("PRAGMA foreign_key_check")
+    assert len(cur.fetchall()) == 0
+
+    conn.close()
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_existing_attendance_data_unchanged():
+    """Test 4: Verify all 185 attendance records and downgrade safety on a populated clone."""
+    temp_dir = tempfile.mkdtemp()
+    src_db = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "data", "attendance.db"))
+    test_db = os.path.join(temp_dir, "attendance_clone.db")
+
+    # Copy real database snapshot to disposable test environment
+    shutil.copy2(src_db, test_db)
+
+    # Configure Alembic
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    ini_path = os.path.join(backend_dir, "alembic.ini")
+    alembic_cfg = Config(ini_path)
+    db_url = f"sqlite:///{test_db.replace(os.sep, '/')}"
+    alembic_cfg.set_main_option("sqlalchemy.url", db_url)
+
+    # Ensure clone starts at 0001_initial_schema baseline
+    conn = sqlite3.connect(test_db)
+    has_users = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='users'").fetchone() is not None
+    conn.close()
+
+    if has_users:
+        command.downgrade(alembic_cfg, "0001_initial_schema")
+    else:
+        command.stamp(alembic_cfg, "0001_initial_schema")
+
+    # Snapshot pre-migration attendance
+    conn = sqlite3.connect(test_db)
+    cur = conn.cursor()
+    cur.execute("SELECT session_id, usn, room_id, status, source, confidence FROM attendance ORDER BY session_id, usn")
+    pre_attendance = cur.fetchall()
+    assert len(pre_attendance) == 185, f"Expected 185 attendance records, found {len(pre_attendance)}"
+    conn.close()
+
+    # Upgrade to 0002
+    command.upgrade(alembic_cfg, "0002_rbac_tables")
+
+
+    # Assert post-migration attendance is 100% identical
+    conn = sqlite3.connect(test_db)
+    cur = conn.cursor()
+    cur.execute("SELECT session_id, usn, room_id, status, source, confidence FROM attendance ORDER BY session_id, usn")
+    post_attendance = cur.fetchall()
+    assert pre_attendance == post_attendance, "Attendance records were altered or lost during migration!"
+
+    cur.execute("PRAGMA foreign_key_check")
+    assert len(cur.fetchall()) == 0
+    cur.execute("PRAGMA integrity_check")
+    assert cur.fetchone()[0] == "ok"
+    conn.close()
+
+    # Test downgrade safely preserves attendance
+    command.downgrade(alembic_cfg, "0001_initial_schema")
+    conn = sqlite3.connect(test_db)
+    cur = conn.cursor()
+    cur.execute("SELECT COUNT(*) FROM attendance")
+    assert cur.fetchone()[0] == 185
+    cur.execute("SELECT COUNT(*) FROM sessions")
+    assert cur.fetchone()[0] == 5
+    conn.close()
+
+    shutil.rmtree(temp_dir, ignore_errors=True)
+
+
+def test_foreign_key_runtime_enforcement_in_sqlite(disposable_sqlite_db):
+    """Test 5: Verify foreign keys are strictly enforced at runtime in SQLite."""
+    db_path, engine = disposable_sqlite_db
+
+    with SqlSession(engine) as session:
+        # Ensure sentinel user exists
+        create_user(session, user_id="valid_teacher", email="teacher@school.edu", role="FACULTY")
+        session.commit()
+
+        # 1. Invalid teacher_id in sessions -> rejected
+        invalid_session = DbSession(
+            session_id="SESS-INVALID",
+            date="2026-11-10",
+            subject="Algorithms",
+            teacher_id="nonexistent_user",
+        )
+        session.add(invalid_session)
+        with pytest.raises(IntegrityError):
+            session.commit()
+        session.rollback()
+
+        # 2. Valid teacher_id in sessions -> accepted
+        valid_session = DbSession(
+            session_id="SESS-VALID",
+            date="2026-11-10",
+            subject="Algorithms",
+            teacher_id="valid_teacher",
+        )
+        session.add(valid_session)
+        session.commit()
+
+        # 3. Restrict deletion of teacher with referenced session
+        with pytest.raises(IntegrityError):
+            session.execute(text("DELETE FROM users WHERE user_id = 'valid_teacher'"))
+            session.commit()
+        session.rollback()
+
+
+
+def test_pending_edit_ownership_expiry_and_single_use(disposable_sqlite_db):
+    """Test 6: Verify user ownership, 5-minute expiry, and single-use atomic consumption."""
+    db_path, engine = disposable_sqlite_db
+
+    with SqlSession(engine) as session:
+        # Setup prerequisites
+        create_user(session, user_id="teacher_a", email="a@school.edu", role="FACULTY")
+        create_user(session, user_id="teacher_b", email="b@school.edu", role="FACULTY")
+        stud = Student(usn="1DS24CY050", name="Bob", branch="CSE")
+        room = Room(room_id="R200", name="Lab 1")
+        sess = DbSession(session_id="SESS-200", date="2026-10-24", subject="Computer Networks", subject_code="CN", teacher_id="teacher_a")
+        session.add_all([stud, room, sess])
+        session.flush()
+
+        att = Attendance(session_id="SESS-200", usn="1DS24CY050", room_id="R200", status="PRESENT", source="AI", confidence=1.0)
+        session.add(att)
+        session.commit()
+
+        # 1. Create pending edit for teacher_a
+        edit = create_pending_edit(
+            session,
+            user_id="teacher_a",
+            session_id="SESS-200",
+            usn="1DS24CY050",
+            old_status="PRESENT",
+            new_status="ABSENT",
+        )
+        edit_id = edit["edit_id"]
+        session.commit()
+
+        # 2. Consume by wrong user (teacher_b) -> returns None
+        result_wrong_owner = consume_pending_edit_atomic(session, edit_id=edit_id, user_id="teacher_b")
+        assert result_wrong_owner is None
+
+        # 3. Consume by correct owner (teacher_a) -> succeeds
+        result_owner = consume_pending_edit_atomic(session, edit_id=edit_id, user_id="teacher_a")
+        assert result_owner is not None
+        assert result_owner["consumed"] == 1
+        session.commit()
+
+        # 4. Second consume by teacher_a -> returns None (single-use enforced!)
+        result_second = consume_pending_edit_atomic(session, edit_id=edit_id, user_id="teacher_a")
+        assert result_second is None
+
+        # 5. Expiry test: create an edit that expired in the past
+        past_iso = (datetime.now(timezone.utc) - timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        expired_edit = PendingEdit(
+            edit_id=str(uuid4()),
+            user_id="teacher_a",
+            session_id="SESS-200",
+            usn="1DS24CY050",
+            old_status="PRESENT",
+            new_status="ABSENT",
+            created_at=past_iso,
+            expires_at=past_iso,
+            consumed=0,
+        )
+        session.add(expired_edit)
+        session.commit()
+
+        # Attempt to consume expired edit -> returns None
+        result_expired = consume_pending_edit_atomic(session, edit_id=expired_edit.edit_id, user_id="teacher_a")
+        assert result_expired is None
+
+
+def test_stale_pending_edit_rejection(disposable_sqlite_db):
+    """Test 7: Verify compare-and-set rejects stale edits when status changed concurrently."""
+    db_path, engine = disposable_sqlite_db
+
+    with SqlSession(engine) as session:
+        create_user(session, user_id="teacher_1", email="t1@school.edu", role="FACULTY")
+        assign_teacher_subject(session, user_id="teacher_1", subject_code="CN")
+        stud = Student(usn="1DS24CY099", name="Charlie", branch="CSE")
+        room = Room(room_id="R300", name="Room 300")
+        sess = DbSession(session_id="SESS-300", date="2026-10-24", subject="Computer Networks", subject_code="CN", teacher_id="teacher_1")
+        session.add_all([stud, room, sess])
+        session.flush()
+
+        att = Attendance(attendance_id=str(uuid4()), session_id="SESS-300", usn="1DS24CY099", room_id="R300", status="PRESENT", source="AI", confidence=1.0)
+        session.add(att)
+        session.commit()
+        att_id = att.attendance_id
+
+        # Proposal created when status was 'PRESENT'
+        edit = create_pending_edit(
+            session,
+            user_id="teacher_1",
+            session_id="SESS-300",
+            usn="1DS24CY099",
+            old_status="PRESENT",
+            new_status="ABSENT",
+        )
+        session.commit()
+
+        # Concurrent modification occurs before confirmation: status changes to 'PENDING'
+        att.status = "PENDING"
+        session.commit()
+
+        # Confirmation attempt must reject stale edit
+        with pytest.raises(ValueError) as excinfo:
+            apply_attendance_edit_atomic(
+                session,
+                edit_id=edit["edit_id"],
+                user_id="teacher_1",
+                authenticated_role="FACULTY",
+            )
+        session.rollback()
+        assert "stale edit rejected" in str(excinfo.value).lower()
+
+        # Verify attendance record remained 'PENDING'
+        rechecked_att = session.get(Attendance, att_id)
+        assert rechecked_att.status == "PENDING"
+
+        # Verify pending edit was NOT consumed
+        rechecked_edit = session.get(PendingEdit, edit["edit_id"])
+        assert rechecked_edit.consumed == 0
+
+
+def test_atomic_attendance_update_and_audit_rollback(disposable_sqlite_db):
+    """Test 8: Verify atomic transaction: audit log insertion and attendance update commit/rollback together."""
+    db_path, engine = disposable_sqlite_db
+
+    with SqlSession(engine) as session:
+        create_user(session, user_id="admin_user", email="admin@school.edu", role="ADMIN")
+        stud = Student(usn="1DS24CY077", name="Diana", branch="CSE")
+        room = Room(room_id="R400", name="Room 400")
+        sess = DbSession(session_id="SESS-400", date="2026-10-24", subject="Database Systems", subject_code="DB-SYS")
+        session.add_all([stud, room, sess])
+        session.flush()
+
+        att = Attendance(attendance_id=str(uuid4()), session_id="SESS-400", usn="1DS24CY077", room_id="R400", status="ABSENT", source="MANUAL", confidence=1.0)
+        session.add(att)
+        session.commit()
+        att_id = att.attendance_id
+
+        # 1. Successful atomic execution
+        edit1 = create_pending_edit(
+            session,
+            user_id="admin_user",
+            session_id="SESS-400",
+            usn="1DS24CY077",
+            old_status="ABSENT",
+            new_status="PRESENT",
+        )
+        session.commit()
+
+        res = apply_attendance_edit_atomic(
+            session,
+            edit_id=edit1["edit_id"],
+            user_id="admin_user",
+            authenticated_role="ADMIN",
+            reason="Medical certificate verified",
+        )
+        session.commit()
+
+        assert res["consumed"] == 1
+        updated_att = session.get(Attendance, att_id)
+        assert updated_att.status == "PRESENT"
+        audit = session.get(AuditLog, res["audit_log_id"])
+        assert audit.action == "ATTENDANCE_EDIT"
+        assert audit.reason == "Medical certificate verified"
+
+        # 2. Simulated failure during audit insertion -> full rollback
+        edit2 = create_pending_edit(
+            session,
+            user_id="admin_user",
+            session_id="SESS-400",
+            usn="1DS24CY077",
+            old_status="PRESENT",
+            new_status="ABSENT",
+        )
+        session.commit()
+
+        # Install trigger that blocks specific action to simulate audit failure
+        with engine.connect() as conn:
+            conn.execute(
+                text(
+                    """
+                    CREATE TRIGGER trg_fail_specific_audit
+                    BEFORE INSERT ON audit_log
+                    WHEN NEW.reason = 'FORCE_FAILURE'
+                    BEGIN
+                        SELECT RAISE(ABORT, 'Simulated audit log write failure');
+                    END;
+                    """
+                )
+            )
+            conn.commit()
+
+        with pytest.raises((OperationalError, IntegrityError)):
+            apply_attendance_edit_atomic(
+                session,
+                edit_id=edit2["edit_id"],
+                user_id="admin_user",
+                authenticated_role="ADMIN",
+                reason="FORCE_FAILURE",
+            )
+        session.rollback()
+
+        # Verify attendance status did NOT change to ABSENT
+        re_att = session.get(Attendance, att_id)
+        assert re_att.status == "PRESENT"
+
+        # Verify pending edit was NOT marked consumed
+        re_edit = session.get(PendingEdit, edit2["edit_id"])
+        assert re_edit.consumed == 0
+
+
+@pytest.mark.skip(reason="requires live PostgreSQL environment (Supabase integration phase)")
+def test_postgresql_compatibility_integration():
+    """Test 9: PostgreSQL integration placeholder.
+
+    Checklist for PostgreSQL live integration phase:
+    1. Verify PostgreSQL PL/pgSQL function reject_audit_modification() execution.
+    2. Verify trg_audit_log_no_update and trg_audit_log_no_delete trigger aborts on PostgreSQL.
+    3. Verify native ADD CONSTRAINT FOREIGN KEY on sessions.teacher_id.
+    4. Verify UPDATE ... WHERE atomic rowcount serialization under PostgreSQL row-level locks.
+    """
+    pass

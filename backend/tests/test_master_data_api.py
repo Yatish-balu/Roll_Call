@@ -18,6 +18,7 @@ from app.db.base import Base
 from app.db.models import Student, Room, Session as DbSession
 from app.dependencies import get_db
 from app.main import app
+from tests.conftest import seed_test_admin_user
 
 
 @pytest.fixture
@@ -30,6 +31,7 @@ def test_db_engine():
         echo=False,
     )
     Base.metadata.create_all(engine)
+    seed_test_admin_user(engine)
     yield engine
     engine.dispose()
 

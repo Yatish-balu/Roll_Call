@@ -1,2 +1,10 @@
-export { ApiClient, apiClient } from "./client";
-export { checkBackendHealth } from "./health";
+export * from "./client";
+export * from "./health";
+export * from "./students";
+export * from "./attendance";
+export * from "./sessions";
+export * from "./rooms";
+export * from "./faculty";
+export * from "./agent";
+export * from "./reports";
+export * from "./dashboard";

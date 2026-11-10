@@ -38,3 +38,30 @@ class AuthenticatedUser(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+
+class LoginRequest(BaseModel):
+    """User login credential payload."""
+    user_id: str = Field(..., description="Unique user identifier", min_length=1)
+    password: str = Field("", description="User plaintext password")
+    admin_key: Optional[str] = Field(None, description="Administrative authorization key required for ADMIN accounts")
+    remember_me: bool = Field(default=False, description="Whether to establish a persistent 7-day session")
+
+
+class LoginResponse(BaseModel):
+    """Successful authentication response payload."""
+    token: str = Field(..., description="Signed cryptographic JWT access token")
+    role: str = Field(..., description="Authoritative authorization role (ADMIN, FACULTY, VIEWER)")
+    name: Optional[str] = Field(None, description="User full display name")
+    subject_codes: List[str] = Field(default_factory=list, description="Subject codes assigned to the teacher")
+    expires_at_utc: str = Field(..., description="Token expiration timestamp in UTC ISO 8601 format")
+
+
+class UserMeResponse(BaseModel):
+    """Current authenticated user profile payload."""
+    user_id: str = Field(..., description="Unique user identifier")
+    email: str = Field(..., description="User email address")
+    role: str = Field(..., description="Current authoritative authorization role from database")
+    is_active: int = Field(1, description="Account active status")
+    subject_codes: List[str] = Field(default_factory=list, description="Assigned subject codes")
+
+

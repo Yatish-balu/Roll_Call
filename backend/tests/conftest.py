@@ -8,6 +8,7 @@ Ensures:
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 # Automatically ensure backend directory is prepended to sys.path
@@ -16,6 +17,7 @@ if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
 import pytest
+from sqlalchemy.orm import sessionmaker
 from app.auth.dependencies import get_current_user
 from app.auth.rate_limiter import reset_rate_limiter
 from app.auth.roles import Role
@@ -35,6 +37,31 @@ TEST_DEFAULT_ADMIN = AuthenticatedUser(
 )
 
 
+def seed_test_admin_user(engine) -> None:
+    """
+    Insert the conftest TEST_DEFAULT_ADMIN as a real users row in the given engine.
+
+    Required since N4: every write is audited and audit_log.actor_id has a
+    foreign key to users.user_id, so the mock-auth admin must actually exist.
+    """
+    from app.db.models import User
+
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    with factory() as db:
+        if db.get(User, TEST_DEFAULT_ADMIN.user_id) is None:
+            db.add(
+                User(
+                    user_id=TEST_DEFAULT_ADMIN.user_id,
+                    email=TEST_DEFAULT_ADMIN.email or "admin@rollcall.edu",
+                    role="ADMIN",
+                    hashed_password=None,
+                    is_active=1,
+                    created_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                )
+            )
+            db.commit()
+
+
 @pytest.fixture(autouse=True)
 def reset_rate_limits():
     """Ensure clean rate limiting state for every test."""
@@ -51,9 +78,10 @@ def auth_dependency_override(request):
     the override is skipped so real JWT cryptographic verification executes.
     """
     path_str = str(request.fspath)
-    if "test_auth_api" in path_str or "test_security_regression" in path_str or "no_auth_override" in getattr(request, "keywords", {}):
+    if "test_auth" in path_str or "test_security_regression" in path_str or "no_auth_override" in getattr(request, "keywords", {}):
         yield
         return
+
 
     app.dependency_overrides[get_current_user] = lambda: TEST_DEFAULT_ADMIN
     try:

@@ -1,32 +1,48 @@
 @import "tailwindcss";
 
 :root {
-  --background: #f8fafc;
-  --foreground: #0f172a;
-  --card: #ffffff;
-  --card-foreground: #0f172a;
-  --primary: #4f46e5;
-  --primary-foreground: #ffffff;
-  --border: #e2e8f0;
+  --rollcall-beige: #EDE8D8;
+  --rollcall-olive: #72785E;
+  --rollcall-gold: #6C5119;
+  --rollcall-deep-olive: #3F451F;
+  --rollcall-active-nav: #A77A13;
+  --rollcall-cream: #FBF8F0;
+  --rollcall-workspace: #F2EDE0;
+  --rollcall-text-primary: #24251C;
+  --rollcall-text-secondary: #77735F;
+  --rollcall-border: #E4DDCA;
+
+  --background: var(--rollcall-workspace);
+  --foreground: var(--rollcall-text-primary);
+  --card: var(--rollcall-cream);
+  --card-foreground: var(--rollcall-text-primary);
+  --primary: var(--rollcall-gold);
+  --primary-foreground: #FBF8F0;
+  --border: var(--rollcall-border);
 }
 
 @theme inline {
+  --color-rollcall-beige: var(--rollcall-beige);
+  --color-rollcall-olive: var(--rollcall-olive);
+  --color-rollcall-gold: var(--rollcall-gold);
+  --color-rollcall-deep-olive: var(--rollcall-deep-olive);
+  --color-rollcall-active-nav: var(--rollcall-active-nav);
+  --color-rollcall-cream: var(--rollcall-cream);
+  --color-rollcall-workspace: var(--rollcall-workspace);
+  --color-rollcall-text-primary: var(--rollcall-text-primary);
+  --color-rollcall-text-secondary: var(--rollcall-text-secondary);
+  --color-rollcall-border: var(--rollcall-border);
+
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-border: var(--border);
+
   --font-sans: var(--font-geist-sans), -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   --font-mono: var(--font-geist-mono), monospace;
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #090d16;
-    --foreground: #f1f5f9;
-    --card: #0f172a;
-    --card-foreground: #f1f5f9;
-    --primary: #6366f1;
-    --primary-foreground: #ffffff;
-    --border: #1e293b;
-  }
 }
 
 body {

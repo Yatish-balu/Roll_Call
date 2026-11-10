@@ -26,61 +26,32 @@ CREATE TABLE IF NOT EXISTS rooms (
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
     date TEXT NOT NULL,
-    subject TEXT NOT NULL
+    subject TEXT NOT NULL,
+    created_at TEXT,
+    teacher_id TEXT,
+    subject_code TEXT
 );
 
 CREATE TABLE IF NOT EXISTS attendance (
+    attendance_id TEXT PRIMARY KEY,
     session_id TEXT NOT NULL,
+    allocation_id TEXT,
     usn TEXT NOT NULL,
     room_id TEXT NOT NULL,
     status TEXT NOT NULL CHECK(status IN ('PRESENT', 'ABSENT', 'PENDING', 'UNREVIEWED', 'P', 'A')),
     source TEXT NOT NULL,
     confidence REAL NOT NULL DEFAULT 1.0,
-    PRIMARY KEY (session_id, usn),
+    recorded_at TEXT NOT NULL,
     FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
     FOREIGN KEY (usn) REFERENCES students(usn) ON DELETE CASCADE,
     FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE RESTRICT
 );
-
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_allocation_usn ON attendance (allocation_id, usn) WHERE allocation_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_attendance_legacy_session_usn ON attendance (session_id, usn) WHERE allocation_id IS NULL;
 CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_usn ON attendance(usn);
 CREATE INDEX IF NOT EXISTS idx_attendance_room ON attendance(room_id);
-"""
-
-POSTGRES_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS students (
-    usn VARCHAR(50) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    branch VARCHAR(100) NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS rooms (
-    room_id VARCHAR(50) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS sessions (
-    session_id VARCHAR(100) PRIMARY KEY,
-    date VARCHAR(50) NOT NULL,
-    subject VARCHAR(255) NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS attendance (
-    session_id VARCHAR(100) NOT NULL,
-    usn VARCHAR(50) NOT NULL,
-    room_id VARCHAR(50) NOT NULL,
-    status VARCHAR(20) NOT NULL CHECK (status IN ('PRESENT', 'ABSENT', 'PENDING', 'UNREVIEWED', 'P', 'A')),
-    source VARCHAR(100) NOT NULL,
-    confidence DOUBLE PRECISION NOT NULL DEFAULT 1.0,
-    PRIMARY KEY (session_id, usn),
-    CONSTRAINT fk_attendance_session FOREIGN KEY (session_id) REFERENCES sessions(session_id) ON DELETE CASCADE,
-    CONSTRAINT fk_attendance_student FOREIGN KEY (usn) REFERENCES students(usn) ON DELETE CASCADE,
-    CONSTRAINT fk_attendance_room FOREIGN KEY (room_id) REFERENCES rooms(room_id) ON DELETE RESTRICT
-);
-
-CREATE INDEX IF NOT EXISTS idx_attendance_session_id ON attendance(session_id);
-CREATE INDEX IF NOT EXISTS idx_attendance_room_id ON attendance(room_id);
-CREATE INDEX IF NOT EXISTS idx_attendance_usn ON attendance(usn);
+CREATE INDEX IF NOT EXISTS idx_attendance_allocation ON attendance(allocation_id);
 """
 
 
