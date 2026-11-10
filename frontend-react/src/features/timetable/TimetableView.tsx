@@ -246,9 +246,11 @@ export function TimetableView() {
             <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
               Timetable
             </h1>
-            <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-[#3F451F] text-[#EDE8D8]">
-              {session?.userId || "faculty_ds"}
-            </span>
+            {session?.userId && (
+              <span className="px-2.5 py-0.5 rounded-full text-[11px] font-black uppercase tracking-wider bg-[#3F451F] text-[#EDE8D8]">
+                {session.userId}
+              </span>
+            )}
           </div>
           <p className="text-xs sm:text-sm text-[#77735F] mt-1">
             Weekly academic schedule and classroom allocations.

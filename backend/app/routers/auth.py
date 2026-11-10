@@ -15,7 +15,7 @@ from typing import List, Optional
 import bcrypt
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
@@ -104,30 +104,57 @@ def _record_attempt(
         logger.error("Failed to persist login attempt: %s", exc)
 
 
+def _failed_attempts_since(
+    db: Session,
+    *conditions,
+    cutoff_iso: str,
+) -> int:
+    """Count failed login attempts matching any of the supplied conditions."""
+    stmt = select(func.count(LoginAttempt.id)).where(
+        or_(*conditions),
+        LoginAttempt.success == 0,
+        LoginAttempt.timestamp >= cutoff_iso,
+    )
+    return db.execute(stmt).scalar() or 0
+
+
 def _check_rate_limit(
     db: Session,
     user_id: str,
     now_dt: datetime,
+    ip_address: Optional[str] = None,
     max_failures: int = 5,
+    max_ip_failures: int = 20,
     window_seconds: int = 600,
 ) -> bool:
     """
-    Check if the user has reached max allowed failures in the rolling window.
-    Returns True if allowed, False if rate limited.
-    """
-    cutoff_dt = now_dt - timedelta(seconds=window_seconds)
-    cutoff_iso = _format_utc_iso(cutoff_dt)
+    Check whether a login attempt is allowed.
 
-    stmt = (
-        select(func.count(LoginAttempt.id))
-        .where(
-            LoginAttempt.user_id == user_id,
-            LoginAttempt.success == 0,
-            LoginAttempt.timestamp >= cutoff_iso,
-        )
+    Two independent quotas are enforced over the rolling window:
+    * per attempted user id  (max_failures, default 5)
+    * per client IP address  (max_ip_failures, default 20)
+
+    The IP quota is deliberately higher than the per-user quota so a shared
+    NAT/proxy cannot lock out unrelated users, while still throttling cheap
+    brute force against accounts that do not exist (those attempts are stored
+    with ``user_id = NULL`` and are only visible through the IP quota).
+    """
+    cutoff_iso = _format_utc_iso(now_dt - timedelta(seconds=window_seconds))
+
+    user_failures = _failed_attempts_since(
+        db, LoginAttempt.user_id == user_id, cutoff_iso=cutoff_iso
     )
-    failed_count = db.execute(stmt).scalar() or 0
-    return failed_count < max_failures
+    if user_failures >= max_failures:
+        return False
+
+    if ip_address:
+        ip_failures = _failed_attempts_since(
+            db, LoginAttempt.ip_address == ip_address, cutoff_iso=cutoff_iso
+        )
+        if ip_failures >= max_ip_failures:
+            return False
+
+    return True
 
 
 @router.post(
@@ -163,8 +190,8 @@ def login(request: Request, payload: LoginRequest):
             user = db.get(User, clean_uid)
             record_uid = user.user_id if user is not None else None
 
-            # 1. Rate limit check (rolling 10-minute window)
-            allowed = _check_rate_limit(db, clean_uid, now_dt)
+            # 1. Rate limit check (rolling 10-minute window, per user and per IP)
+            allowed = _check_rate_limit(db, clean_uid, now_dt, ip_address=client_ip)
             if not allowed:
                 _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                 return JSONResponse(
@@ -557,6 +584,9 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
     with SessionLocal() as db:
         db_user = db.get(User, user.user_id)
         if db_user is None:
+            # Supabase-issued identities may not (yet) have a local profile row;
+            # they remain valid, so the token claims are echoed back unchanged.
+            # Deactivation is enforced for every local account below.
             return UserMeResponse(
                 user_id=user.user_id,
                 email=user.email or f"{user.user_id}@rollcall.internal",

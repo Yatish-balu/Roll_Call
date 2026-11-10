@@ -3,6 +3,7 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { fetchSessions, type SessionItem } from "@/services/api/sessions";
 import { fetchStudents } from "@/services/api/students";
+import { useAuth } from "@/hooks/useAuth";
 import {
   fetchSessionAttendance,
   updateSessionAttendance,
@@ -12,6 +13,7 @@ import {
 } from "@/services/api/attendance";
 
 export function AttendanceView() {
+  const { session, isAdmin, isFaculty, isViewer, canMarkAttendance } = useAuth();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>("");
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
@@ -30,7 +32,7 @@ export function AttendanceView() {
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
 
-  // Load available sessions on mount
+  // Load available sessions on mount (filtered by assigned subjects for faculty)
   useEffect(() => {
     let isMounted = true;
     Promise.resolve().then(() => {
@@ -38,9 +40,23 @@ export function AttendanceView() {
       fetchSessions({ limit: 50 })
         .then((res) => {
           if (!isMounted) return;
-          setSessions(res.items || []);
-          if (res.items && res.items.length > 0) {
-            setSelectedSessionId(res.items[0].session_id);
+          const allItems = res.items || [];
+          // FACULTY sees strictly sessions matching assigned subjects via exact normalized code equality. ADMIN and VIEWER see all sessions.
+          const permitted =
+            !isAdmin && isFaculty
+              ? allItems.filter((s) => {
+                  const normalizedCode = (s.subject_code || "").trim().toUpperCase();
+                  if (!normalizedCode) return false;
+                  return (session.subjectCodes || []).some((assigned) => {
+                    return normalizedCode === assigned.trim().toUpperCase();
+                  });
+                })
+              : allItems;
+          setSessions(permitted);
+          if (permitted.length > 0) {
+            setSelectedSessionId(permitted[0].session_id);
+          } else {
+            setSelectedSessionId("");
           }
         })
         .catch((err: unknown) => {
@@ -57,7 +73,7 @@ export function AttendanceView() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [isAdmin, isFaculty, session.subjectCodes]);
 
   // Load attendance whenever selected session changes
   const loadAttendance = useCallback(async (sessionId: string) => {
@@ -118,6 +134,13 @@ export function AttendanceView() {
 
   // Status toggle handler
   const handleStatusChange = (usn: string, nextStatus: AttendanceStatus) => {
+    if (!canMarkAttendance) {
+      setStatusMessage({
+        type: "error",
+        text: "Read-only access: Viewers cannot modify attendance records.",
+      });
+      return;
+    }
     setAttendanceRecords((prev) =>
       prev.map((rec) => (rec.usn === usn ? { ...rec, status: nextStatus } : rec))
     );
@@ -127,7 +150,7 @@ export function AttendanceView() {
 
   // Initialize roster from enrolled students
   const handleInitializeRoster = async () => {
-    if (!selectedSessionId || isInitializing) return;
+    if (!canMarkAttendance || !selectedSessionId || isInitializing) return;
     setIsInitializing(true);
     setStatusMessage(null);
     try {
@@ -159,6 +182,7 @@ export function AttendanceView() {
 
   // Mark all present
   const handleMarkAllPresent = () => {
+    if (!canMarkAttendance) return;
     setAttendanceRecords((prev) =>
       prev.map((rec) => ({ ...rec, status: "PRESENT" }))
     );
@@ -170,7 +194,7 @@ export function AttendanceView() {
 
   // Save changes to backend
   const handleSaveChanges = async () => {
-    if (!selectedSessionId || isSaving) return;
+    if (!canMarkAttendance || !selectedSessionId || isSaving) return;
     setIsSaving(true);
     setStatusMessage(null);
 
@@ -198,7 +222,7 @@ export function AttendanceView() {
   // Submit reconciliation
   const handleReconcileSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!reconcileTarget || !selectedSessionId) return;
+    if (!canMarkAttendance || !reconcileTarget || !selectedSessionId) return;
     setIsReconciling(true);
 
     try {
@@ -245,37 +269,62 @@ export function AttendanceView() {
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-2">
         <div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
-            Attendance Verification
-          </h1>
+          <div className="flex items-center space-x-2.5 flex-wrap gap-y-1">
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
+              Attendance Verification
+            </h1>
+            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
+              {isLoadingAttendance ? "..." : `${attendanceRecords.length} Students`}
+            </span>
+            {isViewer && (
+              <span className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold flex items-center space-x-1.5 shadow-2xs">
+                <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+                <span>Read-Only Viewer</span>
+              </span>
+            )}
+            {!isAdmin && isFaculty && session.subjectCodes && session.subjectCodes.length > 0 && (
+              <span className="px-2.5 py-0.5 rounded-lg bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA] text-xs font-semibold">
+                Scope: {session.subjectCodes.join(", ")}
+              </span>
+            )}
+          </div>
           <p className="text-xs sm:text-sm text-[#77735F] mt-1">
             Session allocation roster, multi-modal mark reconciliation, and institutional review.
           </p>
         </div>
 
-        <div className="flex items-center space-x-2.5">
-          <button
-            onClick={handleMarkAllPresent}
-            disabled={attendanceRecords.length === 0 || isLoadingAttendance}
-            className="px-3.5 py-2 rounded-xl text-xs font-bold bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] border border-[#E4DDCA] transition-colors disabled:opacity-50 cursor-pointer"
-          >
-            Mark All Present
-          </button>
-          <button
-            onClick={() => void handleSaveChanges()}
-            disabled={attendanceRecords.length === 0 || isSaving || isLoadingAttendance}
-            className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
-          >
-            {isSaving ? (
-              <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-            ) : (
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M5 13l4 4L19 7" />
-              </svg>
-            )}
-            <span>{isSaving ? "Saving..." : "Save Changes"}</span>
-          </button>
-        </div>
+        {canMarkAttendance ? (
+          <div className="flex items-center space-x-2.5">
+            <button
+              onClick={handleMarkAllPresent}
+              disabled={attendanceRecords.length === 0 || isLoadingAttendance}
+              className="px-3.5 py-2 rounded-xl text-xs font-bold bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] border border-[#E4DDCA] transition-colors disabled:opacity-50 cursor-pointer"
+            >
+              Mark All Present
+            </button>
+            <button
+              onClick={() => void handleSaveChanges()}
+              disabled={attendanceRecords.length === 0 || isSaving || isLoadingAttendance}
+              className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+            >
+              {isSaving ? (
+                <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              ) : (
+                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M5 13l4 4L19 7" />
+                </svg>
+              )}
+              <span>{isSaving ? "Saving..." : "Save Changes"}</span>
+            </button>
+          </div>
+        ) : (
+          <span className="px-3.5 py-2 rounded-xl bg-slate-100 text-slate-600 text-xs font-semibold border border-slate-200">
+            Attendance Modification Restricted (Viewer)
+          </span>
+        )}
       </div>
 
       {/* Status Notifications */}
@@ -460,65 +509,85 @@ export function AttendanceView() {
                         {rec.room_id || "Unallocated"}
                       </td>
                       <td className="py-3.5 px-4">
-                        {/* 4 State Toggle Pills */}
-                        <div className="inline-flex rounded-lg border border-[#E4DDCA] p-0.5 bg-white space-x-0.5">
-                          <button
-                            type="button"
-                            onClick={() => handleStatusChange(rec.usn, "PRESENT")}
-                            className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                        {canMarkAttendance ? (
+                          /* 4 State Toggle Pills */
+                          <div className="inline-flex rounded-lg border border-[#E4DDCA] p-0.5 bg-white space-x-0.5">
+                            <button
+                              type="button"
+                              onClick={() => handleStatusChange(rec.usn, "PRESENT")}
+                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                                rec.status === "PRESENT"
+                                  ? "bg-emerald-600 text-white shadow-2xs"
+                                  : "text-[#77735F] hover:bg-emerald-50 hover:text-emerald-700"
+                              }`}
+                            >
+                              Present
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleStatusChange(rec.usn, "ABSENT")}
+                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                                rec.status === "ABSENT"
+                                  ? "bg-rose-600 text-white shadow-2xs"
+                                  : "text-[#77735F] hover:bg-rose-50 hover:text-rose-700"
+                              }`}
+                            >
+                              Absent
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleStatusChange(rec.usn, "PENDING")}
+                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                                rec.status === "PENDING"
+                                  ? "bg-amber-500 text-white shadow-2xs"
+                                  : "text-[#77735F] hover:bg-amber-50 hover:text-amber-800"
+                              }`}
+                            >
+                              Pending
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleStatusChange(rec.usn, "UNREVIEWED")}
+                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                                rec.status === "UNREVIEWED"
+                                  ? "bg-[#72785E] text-white shadow-2xs"
+                                  : "text-[#77735F] hover:bg-[#EDE8D8]"
+                              }`}
+                            >
+                              Unreviewed
+                            </button>
+                          </div>
+                        ) : (
+                          <span
+                            className={`inline-block px-3 py-1 rounded-lg text-xs font-bold border ${
                               rec.status === "PRESENT"
-                                ? "bg-emerald-600 text-white shadow-2xs"
-                                : "text-[#77735F] hover:bg-emerald-50 hover:text-emerald-700"
+                                ? "bg-emerald-100 text-emerald-800 border-emerald-300"
+                                : rec.status === "ABSENT"
+                                ? "bg-rose-100 text-rose-800 border-rose-300"
+                                : rec.status === "PENDING"
+                                ? "bg-amber-100 text-amber-800 border-amber-300"
+                                : "bg-stone-100 text-stone-700 border-stone-300"
                             }`}
                           >
-                            Present
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleStatusChange(rec.usn, "ABSENT")}
-                            className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
-                              rec.status === "ABSENT"
-                                ? "bg-rose-600 text-white shadow-2xs"
-                                : "text-[#77735F] hover:bg-rose-50 hover:text-rose-700"
-                            }`}
-                          >
-                            Absent
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleStatusChange(rec.usn, "PENDING")}
-                            className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
-                              rec.status === "PENDING"
-                                ? "bg-amber-500 text-white shadow-2xs"
-                                : "text-[#77735F] hover:bg-amber-50 hover:text-amber-800"
-                            }`}
-                          >
-                            Pending
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleStatusChange(rec.usn, "UNREVIEWED")}
-                            className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
-                              rec.status === "UNREVIEWED"
-                                ? "bg-[#72785E] text-white shadow-2xs"
-                                : "text-[#77735F] hover:bg-[#EDE8D8]"
-                            }`}
-                          >
-                            Unreviewed
-                          </button>
-                        </div>
+                            {rec.status}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3.5 pr-4 sm:pr-6 text-right">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setReconcileTarget(rec);
-                            setReconcileStatus(rec.status);
-                          }}
-                          className="px-3 py-1 rounded-lg text-xs font-semibold bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer"
-                        >
-                          Audit / Reconcile
-                        </button>
+                        {canMarkAttendance ? (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setReconcileTarget(rec);
+                              setReconcileStatus(rec.status);
+                            }}
+                            className="px-3 py-1 rounded-lg text-xs font-semibold bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer"
+                          >
+                            Audit / Reconcile
+                          </button>
+                        ) : (
+                          <span className="text-[11px] text-[#77735F] font-mono">Read-Only</span>
+                        )}
                       </td>
                     </tr>
                   );

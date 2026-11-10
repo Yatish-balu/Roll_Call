@@ -20,15 +20,21 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Override sqlalchemy.url with environment variable if present.
-# If not present and config url is unconfigured or points to default postgres placeholder, default to local SQLite DB.
+# Only override when the current URL is the default alembic.ini postgres placeholder
+# or when no URL was explicitly configured. Tests that set sqlalchemy.url directly
+# on the Config object (e.g. to a temporary SQLite DB) must be respected.
 sync_db_url = os.getenv("DATABASE_URL_SYNC")
 current_url = config.get_main_option("sqlalchemy.url")
-if sync_db_url:
+is_default_postgres_url = current_url and "localhost:5432/postgres" in current_url
+if sync_db_url and (not current_url or is_default_postgres_url):
+    # DATABASE_URL_SYNC configured and no explicit URL (or only default placeholder): use it
     config.set_main_option("sqlalchemy.url", sync_db_url)
-elif not current_url or "localhost:5432/postgres" in current_url:
+elif not current_url or is_default_postgres_url:
+    # No URL or only the default postgres placeholder: fall back to local SQLite
     from app.db.connection import DEFAULT_DB_PATH
     db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
     config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path_posix}")
+# Otherwise: current_url is explicitly set (e.g. by tests to a temp SQLite DB) — respect it.
 
 
 
@@ -61,7 +67,15 @@ def run_migrations_online() -> None:
     with connectable.connect() as connection:
         # Disable FK enforcement during migrations to prevent cascade data loss
         # when rebuilding tables (e.g. attendance surrogate->composite PK changes).
-        connection.execute(text("PRAGMA foreign_keys = OFF"))
+        # PRAGMA foreign_keys cannot run inside a SQLite transaction, so execute
+        # it on the raw DBAPI connection outside the migration transaction.
+        raw_dbapi_conn = connection.connection
+        try:
+            cursor = raw_dbapi_conn.cursor()
+            cursor.execute("PRAGMA foreign_keys = OFF")
+            cursor.close()
+        except Exception:
+            pass
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

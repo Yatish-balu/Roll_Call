@@ -29,6 +29,7 @@ from app.db.models import (
     AuditLog,
     LoginAttempt,
     PendingEdit,
+    SessionAllocation,
     AuthSession,
     AuthRefreshToken,
 )
@@ -73,6 +74,8 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
             "created_at": getattr(row, "created_at", None),
             "teacher_id": getattr(row, "teacher_id", None),
             "subject_code": getattr(row, "subject_code", None),
+            "coordinator_faculty_id": getattr(row, "coordinator_faculty_id", None),
+            "lifecycle_status": getattr(row, "lifecycle_status", None),
         }
     if isinstance(row, Attendance):
         return {
@@ -575,6 +578,40 @@ def insert_sessions_bulk(
         return cursor.rowcount
 
 
+# ---------------------------------------------------------------------------
+# Session column helpers
+#
+# The raw SQLite code path has to cope with both the migrated schema (Alembic
+# 0009 adds sessions.coordinator_faculty_id) and the legacy bootstrap schema
+# created by app.db.schema.init_db, which does not have that column yet.
+# ---------------------------------------------------------------------------
+
+SESSION_OPTIONAL_COLUMNS = (
+    "created_at",
+    "teacher_id",
+    "subject_code",
+    "coordinator_faculty_id",
+)
+
+
+def _session_table_columns(conn: sqlite3.Connection) -> Set[str]:
+    """Return the column names the sessions table actually has."""
+    try:
+        return {row[1] for row in conn.execute("PRAGMA table_info(sessions)")}
+    except Exception:
+        return set()
+
+
+def _session_select_columns(available: Set[str]) -> List[str]:
+    """Build the sessions SELECT list for the columns that exist."""
+    if not available:
+        # Table missing or unreadable: keep the historical column list.
+        return ["session_id", "date", "subject", "created_at", "teacher_id", "subject_code"]
+    columns = ["session_id", "date", "subject"]
+    columns.extend(col for col in SESSION_OPTIONAL_COLUMNS if col in available)
+    return columns
+
+
 def get_session(
     target_or_session_id: Union[sqlite3.Connection, Session, str],
     session_id: Optional[str] = None,
@@ -594,9 +631,12 @@ def get_session(
         res = target.scalars(stmt).first()
         return _row_to_dict(res)
 
-    query = "SELECT session_id, date, subject, created_at, teacher_id, subject_code FROM sessions WHERE session_id = ?"
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, (clean_id,))
+        available = _session_table_columns(conn)
+        select_columns = ", ".join(_session_select_columns(available))
+        cursor = conn.execute(
+            f"SELECT {select_columns} FROM sessions WHERE session_id = ?", (clean_id,)
+        )
         return _row_to_dict(cursor.fetchone())
 
 
@@ -609,9 +649,12 @@ def get_all_sessions(
         rows = target.scalars(stmt).all()
         return _rows_to_dicts(list(rows))
 
-    query = "SELECT session_id, date, subject, created_at, teacher_id, subject_code FROM sessions ORDER BY date DESC, session_id ASC"
     with _get_conn(target) as conn:
-        cursor = conn.execute(query)
+        available = _session_table_columns(conn)
+        select_columns = ", ".join(_session_select_columns(available))
+        cursor = conn.execute(
+            f"SELECT {select_columns} FROM sessions ORDER BY date DESC, session_id ASC"
+        )
         return _rows_to_dicts(cursor.fetchall())
 
 
@@ -634,9 +677,13 @@ def get_sessions_by_date(
         rows = target.scalars(stmt).all()
         return _rows_to_dicts(list(rows))
 
-    query = "SELECT session_id, date, subject, created_at, teacher_id, subject_code FROM sessions WHERE date = ? ORDER BY session_id ASC"
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, (clean_date,))
+        available = _session_table_columns(conn)
+        select_columns = ", ".join(_session_select_columns(available))
+        cursor = conn.execute(
+            f"SELECT {select_columns} FROM sessions WHERE date = ? ORDER BY session_id ASC",
+            (clean_date,),
+        )
         return _rows_to_dicts(cursor.fetchall())
 
 
@@ -694,10 +741,185 @@ def get_sessions_paginated(
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     with _get_conn(target) as conn:
+        available = _session_table_columns(conn)
+        select_columns = ", ".join(_session_select_columns(available))
         count_cursor = conn.execute(f"SELECT COUNT(*) FROM sessions {where_sql}", params)
         total = count_cursor.fetchone()[0]
 
-        data_query = f"SELECT session_id, date, subject, created_at, teacher_id, subject_code FROM sessions {where_sql} ORDER BY date DESC, session_id ASC LIMIT ? OFFSET ?"
+        data_query = (
+            f"SELECT {select_columns} FROM sessions {where_sql} "
+            "ORDER BY date DESC, session_id ASC LIMIT ? OFFSET ?"
+        )
+        data_params = params + [limit_val, offset_val]
+        data_cursor = conn.execute(data_query, data_params)
+        items = _rows_to_dicts(data_cursor.fetchall())
+        return items, total
+
+
+# ---------------------------------------------------------------------------
+# Session visibility scoping
+# ---------------------------------------------------------------------------
+
+# Owner values that mean "no real owner". Migration 0002 backfills the literal
+# sentinel 'legacy' for sessions that predate teacher ownership.
+LEGACY_SESSION_OWNER_SENTINELS = ("", "legacy")
+
+
+def normalize_subject_code(raw: Optional[str]) -> str:
+    """Normalize a subject code for EXACT equality comparisons.
+
+    ' ml ' and 'ML' are the same code; 'HTML' is a different code than 'ML'.
+    Never compare raw subject codes with substring matching.
+    """
+    if raw is None:
+        return ""
+    return str(raw).strip().upper()
+
+
+def _session_scope_condition_orm(user_id: str, subject_codes: List[str]):
+    """SQLAlchemy predicate restricting sessions to one caller's scope.
+
+    Mirrors the N3 session-ownership policy:
+      * sessions owned by the caller are visible;
+      * unowned / legacy sessions are visible when the caller coordinates them
+        or is mapped to the session's subject code (exact, normalized match);
+      * sessions owned by somebody else are never visible.
+    """
+    unowned = or_(
+        DbSession.teacher_id.is_(None),
+        DbSession.teacher_id.in_(list(LEGACY_SESSION_OWNER_SENTINELS)),
+    )
+    owned_by_viewer = DbSession.teacher_id == user_id
+
+    inner: List[Any] = []
+    if user_id:
+        inner.append(DbSession.coordinator_faculty_id == user_id)
+    if subject_codes:
+        inner.append(func.upper(DbSession.subject_code).in_(subject_codes))
+
+    if not inner:
+        return owned_by_viewer
+    return or_(owned_by_viewer, and_(unowned, or_(*inner)))
+
+
+def get_sessions_paginated_scoped(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    *,
+    date: Optional[str] = None,
+    search: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+    scope_user_id: Optional[str] = None,
+    scope_subject_codes: Optional[Sequence[str]] = None,
+    unrestricted: bool = False,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Paginated session listing restricted to the caller's visibility scope.
+
+    The scope is applied inside the SQL statement, before COUNT, LIMIT and
+    OFFSET, so pagination, date filters and search terms can never widen the
+    result set (or the reported total) beyond what the caller may see.
+
+    Visibility rules:
+      * ``unrestricted=True`` (ADMIN): every session.
+      * a session owned by a real teacher: visible to that teacher only.
+      * an unowned / legacy session: visible to its coordinator, or to a
+        teacher mapped to the session's subject code (exact, normalized match).
+    """
+    limit_val = max(1, min(200, limit))
+    offset_val = max(0, offset)
+
+    clean_uid = (scope_user_id or "").strip()
+    clean_codes = sorted(
+        {
+            normalize_subject_code(code)
+            for code in (scope_subject_codes or [])
+            if normalize_subject_code(code)
+        }
+    )
+
+    if isinstance(target, Session):
+        conditions = []
+        if date and date.strip():
+            conditions.append(DbSession.date == date.strip())
+        if search and search.strip():
+            term = f"%{search.strip().lower()}%"
+            conditions.append(
+                or_(
+                    func.lower(DbSession.session_id).like(term),
+                    func.lower(DbSession.subject).like(term),
+                )
+            )
+        if not unrestricted:
+            conditions.append(_session_scope_condition_orm(clean_uid, clean_codes))
+
+        count_stmt = select(func.count(DbSession.session_id))
+        if conditions:
+            count_stmt = count_stmt.where(and_(*conditions))
+        total = target.scalar(count_stmt) or 0
+
+        stmt = select(DbSession)
+        if conditions:
+            stmt = stmt.where(and_(*conditions))
+        stmt = (
+            stmt.order_by(DbSession.date.desc(), DbSession.session_id.asc())
+            .limit(limit_val)
+            .offset(offset_val)
+        )
+        rows = target.scalars(stmt).all()
+        return _rows_to_dicts(list(rows)), total
+
+    where_clauses: List[str] = []
+    params: List[Any] = []
+    if date and date.strip():
+        where_clauses.append("date = ?")
+        params.append(date.strip())
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        where_clauses.append("(LOWER(session_id) LIKE ? OR LOWER(subject) LIKE ?)")
+        params.extend([term, term])
+
+    with _get_conn(target) as conn:
+        available = _session_table_columns(conn)
+        select_columns = ", ".join(_session_select_columns(available))
+
+        if not unrestricted:
+            scope_parts: List[str] = []
+            scope_params: List[Any] = []
+            inner_parts: List[str] = []
+            inner_params: List[Any] = []
+            if "teacher_id" in available:
+                scope_parts.append("teacher_id = ?")
+                scope_params.append(clean_uid)
+            if clean_uid and "coordinator_faculty_id" in available:
+                inner_parts.append("coordinator_faculty_id = ?")
+                inner_params.append(clean_uid)
+            if clean_codes and "subject_code" in available:
+                placeholders = ",".join("?" for _ in clean_codes)
+                inner_parts.append(f"UPPER(subject_code) IN ({placeholders})")
+                inner_params.extend(clean_codes)
+            if inner_parts:
+                owner_guard = (
+                    "COALESCE(teacher_id, '') IN ('', 'legacy')"
+                    if "teacher_id" in available
+                    else "1 = 1"
+                )
+                scope_parts.append(
+                    f"({owner_guard} AND (" + " OR ".join(inner_parts) + "))"
+                )
+                scope_params.extend(inner_params)
+            if scope_parts:
+                where_clauses.append("(" + " OR ".join(scope_parts) + ")")
+                params.extend(scope_params)
+
+        where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        count_cursor = conn.execute(f"SELECT COUNT(*) FROM sessions {where_sql}", params)
+        total = count_cursor.fetchone()[0]
+
+        data_query = (
+            f"SELECT {select_columns} FROM sessions {where_sql} "
+            "ORDER BY date DESC, session_id ASC LIMIT ? OFFSET ?"
+        )
         data_params = params + [limit_val, offset_val]
         data_cursor = conn.execute(data_query, data_params)
         items = _rows_to_dicts(data_cursor.fetchall())
@@ -783,8 +1005,12 @@ def insert_attendance(
             if dialect_name == "postgresql":
                 stmt = pg_insert(Attendance).values(record)
                 if clean_allocation_id:
+                    # Uniqueness for allocation rows lives in the *partial* index
+                    # idx_attendance_allocation_usn, so the conflict target must
+                    # carry the matching predicate via index_where.
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["allocation_id", "usn"],
+                        index_where=Attendance.allocation_id.is_not(None),
                         set_={
                             "room_id": stmt.excluded.room_id,
                             "status": stmt.excluded.status,
@@ -796,7 +1022,7 @@ def insert_attendance(
                 else:
                     stmt = stmt.on_conflict_do_update(
                         index_elements=["session_id", "usn"],
-                        where=Attendance.allocation_id.is_(None),
+                        index_where=Attendance.allocation_id.is_(None),
                         set_={
                             "room_id": stmt.excluded.room_id,
                             "status": stmt.excluded.status,
@@ -945,7 +1171,17 @@ def insert_attendance_bulk(
     records: Optional[List[Dict[str, Any]]] = None,
     upsert: bool = False,
 ) -> int:
-    """Insert multiple attendance records."""
+    """Insert multiple attendance records, optionally updating existing rows.
+
+    Upsert is UPDATE-first on both dialects so an existing row keeps its
+    surrogate ``attendance_id``; a DELETE+INSERT would also cascade-delete any
+    ``pending_edits`` rows that reference that attendance_id.
+
+    Uniqueness is enforced by two *partial* unique indexes
+    (``idx_attendance_legacy_session_usn`` for legacy rows and
+    ``idx_attendance_allocation_usn`` for allocation rows), so a PostgreSQL
+    ``ON CONFLICT`` target must carry the matching predicate via ``index_where``.
+    """
     if isinstance(target_or_records, list) and records is None:
         target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH
         actual_records = target_or_records
@@ -957,13 +1193,13 @@ def insert_attendance_bulk(
         {
             "attendance_id": str(uuid4()),
             "session_id": r["session_id"].strip(),
-            "allocation_id": r.get("allocation_id"),
+            "allocation_id": (r.get("allocation_id") or None),
             "usn": r["usn"].strip(),
             "room_id": r["room_id"].strip(),
             "status": normalize_attendance_status(r["status"]),
             "source": r["source"].strip(),
             "confidence": float(r.get("confidence", 1.0)),
-            "recorded_at": _utcnow_iso(),
+            "recorded_at": r.get("recorded_at") or _utcnow_iso(),
         }
         for r in actual_records
     ]
@@ -975,146 +1211,118 @@ def insert_attendance_bulk(
         bind = target.get_bind()
         dialect_name = bind.dialect.name if bind else "sqlite"
 
-        if upsert:
-            if dialect_name == "postgresql":
-                stmt = pg_insert(Attendance).values(formatted_records)
-                stmt = stmt.on_conflict_do_update(
-                    index_elements=["session_id", "usn"],
-                    set_={
-                        "room_id": stmt.excluded.room_id,
-                        "status": stmt.excluded.status,
-                        "source": stmt.excluded.source,
-                        "confidence": stmt.excluded.confidence,
-                    },
-                )
-            else:
-                # SQLite: UPDATE-first upsert per record (no UNIQUE constraint
-                # on (session_id, usn) - only partial indexes, so ON CONFLICT
-                # cannot be used reliably here)
-                for rec in formatted_records:
-                    alloc_id = rec.get("allocation_id")
-                    if alloc_id:
-                        target.execute(
-                            update(Attendance).where(
-                                Attendance.allocation_id == alloc_id,
-                                Attendance.usn == rec["usn"],
-                            ).values(
-                                room_id=rec["room_id"],
-                                status=rec["status"],
-                                source=rec["source"],
-                                confidence=rec["confidence"],
-                                recorded_at=rec["recorded_at"],
-                            )
-                        )
-                        existing = target.execute(
-                            select(Attendance).where(
-                                Attendance.allocation_id == alloc_id,
-                                Attendance.usn == rec["usn"],
-                            )
-                        ).first()
-                    else:
-                        target.execute(
-                            update(Attendance).where(
-                                Attendance.session_id == rec["session_id"],
-                                Attendance.usn == rec["usn"],
-                                Attendance.allocation_id.is_(None),
-                            ).values(
-                                room_id=rec["room_id"],
-                                status=rec["status"],
-                                source=rec["source"],
-                                confidence=rec["confidence"],
-                                recorded_at=rec["recorded_at"],
-                            )
-                        )
-                        existing = target.execute(
-                            select(Attendance).where(
-                                Attendance.session_id == rec["session_id"],
-                                Attendance.usn == rec["usn"],
-                                Attendance.allocation_id.is_(None),
-                            )
-                        ).first()
-                    if not existing:
-                        target.add(Attendance(**rec))
-            target.flush()
-            return len(formatted_records)
-        else:
+        if not upsert:
             target.bulk_insert_mappings(Attendance, formatted_records)
             target.flush()
             return len(formatted_records)
 
-    formatted_records = [
-        {
-            "attendance_id": str(uuid4()),
-            "session_id": r["session_id"].strip(),
-            "allocation_id": r.get("allocation_id"),
-            "usn": r["usn"].strip(),
-            "room_id": r["room_id"].strip(),
-            "status": normalize_attendance_status(r["status"]),
-            "source": r["source"].strip(),
-            "confidence": float(r.get("confidence", 1.0)),
-            "recorded_at": _utcnow_iso(),
-        }
-        for r in actual_records
-    ]
+        if dialect_name == "postgresql":
+            # The two partial unique indexes are disjoint: split by scope so each
+            # ON CONFLICT target names the index that actually applies.
+            legacy_records = [r for r in formatted_records if not r["allocation_id"]]
+            allocation_records = [r for r in formatted_records if r["allocation_id"]]
 
-    if not formatted_records:
-        return 0
+            updated_columns = ("room_id", "status", "source", "confidence", "recorded_at")
 
-    if isinstance(target, Session):
-        bind = target.get_bind()
-        dialect_name = bind.dialect.name if bind else "sqlite"
-
-        if upsert:
-            if dialect_name == "postgresql":
-                stmt = pg_insert(Attendance).values(formatted_records)
+            if legacy_records:
+                stmt = pg_insert(Attendance).values(legacy_records)
                 stmt = stmt.on_conflict_do_update(
                     index_elements=["session_id", "usn"],
-                    set_={
-                        "room_id": stmt.excluded.room_id,
-                        "status": stmt.excluded.status,
-                        "source": stmt.excluded.source,
-                        "confidence": stmt.excluded.confidence,
-                        "recorded_at": stmt.excluded.recorded_at,
-                    },
-                    where=Attendance.allocation_id.is_(None),
+                    index_where=Attendance.allocation_id.is_(None),
+                    set_={col: getattr(stmt.excluded, col) for col in updated_columns},
                 )
-            else:
-                # SQLite: delete existing then insert (no partial index ON CONFLICT support)
-                for r in formatted_records:
-                    target.execute(
-                        delete(Attendance).where(
-                            Attendance.session_id == r["session_id"],
-                            Attendance.usn == r["usn"],
-                            Attendance.allocation_id.is_(None),
-                        )
-                    )
-                target.bulk_insert_mappings(Attendance, formatted_records)
-                target.flush()
-                return len(formatted_records)
-        else:
-            target.bulk_insert_mappings(Attendance, formatted_records)
+                target.execute(stmt)
+
+            # Allocation-scoped rows may target different allocations, so they
+            # are upserted one statement per record.
+            for rec in allocation_records:
+                stmt = pg_insert(Attendance).values(**rec)
+                stmt = stmt.on_conflict_do_update(
+                    index_elements=["allocation_id", "usn"],
+                    index_where=Attendance.allocation_id.is_not(None),
+                    set_={col: getattr(stmt.excluded, col) for col in updated_columns},
+                )
+                target.execute(stmt)
+
             target.flush()
             return len(formatted_records)
 
-    # Raw SQLite path - no ON CONFLICT support for partial indexes
+        # SQLite: UPDATE-first upsert per record (a partial index cannot be used
+        # as an ON CONFLICT target portably).
+        for rec in formatted_records:
+            alloc_id = rec.get("allocation_id")
+            if alloc_id:
+                match = (
+                    Attendance.allocation_id == alloc_id,
+                    Attendance.usn == rec["usn"],
+                )
+            else:
+                match = (
+                    Attendance.session_id == rec["session_id"],
+                    Attendance.usn == rec["usn"],
+                    Attendance.allocation_id.is_(None),
+                )
+            target.execute(
+                update(Attendance).where(*match).values(
+                    room_id=rec["room_id"],
+                    status=rec["status"],
+                    source=rec["source"],
+                    confidence=rec["confidence"],
+                    recorded_at=rec["recorded_at"],
+                )
+            )
+            existing = target.execute(select(Attendance.attendance_id).where(*match)).first()
+            if existing is None:
+                target.add(Attendance(**rec))
+        target.flush()
+        return len(formatted_records)
+
+    # Raw sqlite3.Connection path.
+    query = """
+    INSERT INTO attendance (attendance_id, session_id, allocation_id, usn, room_id, status, source, confidence, recorded_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """
     with _get_conn(target) as conn:
         if upsert:
-            # For upsert in raw SQLite, we delete existing then insert
+            # UPDATE-first: deleting first would discard the existing surrogate
+            # attendance_id and cascade-delete dependent pending_edits.
             for r in formatted_records:
-                existing = conn.execute(
-                    "SELECT attendance_id FROM attendance WHERE session_id = ? AND usn = ? AND allocation_id IS NULL",
-                    (r["session_id"], r["usn"])
-                ).fetchone()
-                if existing:
+                if r["allocation_id"]:
                     conn.execute(
-                        "DELETE FROM attendance WHERE session_id = ? AND usn = ? AND allocation_id IS NULL",
-                        (r["session_id"], r["usn"])
+                        "UPDATE attendance SET room_id=?, status=?, source=?, confidence=?, recorded_at=? "
+                        "WHERE allocation_id=? AND usn=?",
+                        (
+                            r["room_id"], r["status"], r["source"], r["confidence"], r["recorded_at"],
+                            r["allocation_id"], r["usn"],
+                        ),
                     )
+                    existing = conn.execute(
+                        "SELECT 1 FROM attendance WHERE allocation_id=? AND usn=? LIMIT 1",
+                        (r["allocation_id"], r["usn"]),
+                    ).fetchone()
+                else:
+                    conn.execute(
+                        "UPDATE attendance SET room_id=?, status=?, source=?, confidence=?, recorded_at=? "
+                        "WHERE session_id=? AND usn=? AND allocation_id IS NULL",
+                        (
+                            r["room_id"], r["status"], r["source"], r["confidence"], r["recorded_at"],
+                            r["session_id"], r["usn"],
+                        ),
+                    )
+                    existing = conn.execute(
+                        "SELECT 1 FROM attendance WHERE session_id=? AND usn=? AND allocation_id IS NULL LIMIT 1",
+                        (r["session_id"], r["usn"]),
+                    ).fetchone()
+                if existing is None:
+                    conn.execute(
+                        query,
+                        (r["attendance_id"], r["session_id"], r["allocation_id"], r["usn"],
+                         r["room_id"], r["status"], r["source"], r["confidence"], r["recorded_at"]),
+                    )
+            if isinstance(target, sqlite3.Connection):
+                conn.commit()
+            return len(formatted_records)
 
-        query = """
-        INSERT INTO attendance (attendance_id, session_id, allocation_id, usn, room_id, status, source, confidence, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """
         cursor = conn.cursor()
         insert_rows = [
             (r["attendance_id"], r["session_id"], r["allocation_id"], r["usn"], r["room_id"],
@@ -1126,13 +1334,24 @@ def insert_attendance_bulk(
             conn.commit()
         return cursor.rowcount
 
-
 def delete_session_attendance(
     target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
     session_id: str = "",
 ) -> int:
-    """Delete all attendance records for a specific session without affecting other sessions."""
+    """Delete all attendance records for a specific session without affecting other sessions.
+
+    Raises ``ValueError`` when students still have unconsumed staged edits: the
+    RESTRICT foreign key would otherwise abort the delete at the database.
+    """
     clean_id = session_id.strip()
+    staged = get_usns_with_pending_edits(target, clean_id)
+    if staged:
+        raise ValueError(
+            "Cannot delete attendance for session "
+            f"'{clean_id}': {len(staged)} student(s) have unconsumed pending edits "
+            f"({', '.join(staged[:5])}{'…' if len(staged) > 5 else ''}). "
+            "Confirm or discard the staged edits first."
+        )
 
     if isinstance(target, Session):
         stmt = delete(Attendance).where(Attendance.session_id == clean_id)
@@ -1146,6 +1365,106 @@ def delete_session_attendance(
         if isinstance(target, sqlite3.Connection):
             conn.commit()
         return cursor.rowcount
+
+
+def resolve_session_room_id(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    session_id: str = "",
+    usn: Optional[str] = None,
+) -> Optional[str]:
+    """Resolve a room that genuinely belongs to a session.
+
+    Order of preference (never a hardcoded default):
+      1. the room already recorded for this student's attendance row,
+      2. the session's single allocation room (ambiguous if several),
+      3. the single room already present on the session's attendance rows.
+    Returns ``None`` when the session has no unambiguous room, so the caller can
+    reject the request instead of inventing one.
+    """
+    clean_id = session_id.strip()
+    if not clean_id:
+        return None
+
+    def _pick(values: Sequence[Optional[str]]) -> Optional[str]:
+        uniq = {str(v).strip() for v in values if v and str(v).strip()}
+        return uniq.pop() if len(uniq) == 1 else None
+
+    if isinstance(target, Session):
+        if usn:
+            existing = target.scalars(
+                select(Attendance.room_id).where(
+                    Attendance.session_id == clean_id, Attendance.usn == usn.strip().upper()
+                )
+            ).all()
+            picked = _pick(existing)
+            if picked:
+                return picked
+        allocation_rooms = target.scalars(
+            select(SessionAllocation.room_id).where(
+                SessionAllocation.session_id == clean_id
+            )
+        ).all()
+        picked = _pick(allocation_rooms)
+        if picked:
+            return picked
+        return _pick(
+            target.scalars(
+                select(Attendance.room_id).where(Attendance.session_id == clean_id)
+            ).all()
+        )
+
+    with _get_conn(target) as conn:
+        if usn:
+            rows = conn.execute(
+                "SELECT room_id FROM attendance WHERE session_id = ? AND usn = ?",
+                (clean_id, usn.strip().upper()),
+            ).fetchall()
+            picked = _pick([r[0] for r in rows])
+            if picked:
+                return picked
+        rows = conn.execute(
+            "SELECT room_id FROM session_allocations WHERE session_id = ?", (clean_id,)
+        ).fetchall()
+        picked = _pick([r[0] for r in rows])
+        if picked:
+            return picked
+        rows = conn.execute(
+            "SELECT room_id FROM attendance WHERE session_id = ?", (clean_id,)
+        ).fetchall()
+        return _pick([r[0] for r in rows])
+
+
+def get_usns_with_pending_edits(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    session_id: str = "",
+) -> List[str]:
+    """USNs in a session that still have unconsumed staged attendance edits.
+
+    ``pending_edits.attendance_id`` is ON DELETE RESTRICT, so deleting such an
+    attendance row fails at the database. Callers use this to reject the whole
+    operation up front with a clear message instead of losing staged work.
+    """
+    clean_id = session_id.strip()
+    if not clean_id:
+        return []
+
+    if isinstance(target, Session):
+        stmt = (
+            select(PendingEdit.usn)
+            .join(Attendance, PendingEdit.attendance_id == Attendance.attendance_id)
+            .where(Attendance.session_id == clean_id, PendingEdit.consumed == 0)
+            .distinct()
+        )
+        return sorted({str(u) for u in target.scalars(stmt).all() if u})
+
+    with _get_conn(target) as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT pe.usn FROM pending_edits pe "
+            "JOIN attendance a ON a.attendance_id = pe.attendance_id "
+            "WHERE a.session_id = ? AND pe.consumed = 0",
+            (clean_id,),
+        ).fetchall()
+        return sorted({str(r[0]) for r in rows if r[0]})
 
 
 def replace_session_attendance(
@@ -1167,7 +1486,7 @@ def replace_session_attendance(
             raise ValueError("Each attendance record must be a mapping with string keys.")
         try:
             usn = str(r.get("usn", "")).strip().upper()
-            room_id = str(r.get("room_id", "LH-101")).strip()
+            room_id = str(r.get("room_id") or "").strip()
             status = normalize_attendance_status(str(r.get("status", "UNREVIEWED")))
             source = str(r.get("source", "UI_CONFIRMED")).strip()
             confidence = float(r.get("confidence", 1.0))
@@ -1178,7 +1497,14 @@ def replace_session_attendance(
             raise ValueError("Invalid attendance record: usn is empty.")
 
         if not room_id:
-            room_id = "LH-101"
+            # No invented default: use the room the session actually has.
+            room_id = resolve_session_room_id(target, clean_id, usn) or ""
+        if not room_id:
+            raise ValueError(
+                f"Invalid attendance record for '{usn}': room_id is required because "
+                f"session '{clean_id}' has no unambiguous room on record. "
+                "Supply room_id explicitly."
+            )
         if not status:
             status = "UNREVIEWED"
         if not source:
@@ -1187,6 +1513,9 @@ def replace_session_attendance(
         validated_records.append({
             "attendance_id": str(uuid4()),
             "session_id": clean_id,
+            "allocation_id": (
+                str(r.get("allocation_id")).strip() if r.get("allocation_id") else None
+            ),
             "usn": usn,
             "room_id": room_id,
             "status": status,
@@ -1195,14 +1524,60 @@ def replace_session_attendance(
             "recorded_at": _utcnow_iso(),
         })
 
+    def _match_clause(rec: Dict[str, Any]):
+        if rec["allocation_id"]:
+            return (Attendance.allocation_id == rec["allocation_id"], Attendance.usn == rec["usn"])
+        return (
+            Attendance.session_id == clean_id,
+            Attendance.usn == rec["usn"],
+            Attendance.allocation_id.is_(None),
+        )
+
     if isinstance(target, Session):
         # Transaction safety: execute within nested transaction if one exists, or rely on caller session
         # Use a SAVEPOINT if in an outer transaction so partial failure rolls back cleanly
         savepoint = target.begin_nested()
         try:
-            target.execute(delete(Attendance).where(Attendance.session_id == clean_id))
-            if validated_records:
-                target.bulk_insert_mappings(Attendance, validated_records)
+            # UPDATE-first so an existing row keeps its surrogate attendance_id;
+            # pending_edits.attendance_id is ON DELETE CASCADE and must survive a
+            # re-upload of the same session roster.
+            kept_ids: Set[str] = set()
+            for rec in validated_records:
+                existing = target.execute(select(Attendance).where(*_match_clause(rec))).scalars().first()
+                if existing is not None:
+                    existing.room_id = rec["room_id"]
+                    existing.status = rec["status"]
+                    existing.source = rec["source"]
+                    existing.confidence = rec["confidence"]
+                    existing.recorded_at = rec["recorded_at"]
+                    kept_ids.add(existing.attendance_id)
+                else:
+                    target.add(Attendance(**rec))
+                    kept_ids.add(rec["attendance_id"])
+
+            # Only rows no longer present in the payload are removed.
+            stale_stmt = select(Attendance.attendance_id).where(Attendance.session_id == clean_id)
+            if kept_ids:
+                stale_stmt = stale_stmt.where(Attendance.attendance_id.notin_(kept_ids))
+            stale_ids = [row[0] for row in target.execute(stale_stmt).all()]
+            if stale_ids:
+                blocked = target.scalars(
+                    select(PendingEdit.usn)
+                    .where(
+                        PendingEdit.attendance_id.in_(stale_ids),
+                        PendingEdit.consumed == 0,
+                    )
+                    .distinct()
+                ).all()
+                if blocked:
+                    raise ValueError(
+                        "Cannot drop attendance for staged students "
+                        f"({', '.join(sorted({str(b) for b in blocked}))}): "
+                        "they have unconsumed pending edits. Confirm or discard "
+                        "the staged edits first."
+                    )
+                target.execute(delete(Attendance).where(Attendance.attendance_id.in_(stale_ids)))
+
             target.flush()
             savepoint.commit()
             return len(validated_records)
@@ -1211,17 +1586,49 @@ def replace_session_attendance(
             raise
 
     with _get_conn(target) as conn:
-        conn.execute("DELETE FROM attendance WHERE session_id = ?", (clean_id,))
-        query = """
-        INSERT INTO attendance (attendance_id, session_id, usn, room_id, status, source, confidence, recorded_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """
-        cursor = conn.cursor()
-        insert_rows = [
-            (v["attendance_id"], v["session_id"], v["usn"], v["room_id"], v["status"], v["source"], v["confidence"], v["recorded_at"])
-            for v in validated_records
-        ]
-        cursor.executemany(query, insert_rows)
+        kept_ids: List[str] = []
+        for v in validated_records:
+            if v["allocation_id"]:
+                conn.execute(
+                    "UPDATE attendance SET room_id=?, status=?, source=?, confidence=?, recorded_at=? "
+                    "WHERE allocation_id=? AND usn=?",
+                    (v["room_id"], v["status"], v["source"], v["confidence"], v["recorded_at"],
+                     v["allocation_id"], v["usn"]),
+                )
+                row = conn.execute(
+                    "SELECT attendance_id FROM attendance WHERE allocation_id=? AND usn=? LIMIT 1",
+                    (v["allocation_id"], v["usn"]),
+                ).fetchone()
+            else:
+                conn.execute(
+                    "UPDATE attendance SET room_id=?, status=?, source=?, confidence=?, recorded_at=? "
+                    "WHERE session_id=? AND usn=? AND allocation_id IS NULL",
+                    (v["room_id"], v["status"], v["source"], v["confidence"], v["recorded_at"],
+                     clean_id, v["usn"]),
+                )
+                row = conn.execute(
+                    "SELECT attendance_id FROM attendance WHERE session_id=? AND usn=? AND allocation_id IS NULL LIMIT 1",
+                    (clean_id, v["usn"]),
+                ).fetchone()
+            if row is None:
+                conn.execute(
+                    "INSERT INTO attendance (attendance_id, session_id, allocation_id, usn, room_id, status, source, confidence, recorded_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (v["attendance_id"], v["session_id"], v["allocation_id"], v["usn"],
+                     v["room_id"], v["status"], v["source"], v["confidence"], v["recorded_at"]),
+                )
+                kept_ids.append(v["attendance_id"])
+            else:
+                kept_ids.append(row[0])
+
+        if kept_ids:
+            placeholders = ",".join("?" for _ in kept_ids)
+            conn.execute(
+                f"DELETE FROM attendance WHERE session_id = ? AND attendance_id NOT IN ({placeholders})",
+                (clean_id, *kept_ids),
+            )
+        else:
+            conn.execute("DELETE FROM attendance WHERE session_id = ?", (clean_id,))
         if isinstance(target, sqlite3.Connection):
             conn.commit()
         return len(validated_records)
@@ -1250,9 +1657,15 @@ def reconcile_session_roster(
     }
 
     reconciled: List[Dict[str, Any]] = []
+    unresolved_rooms: List[str] = []
     for item in roster:
         usn = item["usn"].strip().upper()
-        room_id = item.get("room_id", "LH-101").strip()
+        # Prefer the caller's room, then the room the session/student actually has.
+        room_id = str(item.get("room_id") or "").strip()
+        if not room_id:
+            room_id = resolve_session_room_id(target, session_id, usn) or ""
+        if not room_id:
+            unresolved_rooms.append(usn)
 
         if room_id in missing_rooms or usn not in uploaded_by_usn:
             status = "PENDING"
@@ -1286,6 +1699,13 @@ def reconcile_session_roster(
         })
 
     if persist:
+        if unresolved_rooms:
+            raise ValueError(
+                "Cannot persist reconciliation: no room is known for "
+                f"{len(unresolved_rooms)} student(s) ({', '.join(unresolved_rooms[:5])}"
+                f"{'…' if len(unresolved_rooms) > 5 else ''}). "
+                "Supply room_id in the roster or allocation data."
+            )
         replace_session_attendance(target, session_id, reconciled)
 
     return reconciled
@@ -1416,6 +1836,32 @@ def get_attendance_by_session(
         }
         for r in rows
     ]
+
+
+def is_teacher_assigned_to_subject(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    user_id: str = "",
+    subject_code: str = "",
+) -> bool:
+    """True when ``user_id`` is mapped to ``subject_code`` in teacher_subjects."""
+    clean_user = (user_id or "").strip()
+    clean_code = (subject_code or "").strip().upper()
+    if not clean_user or not clean_code:
+        return False
+
+    if isinstance(target, Session):
+        stmt = select(TeacherSubject.id).where(
+            TeacherSubject.user_id == clean_user,
+            func.upper(TeacherSubject.subject_code) == clean_code,
+        )
+        return target.execute(stmt).first() is not None
+
+    with _get_conn(target) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
+            (clean_user, clean_code),
+        ).fetchone()
+        return row is not None
 
 
 def get_attendance_by_student(

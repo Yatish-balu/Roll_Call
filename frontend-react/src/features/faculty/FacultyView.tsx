@@ -351,14 +351,14 @@ export function FacultyView() {
             <form onSubmit={handleAssign} className="mt-4 space-y-3.5">
               <div>
                 <label className="block text-xs font-semibold text-[#77735F] mb-1">
-                  Faculty User ID (e.g. faculty_ds, faculty_ml)
+                  Faculty User ID (e.g. TEACHER_ID)
                 </label>
                 <input
                   type="text"
                   required
                   value={teacherId}
                   onChange={(e) => setTeacherId(e.target.value)}
-                  placeholder="faculty_ds"
+                  placeholder="TEACHER_ID"
                   className="w-full bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl px-3.5 py-2 text-sm text-[#24251C] focus:outline-none focus:border-[#3F451F]"
                 />
               </div>

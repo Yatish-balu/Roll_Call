@@ -26,7 +26,13 @@ def upgrade() -> None:
     if _is_sqlite():
         # SQLite: batch mode for FK change
         with op.batch_alter_table("pending_edits") as batch_op:
-            batch_op.drop_constraint("fk_pending_edits_attendance", type_="foreignkey")
+            # Drop the old (session_id, usn) FK only if it exists.
+            # It may already be absent if this migration was previously
+            # downgraded (which removes it) and is now being re-applied.
+            inspector = sa.inspect(op.get_bind())
+            existing_fks = [fk["name"] for fk in inspector.get_foreign_keys("pending_edits")]
+            if "fk_pending_edits_attendance" in existing_fks:
+                batch_op.drop_constraint("fk_pending_edits_attendance", type_="foreignkey")
             batch_op.add_column(
                 sa.Column("attendance_id", sa.String(), nullable=True),
             )
@@ -39,7 +45,11 @@ def upgrade() -> None:
             )
     else:
         # PostgreSQL: direct ALTER TABLE
-        op.drop_constraint("fk_pending_edits_attendance", table_name="pending_edits", type_="foreignkey")
+        conn = op.get_bind()
+        inspector = sa.inspect(conn)
+        existing_fks = [fk["name"] for fk in inspector.get_foreign_keys("pending_edits")]
+        if "fk_pending_edits_attendance" in existing_fks:
+            op.drop_constraint("fk_pending_edits_attendance", table_name="pending_edits", type_="foreignkey")
         op.add_column(
             "pending_edits",
             sa.Column("attendance_id", sa.String(), nullable=True),

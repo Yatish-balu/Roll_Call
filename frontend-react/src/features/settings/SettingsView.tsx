@@ -109,9 +109,9 @@ export function SettingsView() {
                 Department of Computer Science & Engineering • RollCall AI Faculty Registry
               </p>
               <div className="flex items-center gap-2 mt-2 text-xs font-mono text-[#77735F]">
-                <span>ID: {session.userId || "faculty_ds"}</span>
+                <span>ID: {session.userId || "N/A"}</span>
                 <span>•</span>
-                <span>{session.userId || "faculty_ds"}@rollcall.internal</span>
+                <span>{session.userId ? `${session.userId}@rollcall.internal` : "user@rollcall.internal"}</span>
               </div>
             </div>
           </div>

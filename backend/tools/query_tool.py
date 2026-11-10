@@ -52,13 +52,28 @@ class QueryResult:
         return asdict(self)
 
 
+def _normalize_postgres_url(raw: str) -> str:
+    """Normalize a PostgreSQL URL to the project-standard psycopg v3 driver.
+
+    ``postgresql://`` makes SQLAlchemy default to psycopg2, whose connect-time
+    catalogue introspection can fail against a transaction-mode pooler. The
+    application uses psycopg v3 everywhere else, so pin it explicitly here too.
+    """
+    if raw.startswith("postgres://"):
+        raw = "postgresql://" + raw[len("postgres://"):]
+    if raw.startswith("postgresql://"):
+        raw = "postgresql+psycopg://" + raw[len("postgresql://"):]
+    return raw
+
+
 class _ReadOnlyDB:
     """Unified read-only connection wrapper for SQLite or Supabase (SQLAlchemy)."""
 
-    def __init__(self, mode: str, conn: Any, should_close: bool = True):
+    def __init__(self, mode: str, conn: Any, should_close: bool = True, engine: Any = None):
         self.mode = mode
         self.conn = conn
         self.should_close = should_close
+        self.engine = engine
 
     def execute(self, sql: str, params: Union[Tuple[Any, ...], List[Any], Dict[str, Any]] = ()):
         if self.mode == "sqlalchemy":
@@ -81,6 +96,11 @@ class _ReadOnlyDB:
         if self.should_close:
             try:
                 self.conn.close()
+            except Exception:
+                pass
+        if self.engine is not None:
+            try:
+                self.engine.dispose()
             except Exception:
                 pass
 
@@ -110,11 +130,22 @@ def _get_readonly_conn(
             raise ConnectionError("Database connection failed: READONLY_DATABASE_URL or DATABASE_URL not configured.")
         try:
             from sqlalchemy import create_engine
-            if ro_url.startswith("postgres://"):
-                ro_url = ro_url.replace("postgres://", "postgresql://", 1)
-            engine = create_engine(ro_url, pool_pre_ping=True)
+            ro_url = _normalize_postgres_url(ro_url)
+            engine_kwargs: Dict[str, Any] = {"pool_pre_ping": True}
+            connect_args: Dict[str, Any] = {}
+            is_local = "localhost" in ro_url or "127.0.0.1" in ro_url
+            if "sslmode=" not in ro_url and not is_local:
+                # Supabase requires TLS. psycopg v3 takes sslmode via connect_args.
+                connect_args["sslmode"] = "require"
+            if "connect_timeout=" not in ro_url:
+                # Never hang indefinitely when the database is unreachable or
+                # credentials are unavailable; surface a clear ConnectionError.
+                connect_args["connect_timeout"] = int(os.getenv("DB_CONNECT_TIMEOUT", "10"))
+            if connect_args:
+                engine_kwargs["connect_args"] = connect_args
+            engine = create_engine(ro_url, **engine_kwargs)
             conn = engine.connect()
-            return _ReadOnlyDB("sqlalchemy", conn, should_close=True)
+            return _ReadOnlyDB("sqlalchemy", conn, should_close=True, engine=engine)
         except Exception as exc:
             raise ConnectionError(f"Database connection failed: {exc}")
 

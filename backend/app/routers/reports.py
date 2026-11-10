@@ -12,6 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user, rate_limit_reports
+from app.auth.session_scope import SessionScope, resolve_session_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.analytics import ExportReportRequest
@@ -28,12 +29,16 @@ PDF_MEDIA_TYPE = "application/pdf"
 
 def _gather_export_records(
     db: Session,
+    scope: SessionScope,
     session_id: str | None = None,
     date: str | None = None,
 ) -> tuple[List[Dict[str, Any]], str]:
     """
     Fetch verified attendance records from the database based on session_id or date filter.
     Returns (records, base_filename).
+
+    The export is restricted to sessions the caller may see, so a report can
+    never become a bypass of the session visibility scope.
     """
     if session_id:
         clean_id = session_id.strip()
@@ -43,6 +48,7 @@ def _gather_export_records(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Session with ID '{clean_id}' not found.",
             )
+        scope.assert_allowed(sess)
         records = crud.get_session_attendance_details(db, session_id=clean_id)
         return records, f"attendance_report_{clean_id}"
 
@@ -51,13 +57,17 @@ def _gather_export_records(
         sessions = crud.get_sessions_by_date(db, date=clean_date)
         all_records: List[Dict[str, Any]] = []
         for s in sessions:
+            if not scope.allows(s):
+                continue
             all_records.extend(crud.get_session_attendance_details(db, session_id=s["session_id"]))
         return all_records, f"attendance_report_{clean_date}"
 
-    # Default: gather all session attendance
+    # Default: gather all session attendance the caller is allowed to see.
     all_sessions = crud.get_all_sessions(db)
     all_records: List[Dict[str, Any]] = []
     for s in all_sessions:
+        if not scope.allows(s):
+            continue
         all_records.extend(crud.get_session_attendance_details(db, session_id=s["session_id"]))
     return all_records, "attendance_report_all"
 
@@ -86,7 +96,10 @@ def export_excel_report(
     db: Session = Depends(get_db),
 ) -> Response:
     records, base_filename = _gather_export_records(
-        db, session_id=payload.session_id, date=payload.date
+        db,
+        resolve_session_scope(db, current_user),
+        session_id=payload.session_id,
+        date=payload.date,
     )
 
     filename = f"{base_filename}.xlsx"
@@ -145,7 +158,10 @@ def export_pdf_report(
     db: Session = Depends(get_db),
 ) -> Response:
     records, base_filename = _gather_export_records(
-        db, session_id=payload.session_id, date=payload.date
+        db,
+        resolve_session_scope(db, current_user),
+        session_id=payload.session_id,
+        date=payload.date,
     )
 
     filename = f"{base_filename}.pdf"

@@ -15,6 +15,8 @@ from sqlalchemy.orm import Session as SqlSession
 from alembic.config import Config
 from alembic import command
 
+from tests import pg_support
+
 from app.db.base import Base
 from app.db.connection import get_connection
 from app.db.models import (
@@ -595,14 +597,175 @@ def test_atomic_attendance_update_and_audit_rollback(disposable_sqlite_db):
         assert re_edit.consumed == 0
 
 
-@pytest.mark.skip(reason="requires live PostgreSQL environment (Supabase integration phase)")
+@pytest.mark.skipif(
+    not os.getenv("TEST_DATABASE_URL"),
+    reason=pg_support.SKIP_REASON,
+)
 def test_postgresql_compatibility_integration():
-    """Test 9: PostgreSQL integration placeholder.
+    """Test 9: PostgreSQL live integration on an explicitly configured disposable DB.
 
-    Checklist for PostgreSQL live integration phase:
-    1. Verify PostgreSQL PL/pgSQL function reject_audit_modification() execution.
-    2. Verify trg_audit_log_no_update and trg_audit_log_no_delete trigger aborts on PostgreSQL.
-    3. Verify native ADD CONSTRAINT FOREIGN KEY on sessions.teacher_id.
-    4. Verify UPDATE ... WHERE atomic rowcount serialization under PostgreSQL row-level locks.
+    Runs only when TEST_DATABASE_URL points at a disposable PostgreSQL database
+    (validated before any destructive operation). Applies the full Alembic chain
+    to that database and verifies PostgreSQL-specific behaviour:
+
+    1. The migration chain reaches head on PostgreSQL, and `Base.metadata`
+       matches the migrated schema (no model/migration drift).
+    2. reject_audit_modification() aborts UPDATE and DELETE on audit_log.
+    3. Foreign keys exist natively: attendance.allocation_id,
+       sessions.teacher_id and the students academic FKs.
+    4. The attendance partial unique indexes exist.
+    5. UPDATE ... WHERE rowcount serialization (pending-edit consumption) never
+       lets two workers consume the same edit.
+
+    The database is reset (downgrade to base) in a finally block.
     """
-    pass
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+    from sqlalchemy import text
+
+    test_url = pg_support.configured_test_url()
+    assert test_url, "TEST_DATABASE_URL must be set for this integration test"
+    pg_support.validate_disposable(test_url)
+
+    backend_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    cfg = Config(os.path.join(backend_dir, "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", test_url)
+    cfg.set_main_option("script_location", os.path.join(backend_dir, "alembic"))
+
+    engine = pg_support.create_test_engine(test_url)
+    try:
+        command.upgrade(cfg, "head")
+
+        with engine.connect() as conn:
+            # 1. Migration chain reached head.
+            version = conn.execute(text("SELECT version_num FROM alembic_version")).scalar()
+            assert version == "0012_students_academic_fks", version
+
+            # 2. Native foreign keys are enforced by PostgreSQL.
+            fk_names = {
+                row[0]
+                for row in conn.execute(
+                    text(
+                        "SELECT conname FROM pg_constraint "
+                        "WHERE contype = 'f' "
+                        "AND conrelid IN ('attendance'::regclass, 'sessions'::regclass, "
+                        "'students'::regclass)"
+                    )
+                )
+            }
+            for expected in (
+                "fk_attendance_allocation_id",
+                "fk_attendance_session_id",
+                "fk_attendance_usn",
+                "fk_students_dept_id",
+                "fk_students_semester_id",
+                "fk_students_section_id",
+                "fk_students_batch_id",
+            ):
+                assert expected in fk_names, f"missing PostgreSQL FK {expected}: {sorted(fk_names)}"
+            assert any("teacher_id" in name for name in fk_names), fk_names
+
+            # 3. The two partial unique indexes exist.
+            index_sql = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes "
+                        "WHERE tablename = 'attendance'"
+                    )
+                )
+            }
+            assert "idx_attendance_allocation_usn" in index_sql
+            assert "idx_attendance_legacy_session_usn" in index_sql
+            assert "WHERE" in index_sql["idx_attendance_allocation_usn"].upper()
+            assert "WHERE" in index_sql["idx_attendance_legacy_session_usn"].upper()
+
+        # 4. audit_log is append-only: UPDATE and DELETE are rejected by trigger.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO users (user_id, email, role, hashed_password, is_active, created_at) "
+                    "VALUES ('pg_it_user', 'pg_it@rollcall.edu', 'ADMIN', NULL, 1, '2026-01-01T00:00:00Z') "
+                    "ON CONFLICT (user_id) DO NOTHING"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO audit_log (actor_id, action, entity_type, entity_id, timestamp) "
+                    "VALUES ('pg_it_user', 'PG_INTEGRATION', 'test', 'pg-it', '2026-01-01T00:00:00Z')"
+                )
+            )
+
+        with pytest.raises(Exception) as update_exc:
+            with engine.begin() as conn:
+                conn.execute(text("UPDATE audit_log SET action = 'TAMPERED'"))
+        assert "append-only" in str(update_exc.value).lower() or "reject" in str(update_exc.value).lower()
+
+        with pytest.raises(Exception) as delete_exc:
+            with engine.begin() as conn:
+                conn.execute(text("DELETE FROM audit_log"))
+        assert "append-only" in str(delete_exc.value).lower() or "reject" in str(delete_exc.value).lower()
+
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT action FROM audit_log")).scalar() == "PG_INTEGRATION"
+
+        # 5. UPDATE ... WHERE rowcount serialization: only one consumer wins.
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO rooms (room_id, name) VALUES ('LH-101', 'Lecture Hall') "
+                    "ON CONFLICT (room_id) DO NOTHING"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO students (usn, name, branch) VALUES ('PG-IT-USN', 'PG Student', 'CSE') "
+                    "ON CONFLICT (usn) DO NOTHING"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO sessions (session_id, date, subject, teacher_id) "
+                    "VALUES ('pg-it-sess', '2026-01-01', 'PG Integration', 'pg_it_user') "
+                    "ON CONFLICT (session_id) DO NOTHING"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO attendance (attendance_id, session_id, usn, room_id, status, source, "
+                    "confidence, recorded_at) VALUES ('pg_it_att', 'pg-it-sess', 'PG-IT-USN', "
+                    "'LH-101', 'PRESENT', 'test', 1.0, '2026-01-01T00:00:00Z') "
+                    "ON CONFLICT DO NOTHING"
+                )
+            )
+        claim = text(
+            "UPDATE attendance SET status = 'ABSENT' "
+            "WHERE attendance_id = 'pg_it_att' AND status = 'PRESENT'"
+        )
+        with engine.begin() as conn:
+            first = conn.execute(claim).rowcount
+        with engine.begin() as conn:
+            second = conn.execute(claim).rowcount
+        assert first == 1 and second == 0
+    finally:
+        try:
+            command.downgrade(cfg, "base")
+        finally:
+            engine.dispose()
+
+
+def test_postgresql_integration_requires_explicit_disposable_url(monkeypatch):
+    """Documents and enforces the safety gate on PostgreSQL integration tests."""
+    # No "test" in the database name -> refused.
+    with pytest.raises(pg_support.UnsafeTestDatabase):
+        pg_support.validate_disposable("postgresql+psycopg://u:p@db.prod.internal:5432/rollcall")
+
+    # Identical to the production write URL -> refused.
+    prod_like = "postgresql+psycopg://u:p@localhost:5432/rollcall_test"
+    monkeypatch.setenv("DATABASE_URL_SYNC", prod_like)
+    with pytest.raises(pg_support.UnsafeTestDatabase):
+        pg_support.validate_disposable(prod_like)
+
+    # A distinct disposable test database is accepted.
+    monkeypatch.delenv("DATABASE_URL_SYNC", raising=False)
+    pg_support.validate_disposable("postgresql+psycopg://u:p@localhost:5432/rollcall_disposable_test")

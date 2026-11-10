@@ -29,7 +29,7 @@ from sqlalchemy.pool import StaticPool
 
 from app.auth import Role, create_access_token
 from app.db.base import Base
-from app.db.models import Student, Room, Session as DbSession
+from app.db.models import Student, Room, Session as DbSession, TeacherSubject
 from app.dependencies import get_db
 from app.main import app
 
@@ -62,7 +62,16 @@ def unauthenticated_client(auth_db_engine):
     with TestingSessionLocal() as session:
         session.add(Student(usn="1MS21CS001", name="Alice Smith", branch="CSE"))
         session.add(Room(room_id="LH-101", name="Lecture Hall 101"))
-        session.add(DbSession(session_id="SESS-001", date="2026-03-15", subject="Machine Learning"))
+        # subject_code + mapping: a session with no owner is authorized through
+        # the teacher-subject mapping, not by being readable by every role.
+        session.add(
+            DbSession(
+                session_id="SESS-001",
+                date="2026-03-15",
+                subject="Machine Learning",
+                subject_code="ML",
+            )
+        )
         session.commit()
 
     def override_get_db():
@@ -76,6 +85,53 @@ def unauthenticated_client(auth_db_engine):
     test_client = TestClient(app, raise_server_exceptions=False)
     yield test_client
     app.dependency_overrides.clear()
+
+
+def _grant_subject(engine, user_id: str = "user-123", subject_code: str = "ML") -> None:
+    """Map a token subject to a subject code (session authorization)."""
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    with factory() as db:
+        exists = db.query(TeacherSubject).filter_by(user_id=user_id).first()
+        if exists is None:
+            db.add(TeacherSubject(user_id=user_id, subject_code=subject_code))
+            db.commit()
+
+
+def _seed_actor(engine, user_id: str = "user-123", role: str = "ADMIN") -> None:
+    """Insert a real users row for a token subject.
+
+    Write endpoints now emit an audit_log row whose actor_id has a foreign key
+    to users.user_id, so an authenticated writer must exist locally. The role is
+    also authoritative from the database, so it must match the test's token.
+    """
+    from app.db.models import User
+
+    factory = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    with factory() as db:
+        if db.get(User, user_id) is None:
+            db.add(
+                User(
+                    user_id=user_id,
+                    email=f"{user_id}@rollcall.edu",
+                    role=role,
+                    hashed_password=None,
+                    is_active=1,
+                    created_at=datetime.datetime.now(datetime.timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    ),
+                )
+            )
+            db.commit()
+
+
+@pytest.fixture
+def make_actor(auth_db_engine):
+    """Return a callback that seeds an authenticated actor with a given role."""
+
+    def _make(user_id: str = "user-123", role: str = "ADMIN") -> None:
+        _seed_actor(auth_db_engine, user_id=user_id, role=role)
+
+    return _make
 
 
 def make_token(
@@ -168,7 +224,8 @@ def test_issuer_and_audience_validation(unauthenticated_client):
 # ==============================================================================
 
 @patch.dict("os.environ", {"JWT_SECRET_KEY": TEST_SECRET})
-def test_admin_full_access(unauthenticated_client):
+def test_admin_full_access(unauthenticated_client, make_actor):
+    make_actor(role="ADMIN")
     admin_token = make_token(role="ADMIN")
     headers = {"Authorization": f"Bearer {admin_token}"}
 
@@ -197,7 +254,9 @@ def test_admin_full_access(unauthenticated_client):
 
 
 @patch.dict("os.environ", {"JWT_SECRET_KEY": TEST_SECRET})
-def test_faculty_permissions_and_restrictions(unauthenticated_client):
+def test_faculty_permissions_and_restrictions(unauthenticated_client, make_actor, auth_db_engine):
+    make_actor(role="FACULTY")
+    _grant_subject(auth_db_engine)
     faculty_token = make_token(role="FACULTY")
     headers = {"Authorization": f"Bearer {faculty_token}"}
 
@@ -229,7 +288,9 @@ def test_faculty_permissions_and_restrictions(unauthenticated_client):
 
 
 @patch.dict("os.environ", {"JWT_SECRET_KEY": TEST_SECRET})
-def test_viewer_read_only_restrictions(unauthenticated_client):
+def test_viewer_read_only_restrictions(unauthenticated_client, auth_db_engine):
+    _seed_actor(auth_db_engine, role="VIEWER")
+    _grant_subject(auth_db_engine)
     viewer_token = make_token(role="VIEWER")
     headers = {"Authorization": f"Bearer {viewer_token}"}
 

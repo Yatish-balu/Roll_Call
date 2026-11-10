@@ -24,7 +24,15 @@ DATABASE_URL_ASYNC = os.getenv("DATABASE_URL_ASYNC", "").strip()
 
 @event.listens_for(Engine, "connect")
 def _set_sqlite_pragma(dbapi_connection, connection_record):
-    """Ensure SQLite foreign key enforcement is always active for any engine."""
+    """Ensure SQLite foreign key enforcement is always active for any engine.
+
+    This listener is registered on the base ``Engine`` class, so it also fires
+    for PostgreSQL connections. The PRAGMA is SQLite-specific: issuing it on a
+    PostgreSQL connection raises a syntax error and aborts the transaction.
+    Only touch genuine SQLite DBAPI connections.
+    """
+    if not isinstance(dbapi_connection, sqlite3.Connection):
+        return
     try:
         cursor = dbapi_connection.cursor()
         cursor.execute("PRAGMA foreign_keys = ON;")
@@ -36,6 +44,18 @@ def _set_sqlite_pragma(dbapi_connection, connection_record):
 def _is_production() -> bool:
     """Return True when the application is running in production mode."""
     return os.getenv("APP_ENV", "development").strip().lower() == "production"
+
+
+def _production_write_url() -> str:
+    """Resolve the authoritative write URL for production, strictly from the environment.
+
+    In production the write connection must come from the live environment
+    (the process environment or a .env loaded at startup). The import-time
+    constant is deliberately NOT used here: if DATABASE_URL_SYNC is missing or
+    was unset at runtime, production must fail closed rather than silently
+    reuse a previously captured value.
+    """
+    return os.environ.get("DATABASE_URL_SYNC", "").strip()
 
 
 def _validate_production_config() -> None:
@@ -56,7 +76,7 @@ def _validate_production_config() -> None:
             "in production (DB_BACKEND=%r, APP_ENV=%r)." % (backend, os.getenv("APP_ENV", "development"))
         )
 
-    if not os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC):
+    if not _production_write_url():
         raise RuntimeError(
             "Production requires DATABASE_URL_SYNC to be configured when "
             "DB_BACKEND=supabase. SQLite fallback is disabled in production."
@@ -64,7 +84,7 @@ def _validate_production_config() -> None:
 
     # A read-only URL must never become the application's write connection.
     readonly = os.getenv("READONLY_DATABASE_URL", "").strip()
-    if readonly and readonly == os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC):
+    if readonly and readonly == _production_write_url():
         raise RuntimeError(
             "READONLY_DATABASE_URL must not be identical to DATABASE_URL_SYNC: "
             "the read-only replica must not be used as the write connection."
@@ -223,13 +243,28 @@ def create_sync_engine(
 
     DATABASE_URL_SYNC is the authoritative write connection for the FastAPI
     application. In production it must point at Supabase PostgreSQL with SSL.
+    When DB_BACKEND=sqlite is explicitly set (or no URL is configured), SQLite is used.
     """
     db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
-    target_url = url or os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC) or f"sqlite:///{db_path_posix}"
+
+    # Determine the effective backend
+    effective_backend = os.getenv("DB_BACKEND", DB_BACKEND).strip().lower()
+
+    if url is not None:
+        target_url = url
+    elif effective_backend == "sqlite":
+        # SQLite explicitly requested (e.g. development or testing)
+        target_url = f"sqlite:///{db_path_posix}"
+    elif os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC):
+        # Supabase/PostgreSQL configured via DATABASE_URL_SYNC
+        target_url = os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC)
+    else:
+        # No configuration: default to local SQLite
+        target_url = f"sqlite:///{db_path_posix}"
 
     # Production: authoritative write URL is required; no SQLite fallback.
     if _is_production():
-        if not os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC):
+        if not _production_write_url():
             raise RuntimeError(
                 "Production requires DATABASE_URL_SYNC to be configured. "
                 "SQLite fallback is disabled in production."

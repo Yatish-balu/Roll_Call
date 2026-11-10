@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Float,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.db.base import Base
@@ -155,8 +156,10 @@ class PendingEdit(Base):
         String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
     )
     session_id: Mapped[str] = mapped_column(String, nullable=False)
+    # RESTRICT (not CASCADE): deleting an attendance row must never silently
+    # discard a staged edit the user has not yet confirmed or discarded.
     attendance_id: Mapped[Optional[str]] = mapped_column(
-        String, ForeignKey("attendance.attendance_id", ondelete="CASCADE"), nullable=True
+        String, ForeignKey("attendance.attendance_id", ondelete="RESTRICT"), nullable=True
     )
     usn: Mapped[str] = mapped_column(String, nullable=False)
     old_status: Mapped[str] = mapped_column(String, nullable=False)
@@ -256,6 +259,13 @@ class Student(Base):
     section: Mapped[Optional["Section"]] = relationship("Section", back_populates="students")
     batch: Mapped[Optional["Batch"]] = relationship("Batch", back_populates="students")
 
+    __table_args__ = (
+        Index("idx_students_dept_id", "dept_id"),
+        Index("idx_students_semester_id", "semester_id"),
+        Index("idx_students_section_id", "section_id"),
+        Index("idx_students_batch_id", "batch_id"),
+    )
+
     def __repr__(self) -> str:
         return f"<Student(usn={self.usn!r}, name={self.name!r}, branch={self.branch!r})>"
 
@@ -265,10 +275,17 @@ class Room(Base):
 
     room_id: Mapped[str] = mapped_column(String, primary_key=True)
     name: Mapped[str] = mapped_column(String, nullable=False)
+    dept_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    room_type: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # Relationship: NO delete cascade, preserving DB-level ON DELETE RESTRICT
     attendance_records: Mapped[List["Attendance"]] = relationship(
         "Attendance", back_populates="room"
+    )
+
+    __table_args__ = (
+        Index("idx_rooms_dept_id", "dept_id"),
     )
 
     def __repr__(self) -> str:
@@ -282,8 +299,12 @@ class Session(Base):
     date: Mapped[str] = mapped_column(String, nullable=False)  # Preserved as ISO string YYYY-MM-DD
     subject: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # Matches the migrated schema: migration 0002 adds this FK without an
+    # explicit ON DELETE action (NO ACTION, which is equivalent to RESTRICT for
+    # a non-deferrable constraint), and migration 0009's table rebuild keeps it
+    # that way. Declaring RESTRICT here produced permanent autogenerate drift.
     teacher_id: Mapped[Optional[str]] = mapped_column(
-        String, ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=True
+        String, ForeignKey("users.user_id"), nullable=True
     )
     subject_code: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     lifecycle_status: Mapped[str] = mapped_column(
@@ -324,7 +345,11 @@ class Attendance(Base):
     session_id: Mapped[str] = mapped_column(
         String, ForeignKey("sessions.session_id", ondelete="CASCADE"), nullable=False
     )
-    allocation_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    allocation_id: Mapped[Optional[str]] = mapped_column(
+        String,
+        ForeignKey("session_allocations.allocation_id", ondelete="SET NULL"),
+        nullable=True,
+    )
     usn: Mapped[str] = mapped_column(
         String, ForeignKey("students.usn", ondelete="CASCADE"), nullable=False
     )
@@ -358,6 +383,24 @@ class Attendance(Base):
         Index("idx_attendance_usn", "usn"),
         Index("idx_attendance_room", "room_id"),
         Index("idx_attendance_allocation", "allocation_id"),
+        # Partial unique indexes created by migration 0010. They enforce one row
+        # per (allocation_id, usn) and one legacy row per (session_id, usn).
+        Index(
+            "idx_attendance_allocation_usn",
+            "allocation_id",
+            "usn",
+            unique=True,
+            sqlite_where=text("allocation_id IS NOT NULL"),
+            postgresql_where=text("allocation_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_attendance_legacy_session_usn",
+            "session_id",
+            "usn",
+            unique=True,
+            sqlite_where=text("allocation_id IS NULL"),
+            postgresql_where=text("allocation_id IS NULL"),
+        ),
     )
 
     def __repr__(self) -> str:

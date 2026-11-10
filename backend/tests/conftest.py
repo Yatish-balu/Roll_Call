@@ -3,11 +3,17 @@
 Ensures:
 1. Existing non-auth test suites execute with an authenticated mock user (avoiding breaking 303 baseline tests).
 2. The security/auth test suite (test_auth_api.py) executes with real JWT cryptographic verification.
+3. The test suite never writes to the live development database: every test
+   runs against a disposable copy, so tests cannot contaminate each other or
+   the recovered historical attendance data.
 """
 
 from __future__ import annotations
 
+import os
+import shutil
 import sys
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,6 +21,26 @@ from pathlib import Path
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
 if str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
+
+# ---------------------------------------------------------------------------
+# Test isolation: point the application at a disposable copy of the database.
+#
+# This must happen BEFORE app.db.connection is imported, because the module
+# resolves SQLITE_PATH into DEFAULT_DB_PATH at import time. The live database
+# (data/attendance.db) is preserved untouched and only ever read.
+# ---------------------------------------------------------------------------
+_REPO_ROOT = _BACKEND_DIR.parent
+_LIVE_DB = _REPO_ROOT / "data" / "attendance.db"
+
+if _LIVE_DB.exists():
+    _ISOLATED_DIR = tempfile.mkdtemp(prefix="rollcall_test_db_")
+    _ISOLATED_DB = Path(_ISOLATED_DIR) / "attendance.db"
+    shutil.copy2(_LIVE_DB, _ISOLATED_DB)
+    os.environ["SQLITE_PATH"] = str(_ISOLATED_DB)
+    os.environ["DATABASE_PATH"] = str(_ISOLATED_DB)
+    # Tests run against local SQLite; Supabase is only exercised by the
+    # opt-in integration tests that explicitly configure their own URLs.
+    os.environ["DB_BACKEND"] = "sqlite"
 
 import pytest
 from sqlalchemy.orm import sessionmaker

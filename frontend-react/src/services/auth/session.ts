@@ -1,14 +1,16 @@
 /**
  * Client-Side Authentication Session Management (React 19 + Axios)
  *
- * Implements:
- * 1. Persistent session storage (sessionStorage for tab lifetime, localStorage when rememberMe is active).
- * 2. Instantaneous restoration on page refresh (F5) without logging out.
- * 3. Automatic in-memory token injection into Axios.
- * 4. Background silent refresh token rotation.
- * 5. Clean session purge on logout.
+ * Security Guarantees:
+ * 1. In-memory access token storage ONLY (Never persisted to localStorage or sessionStorage).
+ * 2. HttpOnly refresh-cookie architecture for session restoration and rotation.
+ * 3. Unified response-application mechanism synchronizing access token, role, subject codes, and expiry.
+ * 4. Correct backend userId extraction from signed JWT claims.
+ * 5. Strict rejection of failed logins (No client-side role fabrication or demo fallbacks).
+ * 6. Automatic session purge and redirect to /login on failed token refresh.
  */
 
+import axios from "axios";
 import { apiClient } from "@/services/api/client";
 
 export interface AuthSession {
@@ -20,47 +22,23 @@ export interface AuthSession {
   expiresAtUtc: string | null;
 }
 
-const SESSION_STORAGE_KEY = "rollcall_auth_session";
-
-function loadSavedSession(): AuthSession {
-  if (typeof window === "undefined") {
-    return {
-      token: null,
-      role: null,
-      userId: null,
-      name: null,
-      subjectCodes: [],
-      expiresAtUtc: null,
-    };
-  }
-
-  try {
-    const raw = sessionStorage.getItem(SESSION_STORAGE_KEY) || localStorage.getItem(SESSION_STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw) as AuthSession;
-      if (parsed && parsed.token) {
-        // If expired or invalid timestamp, let silentRefresh handle it, but if still valid restore immediately
-        if (parsed.expiresAtUtc && new Date(parsed.expiresAtUtc).getTime() > Date.now()) {
-          apiClient.setAccessToken(parsed.token);
-          return parsed;
-        }
-      }
-    }
-  } catch {
-    // Ignore corrupt storage
-  }
-
-  return {
-    token: null,
-    role: null,
-    userId: null,
-    name: null,
-    subjectCodes: [],
-    expiresAtUtc: null,
-  };
+export interface AuthApiResponse {
+  token: string;
+  role: "ADMIN" | "FACULTY" | "VIEWER";
+  name: string;
+  subject_codes?: string[];
+  expires_at_utc: string;
 }
 
-let currentSession: AuthSession = loadSavedSession();
+// In-memory authentication state (Tokens NEVER written to storage)
+let currentSession: AuthSession = {
+  token: null,
+  role: null,
+  userId: null,
+  name: null,
+  subjectCodes: [],
+  expiresAtUtc: null,
+};
 
 type AuthListener = (session: AuthSession) => void;
 const listeners = new Set<AuthListener>();
@@ -75,38 +53,143 @@ export const subscribeToAuth = (listener: AuthListener): (() => void) => {
 };
 
 const notifyListeners = () => {
+  const snapshot = getAuthSession();
   listeners.forEach((listener) => {
     try {
-      listener(getAuthSession());
+      listener(snapshot);
     } catch (e) {
       console.error("Auth listener error:", e);
     }
   });
 };
 
-function persistSession(session: AuthSession, rememberMe?: boolean) {
-  if (typeof window === "undefined") return;
+/**
+ * Extracts the authoritative user_id from the signed JWT access token claims ('sub').
+ * Backend issues: {"sub": user.user_id, "role": user.role, ...}
+ */
+function extractUserIdFromJwt(token: string): string | null {
   try {
-    if (session.token) {
-      const serialized = JSON.stringify(session);
-      sessionStorage.setItem(SESSION_STORAGE_KEY, serialized);
-      if (rememberMe) {
-        localStorage.setItem(SESSION_STORAGE_KEY, serialized);
+    const parts = token.split(".");
+    if (parts.length >= 2) {
+      const base64Url = parts[1];
+      const base64 = base64Url.replace(/-/g, "+").replace(/_/g, "/");
+      const jsonPayload = decodeURIComponent(
+        atob(base64)
+          .split("")
+          .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+          .join("")
+      );
+      const parsed = JSON.parse(jsonPayload);
+      if (parsed && typeof parsed.sub === "string") {
+        return parsed.sub;
       }
-    } else {
-      sessionStorage.removeItem(SESSION_STORAGE_KEY);
-      localStorage.removeItem(SESSION_STORAGE_KEY);
     }
   } catch {
-    // Ignore quota errors
+    // Malformed token or non-browser environment
+  }
+  return null;
+}
+
+/**
+ * Single shared response-application mechanism.
+ * Synchronizes in-memory access token, role, subject codes, expiry, and resolved userId.
+ */
+export function applyAuthResponse(res: AuthApiResponse, explicitUserId?: string): AuthSession {
+  const jwtUserId = extractUserIdFromJwt(res.token);
+  const resolvedUserId = jwtUserId || explicitUserId || res.name;
+
+  apiClient.setAccessToken(res.token);
+
+  currentSession = {
+    token: res.token,
+    role: res.role,
+    userId: resolvedUserId,
+    name: res.name,
+    subjectCodes: res.subject_codes || [],
+    expiresAtUtc: res.expires_at_utc,
+  };
+
+  notifyListeners();
+  return getAuthSession();
+}
+
+/**
+ * Clears in-memory authentication state and redirects to /login if needed.
+ */
+export function clearAuthSession(shouldRedirect = false): void {
+  apiClient.setAccessToken(null);
+
+  currentSession = {
+    token: null,
+    role: null,
+    userId: null,
+    name: null,
+    subjectCodes: [],
+    expiresAtUtc: null,
+  };
+
+  notifyListeners();
+
+  if (shouldRedirect && typeof window !== "undefined") {
+    if (window.location.pathname !== "/login") {
+      window.location.href = "/login";
+    }
   }
 }
 
-let initialRefreshAttempted = false;
-let initialRefreshPromise: Promise<AuthSession | null> | null = null;
+// Single-flight refresh promise to prevent concurrent duplicate refresh requests
+let refreshInFlight: Promise<string | null> | null = null;
 
+/**
+ * Executes a refresh request against the backend using HttpOnly cookie credentials.
+ * Used by both startup initialization and Axios 401 interceptor.
+ */
+export const performAuthRefresh = async (): Promise<string | null> => {
+  if (refreshInFlight) {
+    return refreshInFlight;
+  }
+
+  refreshInFlight = (async () => {
+    try {
+      const res = await axios.post<AuthApiResponse>(
+        `${apiClient.getEffectiveBaseUrl()}/api/v1/auth/refresh`,
+        {},
+        {
+          withCredentials: true,
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "X-Requested-With": "XMLHttpRequest",
+          },
+        }
+      );
+
+      if (res.data && res.data.token) {
+        applyAuthResponse(res.data);
+        return res.data.token;
+      }
+
+      clearAuthSession(true);
+      return null;
+    } catch {
+      clearAuthSession(true);
+      return null;
+    } finally {
+      refreshInFlight = null;
+    }
+  })();
+
+  return refreshInFlight;
+};
+
+// Register the shared refresh handler with ApiClient for automated 401 recovery
+apiClient.setRefreshHandler(performAuthRefresh);
+
+/**
+ * Invoked on startup to restore session from HttpOnly cookie if present.
+ */
 export const silentRefreshOnStartup = async (): Promise<AuthSession | null> => {
-  // If we already have a valid in-memory/cached token with more than 2 minutes left, keep it
+  // If we already have a valid in-memory token with > 2 mins remaining, keep it
   if (currentSession.token && currentSession.expiresAtUtc) {
     const remainingMs = new Date(currentSession.expiresAtUtc).getTime() - Date.now();
     if (remainingMs > 2 * 60 * 1000) {
@@ -114,115 +197,45 @@ export const silentRefreshOnStartup = async (): Promise<AuthSession | null> => {
     }
   }
 
-  if (initialRefreshAttempted && currentSession.token) {
+  const token = await performAuthRefresh();
+  if (token) {
     return getAuthSession();
   }
 
-  if (initialRefreshPromise) {
-    return initialRefreshPromise;
-  }
-
-  initialRefreshPromise = (async () => {
-    initialRefreshAttempted = true;
-    try {
-      const res = await apiClient.post<{
-        token: string;
-        role: "ADMIN" | "FACULTY" | "VIEWER";
-        name: string;
-        subject_codes: string[];
-        expires_at_utc: string;
-      }>("/api/v1/auth/refresh");
-
-      if (res && res.token) {
-        apiClient.setAccessToken(res.token);
-        currentSession = {
-          token: res.token,
-          role: res.role,
-          userId: res.name || currentSession.userId,
-          name: res.name,
-          subjectCodes: res.subject_codes || currentSession.subjectCodes || [],
-          expiresAtUtc: res.expires_at_utc,
-        };
-        persistSession(currentSession);
-        notifyListeners();
-        return getAuthSession();
-      }
-    } catch {
-      // If refresh fails and existing token is expired, clear
-      if (currentSession.expiresAtUtc && new Date(currentSession.expiresAtUtc).getTime() <= Date.now()) {
-        apiClient.setAccessToken(null);
-        currentSession = {
-          token: null,
-          role: null,
-          userId: null,
-          name: null,
-          subjectCodes: [],
-          expiresAtUtc: null,
-        };
-        persistSession(currentSession);
-        notifyListeners();
-      }
-    } finally {
-      initialRefreshPromise = null;
-    }
-    return getAuthSession();
-  })();
-
-  return initialRefreshPromise;
+  // If startup refresh fails, clear in-memory state without forced redirect loop
+  clearAuthSession(false);
+  return null;
 };
 
+/**
+ * Authenticates user credentials with the backend API.
+ * Never fabricates sessions, never suppresses backend authentication errors.
+ */
 export const loginWithPersistentSession = async (params: {
   userId: string;
   password: string;
   adminKey?: string;
   rememberMe?: boolean;
 }): Promise<AuthSession> => {
-  const res = await apiClient.post<{
-    token: string;
-    role: "ADMIN" | "FACULTY" | "VIEWER";
-    name: string;
-    subject_codes: string[];
-    expires_at_utc: string;
-  }>("/api/v1/auth/login", {
-    user_id: params.userId,
+  const res = await apiClient.post<AuthApiResponse>("/api/v1/auth/login", {
+    user_id: params.userId.trim(),
     password: params.password,
-    admin_key: params.adminKey,
+    admin_key: params.adminKey?.trim() || undefined,
     remember_me: !!params.rememberMe,
   });
 
-  initialRefreshAttempted = true;
-  apiClient.setAccessToken(res.token);
-  currentSession = {
-    token: res.token,
-    role: res.role,
-    userId: params.userId,
-    name: res.name,
-    subjectCodes: res.subject_codes || [],
-    expiresAtUtc: res.expires_at_utc,
-  };
-  persistSession(currentSession, params.rememberMe);
-  notifyListeners();
-  return getAuthSession();
+  return applyAuthResponse(res, params.userId.trim());
 };
 
+/**
+ * Revokes current session on backend and clears in-memory auth state.
+ */
 export const logout = async (): Promise<void> => {
-  initialRefreshAttempted = false;
-  initialRefreshPromise = null;
   try {
     await apiClient.post("/api/v1/auth/logout");
   } catch {
-    // Graceful logout
+    // Graceful logout even if backend unreachable
   } finally {
-    apiClient.setAccessToken(null);
-    currentSession = {
-      token: null,
-      role: null,
-      userId: null,
-      name: null,
-      subjectCodes: [],
-      expiresAtUtc: null,
-    };
-    persistSession(currentSession);
-    notifyListeners();
+    clearAuthSession(true);
   }
 };

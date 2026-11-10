@@ -3,8 +3,10 @@
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
 import { fetchSessions, createSession, type SessionItem } from "@/services/api/sessions";
+import { useAuth } from "@/hooks/useAuth";
 
 export function SessionsView() {
+  const { session, isAdmin, isFaculty, isViewer, canScheduleSessions } = useAuth();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -18,7 +20,7 @@ export function SessionsView() {
   const [sessionId, setSessionId] = useState("");
   const [sessionDate, setSessionDate] = useState(() => new Date().toISOString().split("T")[0]);
   const [subject, setSubject] = useState("");
-  const [subjectCode, setSubjectCode] = useState("");
+  const [subjectCode, setSubjectCode] = useState(() => (!isAdmin && isFaculty && session.subjectCodes?.[0]) || "");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -30,7 +32,19 @@ export function SessionsView() {
     setError(null);
     try {
       const res = await fetchSessions({ limit: 50 });
-      setSessions(res.items || []);
+      const allItems = res.items || [];
+      // FACULTY must see strictly sessions matching assigned subjects via exact normalized code equality. ADMIN and VIEWER see all sessions.
+      const scoped =
+        !isAdmin && isFaculty
+          ? allItems.filter((s) => {
+              const normalizedCode = (s.subject_code || "").trim().toUpperCase();
+              if (!normalizedCode) return false;
+              return (session.subjectCodes || []).some((assigned) => {
+                return normalizedCode === assigned.trim().toUpperCase();
+              });
+            })
+          : allItems;
+      setSessions(scoped);
     } catch (err: unknown) {
       if (err instanceof Error) {
         setError(err.message);
@@ -40,7 +54,7 @@ export function SessionsView() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [isAdmin, isFaculty, session.subjectCodes]);
 
   useEffect(() => {
     let isMounted = true;
@@ -73,6 +87,10 @@ export function SessionsView() {
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canScheduleSessions || isViewer) {
+      setFormError("You do not have permission to schedule academic sessions.");
+      return;
+    }
     if (!sessionId.trim() || !subject.trim() || !sessionDate.trim()) {
       setFormError("Please fill out all required fields.");
       return;
@@ -122,28 +140,51 @@ export function SessionsView() {
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 pb-2">
         <div>
-          <div className="flex items-center space-x-2.5">
+          <div className="flex items-center space-x-2.5 flex-wrap gap-y-1">
             <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
               Academic Sessions
             </h1>
             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
               {isLoading ? "..." : `${sessions.length} Recorded`}
             </span>
+            {isViewer && (
+              <span className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold flex items-center space-x-1.5 shadow-2xs">
+                <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                </svg>
+                <span>Read-Only Viewer</span>
+              </span>
+            )}
+            {!isAdmin && isFaculty && session.subjectCodes && session.subjectCodes.length > 0 && (
+              <span className="px-2.5 py-0.5 rounded-lg bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA] text-xs font-semibold">
+                Scope: {session.subjectCodes.join(", ")}
+              </span>
+            )}
           </div>
           <p className="text-xs sm:text-sm text-[#77735F] mt-1">
             Schedule records, multi-room batch allocations, and roster snapshots.
           </p>
         </div>
 
-        <button
-          onClick={() => setIsCreateOpen(true)}
-          className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M12 4v16m8-8H4" />
-          </svg>
-          <span>Schedule Session</span>
-        </button>
+        {canScheduleSessions && !isViewer ? (
+          <button
+            onClick={() => setIsCreateOpen(true)}
+            className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M12 4v16m8-8H4" />
+            </svg>
+            <span>Schedule Session</span>
+          </button>
+        ) : (
+          <span className="px-3.5 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] text-xs font-semibold border border-[#E4DDCA] flex items-center space-x-1.5 self-start sm:self-auto">
+            <svg className="w-3.5 h-3.5 text-[#77735F]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            <span>Read-Only Session Registry</span>
+          </span>
+        )}
       </div>
 
       {/* Error Banner */}
@@ -312,7 +353,7 @@ export function SessionsView() {
               </div>
               <div className="flex justify-between py-1.5">
                 <span className="text-[#77735F]">Assigned Instructor</span>
-                <span className="text-[#24251C]">{viewSession.teacher_id || "faculty_ds"}</span>
+                <span className="text-[#24251C]">{viewSession.teacher_id || "Unassigned"}</span>
               </div>
             </div>
 

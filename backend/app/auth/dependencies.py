@@ -46,7 +46,10 @@ def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Check authoritative database record if user exists locally
+    # Check authoritative database record if user exists locally.
+    # This lookup is a security control (deactivation + role changes), so it must
+    # fail CLOSED: if the database cannot be reached we reject the request rather
+    # than trusting the role baked into the token.
     try:
         SessionLocal = get_sync_session_factory()
         with SessionLocal() as db:
@@ -63,8 +66,14 @@ def get_current_user(
     except HTTPException:
         raise
     except Exception as exc:
-        logger.debug("Database user lookup during token verification skipped: %s", exc)
-
+        logger.error(
+            "Fail-closed: authoritative user lookup failed during token verification: %s", exc
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is temporarily unavailable. Please try again later.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     return user
 

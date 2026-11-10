@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -52,6 +53,71 @@ def _verify_student_exists(db: Session, usn: str) -> Dict[str, Any]:
     return student
 
 
+def _utcnow_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _assert_session_ownership(
+    current_user: AuthenticatedUser,
+    session: Dict[str, Any],
+    db: Optional[Session] = None,
+) -> None:
+    """Enforce faculty ownership of a session (N3).
+
+    ADMIN keeps institutional access to every session. FACULTY access is allowed
+    only when one of these holds:
+      * the session is attributed to that faculty member,
+      * the session is attributed to nobody / the legacy sentinel AND the
+        faculty is mapped to the session's subject code (``teacher_subjects``)
+        or is the session coordinator.
+
+    Legacy sessions are never assigned to anybody, but they are no longer
+    world-readable by every faculty account: an unmapped faculty member is
+    denied, and an authorized administrator can grant access by adding the
+    subject-code mapping. Historical attendance data is not modified.
+    """
+    if current_user.role == Role.ADMIN:
+        return
+    # Every non-admin role is authorized the same way (ownership / coordinator /
+    # subject mapping); write endpoints are separately role-gated.
+    owner = session.get("teacher_id")
+    owned = owner is not None and str(owner).strip() not in ("", "legacy")
+
+    if owned:
+        if str(owner).strip() == current_user.user_id:
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Forbidden: session '{session.get('session_id')}' is assigned to another "
+                "faculty member. You can only access your own sessions."
+            ),
+        )
+
+    # Unowned / legacy session: authorize by subject mapping, never by guesswork.
+    coordinator = session.get("coordinator_faculty_id")
+    if coordinator and str(coordinator).strip() == current_user.user_id:
+        return
+
+    subject_code = str(session.get("subject_code") or "").strip()
+    if subject_code and db is not None and crud.is_teacher_assigned_to_subject(
+        db, current_user.user_id, subject_code
+    ):
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            f"Forbidden: session '{session.get('session_id')}' has no faculty owner and "
+            + (
+                f"subject code '{subject_code}' is not mapped to your account."
+                if subject_code
+                else "no subject code, so access requires an administrator."
+            )
+        ),
+    )
+
+
 def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
     """Verify room exists in database; raise 404 if missing."""
     clean_id = room_id.strip()
@@ -82,7 +148,8 @@ def get_session_attendance(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> List[Dict[str, Any]]:
-    _verify_session_exists(db, session_id)
+    session = _verify_session_exists(db, session_id)
+    _assert_session_ownership(current_user, session, db)
     return crud.get_session_attendance_details(db, session_id=session_id)
 
 
@@ -110,7 +177,8 @@ def record_attendance(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    _verify_session_exists(db, session_id)
+    session = _verify_session_exists(db, session_id)
+    _assert_session_ownership(current_user, session, db)
 
     clean_usn = payload.usn.strip().upper()
     _verify_student_exists(db, clean_usn)
@@ -140,9 +208,6 @@ def record_attendance(
             confidence=payload.confidence,
             upsert=upsert,
         )
-        db.commit()
-        response.status_code = status.HTTP_200_OK if existing else status.HTTP_201_CREATED
-        return record
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -152,6 +217,31 @@ def record_attendance(
     except Exception as exc:
         db.rollback()
         logger.error("Failed to record attendance: %s", exc)
+        raise
+
+    try:
+        # Audit is part of the same transaction: an unauditable write is rejected.
+        crud.create_audit_entry(
+            db,
+            actor_id=current_user.user_id,
+            action="ATTENDANCE_UPSERT" if existing else "ATTENDANCE_RECORD",
+            entity_type="attendance",
+            entity_id=record["attendance_id"],
+            session_id=session_id,
+            usn=clean_usn,
+            old_value=existing.get("status") if existing else None,
+            new_value=record["status"],
+            timestamp=_utcnow_iso(),
+        )
+        db.commit()
+        response.status_code = status.HTTP_200_OK if existing else status.HTTP_201_CREATED
+        return record
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error("Failed to write attendance audit entry: %s", exc)
         raise
 
 
@@ -177,7 +267,8 @@ def bulk_record_attendance(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    _verify_session_exists(db, session_id)
+    session = _verify_session_exists(db, session_id)
+    _assert_session_ownership(current_user, session, db)
 
     # Check for duplicate USNs within the request payload
     usns = [r.usn.strip().upper() for r in payload.records]
@@ -221,11 +312,6 @@ def bulk_record_attendance(
 
     try:
         count = crud.insert_attendance_bulk(db, records=formatted_records, upsert=upsert)
-        db.commit()
-        return {
-            "inserted_count": count,
-            "message": f"Successfully inserted {count} attendance records.",
-        }
     except IntegrityError:
         db.rollback()
         raise HTTPException(
@@ -235,6 +321,30 @@ def bulk_record_attendance(
     except Exception as exc:
         db.rollback()
         logger.error("Error during bulk attendance insertion: %s", exc)
+        raise
+
+    try:
+        crud.create_audit_entry(
+            db,
+            actor_id=current_user.user_id,
+            action="ATTENDANCE_BULK_UPSERT" if upsert else "ATTENDANCE_BULK",
+            entity_type="attendance",
+            entity_id=session_id,
+            session_id=session_id,
+            new_value=f"{count} records",
+            timestamp=_utcnow_iso(),
+        )
+        db.commit()
+        return {
+            "inserted_count": count,
+            "message": f"Successfully inserted {count} attendance records.",
+        }
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as exc:
+        db.rollback()
+        logger.error("Failed to write attendance audit entry: %s", exc)
         raise
 
 
@@ -259,7 +369,8 @@ def replace_attendance(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    _verify_session_exists(db, session_id)
+    session = _verify_session_exists(db, session_id)
+    _assert_session_ownership(current_user, session, db)
 
     # Validate duplicates in payload
     usns = [r.usn.strip().upper() for r in payload.records]
@@ -291,11 +402,25 @@ def replace_attendance(
         replaced_count = crud.replace_session_attendance(
             db, session_id=session_id, records=formatted_records
         )
+        crud.create_audit_entry(
+            db,
+            actor_id=current_user.user_id,
+            action="ATTENDANCE_REPLACE",
+            entity_type="attendance",
+            entity_id=session_id,
+            session_id=session_id,
+            new_value=f"{replaced_count} records",
+            timestamp=_utcnow_iso(),
+        )
         db.commit()
         return {
             "replaced_count": replaced_count,
             "message": f"Successfully replaced attendance for session '{session_id}' with {replaced_count} records.",
         }
+    except ValueError as exc:
+        # Staged edits protect their attendance row: refuse instead of losing them.
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
     except Exception as exc:
         db.rollback()
         logger.error("Failed to replace attendance: %s", exc)
@@ -322,7 +447,21 @@ def delete_attendance(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     _verify_session_exists(db, session_id)
-    deleted_count = crud.delete_session_attendance(db, session_id=session_id)
+    try:
+        deleted_count = crud.delete_session_attendance(db, session_id=session_id)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    crud.create_audit_entry(
+        db,
+        actor_id=current_user.user_id,
+        action="ATTENDANCE_DELETE",
+        entity_type="attendance",
+        entity_id=session_id,
+        session_id=session_id,
+        old_value=f"{deleted_count} records",
+        timestamp=_utcnow_iso(),
+    )
     db.commit()
     return {
         "deleted_count": deleted_count,
@@ -378,7 +517,8 @@ def reconcile_attendance(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    _verify_session_exists(db, session_id)
+    session = _verify_session_exists(db, session_id)
+    _assert_session_ownership(current_user, session, db)
 
     # ---------------------------------------------------------
     # Mode 1: Single or Bulk Manual Resolutions
@@ -391,9 +531,20 @@ def reconcile_attendance(
             clean_usn = res.usn.strip().upper()
             _verify_student_exists(db, clean_usn)
 
-            # Find existing room or fallback to default
+            # Prefer the room already on record, else the room the session
+            # actually has. Never invent a room id.
             existing = crud.get_attendance_record(db, session_id, clean_usn)
-            room_id = existing["room_id"] if existing else "LH-101"
+            room_id = existing["room_id"] if existing else crud.resolve_session_room_id(
+                db, session_id, clean_usn
+            )
+            if not room_id:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"Cannot reconcile '{clean_usn}': no room is known for session "
+                        f"'{session_id}'. Supply allocation or attendance room data first."
+                    ),
+                )
 
             updated = crud.insert_attendance(
                 db,
@@ -407,6 +558,16 @@ def reconcile_attendance(
             )
             updated_records.append(updated)
 
+        crud.create_audit_entry(
+            db,
+            actor_id=current_user.user_id,
+            action="ATTENDANCE_RECONCILE",
+            entity_type="attendance",
+            entity_id=session_id,
+            session_id=session_id,
+            new_value=f"{len(updated_records)} resolutions",
+            timestamp=_utcnow_iso(),
+        )
         db.commit()
         return {
             "reconciled_count": len(updated_records),
@@ -429,21 +590,44 @@ def reconcile_attendance(
             roster = payload.roster
         else:
             students = crud.get_all_students(db)
-            roster = [{"usn": s["usn"], "room_id": "LH-101"} for s in students]
+            session_room = crud.resolve_session_room_id(db, session_id)
+            roster = [
+                {
+                    "usn": s["usn"],
+                    "room_id": crud.resolve_session_room_id(db, session_id, s["usn"])
+                    or session_room
+                    or "",
+                }
+                for s in students
+            ]
 
         missing_rooms = set(payload.missing_room_ids or [])
 
-        reconciled = crud.reconcile_session_roster(
-            db,
-            session_id=session_id,
-            roster=roster,
-            uploaded_records=payload.uploaded_records,
-            missing_room_ids=missing_rooms,
-            confidence_threshold=payload.confidence_threshold,
-            persist=payload.persist,
-        )
+        try:
+            reconciled = crud.reconcile_session_roster(
+                db,
+                session_id=session_id,
+                roster=roster,
+                uploaded_records=payload.uploaded_records,
+                missing_room_ids=missing_rooms,
+                confidence_threshold=payload.confidence_threshold,
+                persist=payload.persist,
+            )
+        except ValueError as exc:
+            db.rollback()
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
         if payload.persist:
+            crud.create_audit_entry(
+                db,
+                actor_id=current_user.user_id,
+                action="ATTENDANCE_RECONCILE",
+                entity_type="attendance",
+                entity_id=session_id,
+                session_id=session_id,
+                new_value=f"{len(reconciled)} reconciled records",
+                timestamp=_utcnow_iso(),
+            )
             db.commit()
 
         return {

@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import Role, get_current_user, require_roles
+from app.auth.session_scope import resolve_session_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
@@ -29,8 +30,14 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 @router.get(
     "",
     response_model=SessionPageResponse,
-    summary="List all sessions",
-    description="Retrieve paginated sessions, optionally filtered by date (YYYY-MM-DD) and search.",
+    summary="List sessions visible to the caller",
+    description=(
+        "Retrieve paginated sessions, optionally filtered by date (YYYY-MM-DD) and search. "
+        "Access is filtered server-side by role: ADMIN keeps institution-wide access, while "
+        "every other role only sees sessions they own, coordinate, or are mapped to through "
+        "an exact subject-code mapping. Pagination, date and search parameters never widen "
+        "that scope."
+    ),
 )
 def list_sessions(
     date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Filter sessions by date (YYYY-MM-DD)"),
@@ -40,8 +47,16 @@ def list_sessions(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    items, total = crud.get_sessions_paginated(
-        db, date=date, search=search, limit=limit, offset=offset
+    scope = resolve_session_scope(db, current_user)
+    items, total = crud.get_sessions_paginated_scoped(
+        db,
+        date=date,
+        search=search,
+        limit=limit,
+        offset=offset,
+        scope_user_id=scope.user_id,
+        scope_subject_codes=sorted(scope.subject_codes),
+        unrestricted=scope.unrestricted,
     )
     return {
         "items": items,
@@ -55,8 +70,13 @@ def list_sessions(
     "/{session_id}",
     response_model=SessionResponse,
     summary="Get session by ID",
-    description="Retrieve a single session record by session_id.",
+    description=(
+        "Retrieve a single session record by session_id. Non-administrator callers may only "
+        "read sessions they own, coordinate, or are mapped to through an exact subject-code "
+        "mapping; any other session is rejected with 403."
+    ),
     responses={
+        403: {"description": "Session is not visible to the current user"},
         404: {"description": "Session not found"},
     },
 )
@@ -71,6 +91,8 @@ def get_session_by_id(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session with ID '{session_id.strip()}' not found.",
         )
+    scope = resolve_session_scope(db, current_user)
+    scope.assert_allowed(session)
     return session
 
 

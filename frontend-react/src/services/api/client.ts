@@ -35,10 +35,12 @@ export class ApiError extends Error {
   }
 }
 
+export type RefreshHandler = () => Promise<string | null>;
+
 export class ApiClient {
   private readonly axiosInstance: AxiosInstance;
   private accessToken: string | null = null;
-  private refreshPromise: Promise<string | null> | null = null;
+  private refreshHandler: RefreshHandler | null = null;
 
   constructor() {
     this.axiosInstance = axios.create({
@@ -63,7 +65,7 @@ export class ApiClient {
       (error) => Promise.reject(error)
     );
 
-    // Response Interceptor: Handle 401 auto-refresh with single-flight rotation
+    // Response Interceptor: Handle 401 auto-refresh with single-flight rotation via shared refresh handler
     this.axiosInstance.interceptors.response.use(
       (response: AxiosResponse) => response,
       async (error) => {
@@ -79,10 +81,12 @@ export class ApiClient {
           originalRequest._retry = true;
 
           try {
-            const newToken = await this.performRefresh();
-            if (newToken) {
-              originalRequest.headers.Authorization = `Bearer ${newToken}`;
-              return this.axiosInstance(originalRequest);
+            if (this.refreshHandler) {
+              const newToken = await this.refreshHandler();
+              if (newToken) {
+                originalRequest.headers.Authorization = `Bearer ${newToken}`;
+                return this.axiosInstance(originalRequest);
+              }
             }
           } catch {
             this.setAccessToken(null);
@@ -91,12 +95,27 @@ export class ApiClient {
 
         const status = error.response?.status || 500;
         const data = error.response?.data;
-        const code = data?.code || (status === 401 ? "UNAUTHORIZED" : "HTTP_ERROR");
-        const message = data?.detail || data?.message || error.message || "An unexpected error occurred.";
+        const code =
+          data?.code ||
+          (status === 401
+            ? "UNAUTHORIZED"
+            : status === 403
+            ? "FORBIDDEN"
+            : "HTTP_ERROR");
+        const message =
+          data?.detail ||
+          data?.message ||
+          (status === 403
+            ? "Access Denied: You do not have permission to perform this action."
+            : error.message || "An unexpected error occurred.");
 
         return Promise.reject(new ApiError(status, code, message, data));
       }
     );
+  }
+
+  public setRefreshHandler(handler: RefreshHandler): void {
+    this.refreshHandler = handler;
   }
 
   public setAccessToken(token: string | null): void {
@@ -112,47 +131,6 @@ export class ApiClient {
       return "";
     }
     return "http://127.0.0.1:8000";
-  }
-
-  private async performRefresh(): Promise<string | null> {
-    if (this.refreshPromise) {
-      return this.refreshPromise;
-    }
-
-    this.refreshPromise = (async () => {
-      try {
-        const res = await axios.post<{
-          token: string;
-          role: string;
-          name: string;
-          expires_at_utc: string;
-        }>(
-          `${this.getEffectiveBaseUrl()}/api/v1/auth/refresh`,
-          {},
-          {
-            withCredentials: true,
-            headers: {
-              "Content-Type": "application/json",
-              Accept: "application/json",
-              "X-Requested-With": "XMLHttpRequest",
-            },
-          }
-        );
-
-        if (res.data && res.data.token) {
-          this.setAccessToken(res.data.token);
-          return res.data.token;
-        }
-        return null;
-      } catch {
-        this.setAccessToken(null);
-        return null;
-      } finally {
-        this.refreshPromise = null;
-      }
-    })();
-
-    return this.refreshPromise;
   }
 
   public async get<T>(

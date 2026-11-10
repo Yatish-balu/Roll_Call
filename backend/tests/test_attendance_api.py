@@ -26,6 +26,7 @@ from app.db.base import Base
 from app.db.models import Student, Room, Session as DbSession, Attendance
 from app.dependencies import get_db
 from app.main import app
+from tests.conftest import seed_test_admin_user
 
 
 @pytest.fixture
@@ -45,6 +46,8 @@ def test_db_engine():
 @pytest.fixture
 def seeded_client(test_db_engine):
     """FastAPI TestClient with isolated in-memory DB dependency override and seeded master data."""
+    # Audit rows reference users.user_id, so the mock-auth admin must exist.
+    seed_test_admin_user(test_db_engine)
     TestingSessionLocal = sessionmaker(bind=test_db_engine, class_=Session, expire_on_commit=False)
 
     # Seed master data

@@ -32,26 +32,13 @@ export function LoginView() {
       navigate("/");
     } catch (err: unknown) {
       if (err instanceof Error) {
-        setErrorMessage(`Authentication failed: ${err.message}. Please check backend service connectivity.`);
+        setErrorMessage(`Authentication failed: ${err.message}. Please verify your credentials.`);
       } else {
         setErrorMessage("Authentication failed. Invalid credentials or backend service is unreachable.");
       }
     } finally {
       setIsSubmitting(false);
     }
-  };
-
-  const handleQuickFill = (u: string, p: string, ak?: string) => {
-    setUserId(u);
-    setPassword(p);
-    if (ak) {
-      setShowAdminKey(true);
-      setAdminKey(ak);
-    } else {
-      setShowAdminKey(false);
-      setAdminKey("");
-    }
-    setErrorMessage(null);
   };
 
   return (
@@ -92,7 +79,7 @@ export function LoginView() {
               type="text"
               value={userId}
               onChange={(e) => setUserId(e.target.value)}
-              placeholder="e.g. faculty_ds or admin_root"
+              placeholder="Enter your User ID"
               required
               className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-sm text-[#24251C] placeholder-[#77735F]/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] transition-all"
             />
@@ -157,44 +144,10 @@ export function LoginView() {
             disabled={isSubmitting}
             className="w-full py-2.5 px-4 rounded-xl bg-[#3F451F] hover:bg-[#343919] text-[#EDE8D8] text-sm font-bold shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] disabled:opacity-50 cursor-pointer"
           >
-            {isSubmitting ? "Authenticating with Backend..." : "Sign In"}
+            {isSubmitting ? "Authenticating..." : "Sign In"}
           </button>
         </form>
-
-        {/* Demo Fast-Login Helpers */}
-        <div className="border-t border-[#E4DDCA] pt-4 space-y-2">
-          <p className="text-[11px] font-semibold text-[#77735F] text-center">
-            Prefill Seeded Credentials
-          </p>
-          <div className="flex gap-2 justify-center flex-wrap">
-            <button
-              type="button"
-              onClick={() => handleQuickFill("admin_root", "AdminSecurePass_2026!")}
-              className="px-2.5 py-1 text-[10px] font-bold rounded-lg bg-[#6C5119] text-white border border-[#6C5119] hover:bg-[#543F14] transition-colors shadow-2xs"
-            >
-              ★ Admin Portal (admin_root)
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickFill("faculty_ds", "FacultyPass_DIST_2026!")}
-              className="px-2.5 py-1 text-[10px] font-semibold rounded-lg bg-[#EDE8D8] text-[#24251C] border border-[#E4DDCA] hover:bg-[#E4DDCA] transition-colors"
-            >
-              Faculty (Distributed Systems)
-            </button>
-            <button
-              type="button"
-              onClick={() => handleQuickFill("faculty_ml", "FacultyPass_ML_2026!")}
-              className="px-2.5 py-1 text-[10px] font-semibold rounded-lg bg-[#EDE8D8] text-[#24251C] border border-[#E4DDCA] hover:bg-[#E4DDCA] transition-colors"
-            >
-              Faculty (Machine Learning)
-            </button>
-          </div>
-          <p className="text-[10px] text-[#77735F] text-center italic">
-            Prefills inputs only. Active FastAPI backend authentication is required.
-          </p>
-        </div>
       </div>
     </div>
   );
 }
-

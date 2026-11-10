@@ -23,6 +23,8 @@ import os
 from unittest.mock import patch
 
 import pytest
+
+from tests import pg_support
 from sqlalchemy import create_engine, text
 from sqlalchemy.pool import QueuePool, StaticPool
 
@@ -145,6 +147,7 @@ def test_postgresql_ssl_psycopg_connect_args(monkeypatch):
     _set_env(
         monkeypatch,
         APP_ENV="development",
+        DB_BACKEND="supabase",
         DATABASE_URL_SYNC="postgresql+psycopg://user:pass@localhost:5432/db?sslmode=require",
     )
 
@@ -162,6 +165,7 @@ def test_postgresql_engine_url_is_postgresql(monkeypatch):
     _set_env(
         monkeypatch,
         APP_ENV="development",
+        DB_BACKEND="supabase",
         DATABASE_URL_SYNC="postgresql+psycopg://user:pass@localhost:5432/db",
     )
     engine = conn_module.create_sync_engine()
@@ -197,6 +201,7 @@ def test_connection_pool_settings(monkeypatch):
     _set_env(
         monkeypatch,
         APP_ENV="development",
+        DB_BACKEND="supabase",
         DATABASE_URL_SYNC="postgresql+psycopg://user:pass@localhost:5432/db",
         DB_POOL_SIZE="5",
         DB_MAX_OVERFLOW="10",
@@ -271,17 +276,24 @@ def test_postgresql_integration_skipped_without_test_url(monkeypatch):
 
 @pytest.mark.skipif(
     not os.getenv("TEST_DATABASE_URL"),
-    reason="TEST_DATABASE_URL not set: disposable PostgreSQL instance required",
+    reason=pg_support.SKIP_REASON,
 )
 def test_postgresql_integration_connects():
     """Opt-in integration test: connects to a disposable PostgreSQL instance.
 
     Skipped unless TEST_DATABASE_URL points to a disposable PostgreSQL database.
-    Never uses production DATABASE_URL.
+    The target is validated before connecting and never uses production
+    DATABASE_URL. A connection failure fails the test (the environment claims a
+    database exists); an unset TEST_DATABASE_URL skips with an explicit reason.
     """
-    test_url = os.getenv("TEST_DATABASE_URL")
-    assert "postgresql" in test_url, "TEST_DATABASE_URL must be a PostgreSQL URL"
+    test_url = pg_support.configured_test_url()
+    assert test_url, "TEST_DATABASE_URL must be set for this integration test"
+    pg_support.validate_disposable(test_url)
 
-    engine = create_engine(test_url, connect_args={"sslmode": "require"})
-    with engine.connect() as conn:
-        conn.execute(text("SELECT 1"))
+    engine = pg_support.create_test_engine(test_url)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT 1")).scalar() == 1
+            assert conn.dialect.name == "postgresql"
+    finally:
+        engine.dispose()

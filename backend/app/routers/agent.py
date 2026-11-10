@@ -24,6 +24,7 @@ from app.auth import (
     rate_limit_confirm,
 )
 from app.db import crud
+from app.auth.session_scope import resolve_session_scope
 from app.dependencies import get_db
 from app.schemas.agent import (
     AgentConfirmRequest,
@@ -248,6 +249,11 @@ def agent_confirm(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session with ID '{clean_sess}' not found.",
         )
+
+    # Committing attendance is a write into that session, so the caller must be
+    # authorized for it: owner, coordinator, or exact subject-code mapping.
+    scope = resolve_session_scope(db, current_user)
+    scope.assert_allowed(session)
 
     if not payload.records:
         raise HTTPException(

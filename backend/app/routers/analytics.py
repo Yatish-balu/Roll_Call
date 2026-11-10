@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Path, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.auth.session_scope import resolve_session_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.analytics import OverallSummary, SummaryReportResponse
@@ -60,6 +61,11 @@ def get_session_summary(
             detail=f"Session with ID '{clean_id}' not found.",
         )
 
+    # Session visibility is enforced server-side: a caller may only aggregate a
+    # session they are authorized to see.
+    scope = resolve_session_scope(db, current_user)
+    scope.assert_allowed(session)
+
     records = crud.get_session_attendance_details(db, session_id=clean_id)
     report = summary_tool(records)
 
@@ -92,6 +98,8 @@ def get_date_summary(
 ) -> SummaryReportResponse:
     clean_date = _validate_iso_date(date)
     sessions = crud.get_sessions_by_date(db, date=clean_date)
+    scope = resolve_session_scope(db, current_user)
+    sessions = [s for s in sessions if scope.allows(s)]
 
     if not sessions:
         # Gracefully handle dates with no sessions
@@ -142,6 +150,8 @@ def get_overall_overview(
     db: Session = Depends(get_db),
 ) -> SummaryReportResponse:
     sessions = crud.get_all_sessions(db)
+    scope = resolve_session_scope(db, current_user)
+    sessions = [s for s in sessions if scope.allows(s)]
     all_records: List[Dict[str, Any]] = []
     for sess in sessions:
         recs = crud.get_session_attendance_details(db, session_id=sess["session_id"])

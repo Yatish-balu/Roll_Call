@@ -2,8 +2,10 @@
 
 import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { fetchStudents, createStudent, type Student } from "@/services/api/students";
+import { useAuth } from "@/hooks/useAuth";
 
 export function StudentsView() {
+  const { canManageStudents, isViewer } = useAuth();
   const [students, setStudents] = useState<Student[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -70,6 +72,10 @@ export function StudentsView() {
 
   const handleAddSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!canManageStudents) {
+      setFormError("Only administrators are permitted to register students.");
+      return;
+    }
     if (!newUsn.trim() || !newName.trim()) {
       setFormError("Please fill out both USN and Student Name.");
       return;
@@ -116,15 +122,24 @@ export function StudentsView() {
           </p>
         </div>
 
-        <button
-          onClick={() => setIsAddModalOpen(true)}
-          className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto"
-        >
-          <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M12 4v16m8-8H4" />
-          </svg>
-          <span>Register Student</span>
-        </button>
+        {canManageStudents ? (
+          <button
+            onClick={() => setIsAddModalOpen(true)}
+            className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M12 4v16m8-8H4" />
+            </svg>
+            <span>Register Student</span>
+          </button>
+        ) : (
+          <span className="px-3.5 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] text-xs font-semibold border border-[#E4DDCA] flex items-center space-x-1.5 self-start sm:self-auto">
+            <svg className="w-3.5 h-3.5 text-[#77735F]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+            </svg>
+            <span>{isViewer ? "Read-Only Student Registry" : "Institutional Student Directory"}</span>
+          </span>
+        )}
       </div>
 
       {/* Error Banner */}

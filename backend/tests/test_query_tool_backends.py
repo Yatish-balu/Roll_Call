@@ -84,6 +84,24 @@ def backend_setup(request, tmp_path):
         old_backend = os.environ.get("DB_BACKEND")
         os.environ["DB_BACKEND"] = "supabase"
 
+        # This is a genuine integration test against a live managed database.
+        # Probe connectivity first: when the managed database is unreachable
+        # (invalid credentials, pooler circuit breaker open, network blocked),
+        # skip with an explicit reason rather than failing the local suite.
+        # No assertion is weakened - the checks below still run in full
+        # whenever the read-only database is actually reachable.
+        try:
+            probe = _get_readonly_conn("default")
+            try:
+                probe.execute("SELECT 1")
+            finally:
+                probe.close()
+        except Exception as exc:
+            pytest.skip(
+                "Supabase read-only database not reachable "
+                f"({type(exc).__name__}); integration test skipped"
+            )
+
         yield {"backend": "supabase", "target": None, "expected_count": len(records)}
 
         if old_backend is not None:

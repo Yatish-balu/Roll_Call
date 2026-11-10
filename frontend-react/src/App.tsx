@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/context/AuthContext";
 import { AppShell } from "@/components/layout";
+import { ProtectedRoute } from "@/components/auth";
 import { DashboardView } from "@/features/dashboard";
 import { StudentsView } from "@/features/students";
 import { AttendanceView } from "@/features/attendance";
@@ -29,7 +30,9 @@ export function App() {
             path="/"
             element={
               <AppShell title="Dashboard">
-                <DashboardView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Dashboard">
+                  <DashboardView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -37,7 +40,9 @@ export function App() {
             path="/students"
             element={
               <AppShell title="Students">
-                <StudentsView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Student Registry">
+                  <StudentsView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -45,7 +50,9 @@ export function App() {
             path="/attendance"
             element={
               <AppShell title="Attendance">
-                <AttendanceView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Rosters">
+                  <AttendanceView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -53,7 +60,9 @@ export function App() {
             path="/timetable"
             element={
               <AppShell title="Timetable">
-                <TimetableView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Academic Timetable">
+                  <TimetableView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -61,7 +70,9 @@ export function App() {
             path="/sessions"
             element={
               <AppShell title="Sessions">
-                <SessionsView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Academic Sessions">
+                  <SessionsView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -69,7 +80,9 @@ export function App() {
             path="/faculty"
             element={
               <AppShell title="Faculty & Departments">
-                <FacultyView />
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Faculty & Department Management">
+                  <FacultyView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -77,7 +90,9 @@ export function App() {
             path="/rooms"
             element={
               <AppShell title="Rooms & Facilities">
-                <RoomsView />
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Rooms & Facilities Management">
+                  <RoomsView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -85,7 +100,9 @@ export function App() {
             path="/reports"
             element={
               <AppShell title="Reports & Analytics">
-                <ReportsView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Reports & Analytics">
+                  <ReportsView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -93,7 +110,9 @@ export function App() {
             path="/assistant"
             element={
               <AppShell title="AI Assistant">
-                <AssistantView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="AI Assistant">
+                  <AssistantView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -101,7 +120,9 @@ export function App() {
             path="/settings"
             element={
               <AppShell title="Settings">
-                <SettingsView />
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Settings & Preferences">
+                  <SettingsView />
+                </ProtectedRoute>
               </AppShell>
             }
           />
@@ -113,4 +134,3 @@ export function App() {
 }
 
 export default App;
-
