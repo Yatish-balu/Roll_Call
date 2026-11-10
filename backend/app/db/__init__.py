@@ -2,6 +2,12 @@
 
 from app.db.connection import (
     DEFAULT_DB_PATH,
+    DB_BACKEND,
+    DATABASE_URL,
+    READONLY_DATABASE_URL,
+    SQLITE_PATH,
+    get_backend,
+    get_engine,
     get_connection,
     get_db_cursor,
     create_sync_engine,
@@ -57,6 +63,12 @@ from app.db.crud import (
 __all__ = [
     # Legacy connection helpers
     "DEFAULT_DB_PATH",
+    "DB_BACKEND",
+    "DATABASE_URL",
+    "READONLY_DATABASE_URL",
+    "SQLITE_PATH",
+    "get_backend",
+    "get_engine",
     "get_connection",
     "get_db_cursor",
     "SCHEMA_SQL",

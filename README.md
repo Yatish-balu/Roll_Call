@@ -6,6 +6,16 @@ Designed as a modular monorepo, RollCall AI decouples a deterministic Python/Fas
 
 ---
 
+## Database Architecture & Dual-Backend Setup
+
+- **Dual-Backend Architecture**: RollCall AI supports unified execution on Supabase PostgreSQL with an automatic or manual local SQLite fallback via SQLAlchemy.
+- **Environment Variables**: Managed in `.env` using `DB_BACKEND` (`supabase` | `sqlite`), `DATABASE_URL`, `READONLY_DATABASE_URL`, and `SQLITE_PATH` (`data/attendance.db`).
+- **How to Switch Backends**: Set `DB_BACKEND=supabase` or `DB_BACKEND=sqlite` in `.env`; all application and query layers seamlessly adapt without code modifications.
+- **Data Synchronization**: Run `python backend/scripts/sync.py` to copy all tables from Supabase into SQLite without duplicates, or `python backend/scripts/sync.py --init` for the initial load from SQLite into Supabase.
+- **Run Sync Before Demo**: Always run `python backend/scripts/sync.py` before presentations or demos to ensure SQLite has the freshest copy of institutional data for offline fallback.
+
+---
+
 ## Monorepo Project Structure
 
 ```text

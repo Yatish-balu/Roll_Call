@@ -1,5 +1,6 @@
-fastapi
-uvicorn[standard]
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0.0
 pandas
 openpyxl
 reportlab
@@ -7,10 +8,17 @@ pytest
 python-dotenv
 streamlit
 
-# Phase 2 Database Foundation
+# Database & Migration Foundation (SQLite & PostgreSQL / Supabase)
 SQLAlchemy>=2.0.38,<2.1.0
 alembic>=1.14.0,<1.19.0
 asyncpg>=0.30.0
 psycopg[binary]>=3.2.0
+psycopg2-binary
 aiosqlite>=0.21.0
 greenlet>=3.1.0
+
+# Authentication & Security
+PyJWT>=2.8.0
+cryptography>=42.0.0
+passlib[bcrypt]>=1.7.4
+bcrypt>=4.0.0

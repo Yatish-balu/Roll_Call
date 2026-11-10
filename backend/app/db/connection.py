@@ -1,4 +1,4 @@
-"""Database connection management for SQLite and SQLAlchemy 2.0."""
+"""Database connection management for SQLite and SQLAlchemy 2.0 with Supabase dual-backend support."""
 
 from __future__ import annotations
 
@@ -8,10 +8,13 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Generator, Optional, Union
 
+from dotenv import load_dotenv
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool, QueuePool
+
+load_dotenv()
 
 
 def _find_repo_root() -> Path:
@@ -31,7 +34,7 @@ REPO_ROOT = _find_repo_root()
 
 def _resolve_default_db_path() -> str:
     """Retrieve absolute, canonical path to the SQLite database."""
-    raw = os.getenv("DATABASE_PATH", "data/attendance.db")
+    raw = os.getenv("SQLITE_PATH") or os.getenv("DATABASE_PATH", "data/attendance.db")
     if raw == ":memory:":
         return ":memory:"
     if os.path.isabs(raw):
@@ -40,6 +43,49 @@ def _resolve_default_db_path() -> str:
 
 
 DEFAULT_DB_PATH = _resolve_default_db_path()
+SQLITE_PATH = DEFAULT_DB_PATH
+DB_BACKEND = os.getenv("DB_BACKEND", "sqlite").strip().lower()
+DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
+READONLY_DATABASE_URL = os.getenv("READONLY_DATABASE_URL", "").strip()
+
+
+def get_backend() -> str:
+    """Return currently active backend: 'supabase' or 'sqlite'."""
+    backend = os.getenv("DB_BACKEND", DB_BACKEND).strip().lower()
+    has_url = bool(
+        os.getenv("READONLY_DATABASE_URL")
+        or os.getenv("DATABASE_URL")
+        or READONLY_DATABASE_URL
+        or DATABASE_URL
+    )
+    if backend == "supabase" and not has_url:
+        return "sqlite"
+    return backend
+
+
+def get_engine(backend: Optional[str] = None, db_url: Optional[str] = None):
+    """
+    Get or create SQLAlchemy engine based on configured backend.
+    Gracefully falls back to SQLite if Supabase connection fails or is unconfigured.
+    """
+    active_backend = backend or get_backend()
+
+    try:
+        if active_backend == "supabase":
+            url = db_url or os.getenv("DATABASE_URL", DATABASE_URL)
+            if url.startswith("postgres://"):
+                url = url.replace("postgres://", "postgresql://", 1)
+            return create_engine(url, pool_pre_ping=True)
+        else:
+            path = db_url or SQLITE_PATH
+            if path != ":memory:" and os.path.dirname(path):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+            db_path_posix = path.replace(os.sep, "/") if path != ":memory:" else ":memory:"
+            return create_engine(f"sqlite:///{db_path_posix}")
+    except Exception:
+        path = SQLITE_PATH
+        db_path_posix = path.replace(os.sep, "/") if path != ":memory:" else ":memory:"
+        return create_engine(f"sqlite:///{db_path_posix}")
 
 
 # ==============================================================================
@@ -100,13 +146,11 @@ def create_sync_engine(
     target_url = url or os.getenv("DATABASE_URL_SYNC") or f"sqlite:///{db_path_posix}"
 
     if target_url.startswith("sqlite"):
-        # SQLite engines: avoid PostgreSQL pool options
         engine_kwargs = {
             "echo": echo,
             **kwargs,
         }
     else:
-        # PostgreSQL / Supabase connection pooling configuration
         engine_kwargs = {
             "echo": echo,
             "pool_pre_ping": True,
@@ -137,7 +181,6 @@ def create_async_engine_instance(
             **kwargs,
         }
     else:
-        # PostgreSQL / Supabase async connection pooling configuration
         engine_kwargs = {
             "echo": echo,
             "pool_pre_ping": True,
