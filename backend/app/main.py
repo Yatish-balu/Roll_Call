@@ -109,12 +109,31 @@ app.add_middleware(
 
 
 # ==============================================================================
-# 3. Global Structured Exception Handlers (Safe: No secret or stack trace leaks)
+# 3. Global Structured Exception Handlers (Standard error format: D15 & Safe)
 # ==============================================================================
+
+def _map_error_code(status_code: int, detail: Any) -> str:
+    msg = str(detail).lower()
+    if status_code == 401:
+        return "UNAUTHENTICATED"
+    if status_code == 403:
+        if "lock" in msg:
+            return "LOCKED"
+        return "FORBIDDEN"
+    if status_code == 404:
+        return "NOT_FOUND"
+    if status_code == 422:
+        if "quality" in msg or "photo" in msg:
+            return "QUALITY_REJECTED"
+        return "VALIDATION"
+    if status_code == 429:
+        return "RATE_LIMITED"
+    return "HTTP_ERROR"
+
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
-    """Format Pydantic request validation errors cleanly."""
+    """Format Pydantic request validation errors cleanly (matching D15 format)."""
     errors = []
     for err in exc.errors():
         field = " -> ".join(str(loc) for loc in err.get("loc", []))
@@ -126,8 +145,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={
-            "error": "ValidationError",
-            "message": "Input validation failed. Please check the supplied parameters.",
+            "error": {
+                "code": "VALIDATION",
+                "message": "Input validation failed. Please check the supplied parameters.",
+            },
+            "status_code": 422,
+            "detail": errors,
             "details": errors,
         },
     )
@@ -135,11 +158,16 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
-    """Format standard HTTP exceptions while preserving custom response headers (e.g. Retry-After, WWW-Authenticate)."""
+    """Format standard HTTP exceptions with standard {error: {code, message}} body (D15)."""
+    code = _map_error_code(exc.status_code, exc.detail)
+    msg = str(exc.detail) if isinstance(exc.detail, str) else "An error occurred."
     return JSONResponse(
         status_code=exc.status_code,
         content={
-            "error": "HTTPError",
+            "error": {
+                "code": code,
+                "message": msg,
+            },
             "status_code": exc.status_code,
             "detail": exc.detail,
         },
@@ -156,6 +184,7 @@ async def value_error_handler(request: Request, exc: ValueError):
         content={
             "error": "BadRequest",
             "message": str(exc),
+            "detail": str(exc),
         },
     )
 
@@ -192,9 +221,10 @@ def health_check():
 
 
 # ==============================================================================
-# 5. API v1 Routers Registration
+# 5. API Routers Registration (Dual Mount: /api/v1 and Playbook Contract /api)
 # ==============================================================================
 
+# API v1 Routers
 app.include_router(students_router, prefix="/api/v1")
 app.include_router(rooms_router, prefix="/api/v1")
 app.include_router(sessions_router, prefix="/api/v1")
@@ -202,6 +232,15 @@ app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
+
+# Unversioned /api/ Routers (matching RollCall Playbook API Contract)
+app.include_router(students_router, prefix="/api")
+app.include_router(rooms_router, prefix="/api")
+app.include_router(sessions_router, prefix="/api")
+app.include_router(attendance_router, prefix="/api")
+app.include_router(analytics_router, prefix="/api")
+app.include_router(reports_router, prefix="/api")
+app.include_router(agent_router, prefix="/api")
 
 
 # ==============================================================================
