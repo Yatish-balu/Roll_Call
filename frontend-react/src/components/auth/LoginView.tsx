@@ -169,6 +169,13 @@ export function LoginView() {
           <div className="flex gap-2 justify-center flex-wrap">
             <button
               type="button"
+              onClick={() => handleQuickFill("admin_root", "AdminSecurePass_2026!")}
+              className="px-2.5 py-1 text-[10px] font-bold rounded-lg bg-[#6C5119] text-white border border-[#6C5119] hover:bg-[#543F14] transition-colors shadow-2xs"
+            >
+              ★ Admin Portal (admin_root)
+            </button>
+            <button
+              type="button"
               onClick={() => handleQuickFill("faculty_ds", "FacultyPass_DIST_2026!")}
               className="px-2.5 py-1 text-[10px] font-semibold rounded-lg bg-[#EDE8D8] text-[#24251C] border border-[#E4DDCA] hover:bg-[#E4DDCA] transition-colors"
             >

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useBackendHealth } from "@/hooks/useBackendHealth";
 import { useAuth } from "@/hooks/useAuth";
@@ -20,7 +20,9 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   const navigate = useNavigate();
   const pathname = location.pathname;
   const { isOnline } = useBackendHealth();
-  const { logout, session, isAdmin } = useAuth();
+  const { logout, login, session, isAdmin } = useAuth();
+  const [showSwitchModal, setShowSwitchModal] = useState(false);
+  const [isSwitching, setIsSwitching] = useState(false);
 
   const isLinkActive = (href: string) => {
     if (href === "/") {
@@ -44,7 +46,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "Attendance Roster",
+          name: "Attendance",
           href: "/attendance",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -53,9 +55,8 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "My Timetable",
+          name: "Timetable",
           href: "/timetable",
-          badge: "2-3/day",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
@@ -63,7 +64,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "Class Sessions",
+          name: "Sessions",
           href: "/sessions",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -72,7 +73,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "Students Roster",
+          name: "Students",
           href: "/students",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -96,7 +97,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "Subject Reports",
+          name: "Reports",
           href: "/reports",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -114,7 +115,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       group: "Administration Center",
       items: [
         {
-          name: "Admin Dashboard",
+          name: "Dashboard",
           href: "/",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -133,7 +134,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "Rooms & Facilities",
+          name: "Rooms",
           href: "/rooms",
           badge: "Admin",
           icon: (
@@ -143,7 +144,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "All Class Sessions",
+          name: "Sessions",
           href: "/sessions",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -152,7 +153,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "Master Timetable",
+          name: "Timetable",
           href: "/timetable",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -161,7 +162,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "Students Registry",
+          name: "Students",
           href: "/students",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -185,7 +186,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           ),
         },
         {
-          name: "System Reports",
+          name: "Reports",
           href: "/reports",
           icon: (
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
@@ -199,6 +200,32 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
 
   const currentNavGroups = isAdmin ? adminNav : teacherNav;
   const userInitial = (session?.name || session?.userId || "T").charAt(0).toUpperCase();
+
+  const handleSwitchToAdmin = async () => {
+    setIsSwitching(true);
+    try {
+      await login({ userId: "admin_root", password: "AdminSecurePass_2026!", rememberMe: true });
+      setShowSwitchModal(false);
+      navigate("/");
+    } catch {
+      navigate("/login");
+    } finally {
+      setIsSwitching(false);
+    }
+  };
+
+  const handleSwitchToTeacher = async () => {
+    setIsSwitching(true);
+    try {
+      await login({ userId: "faculty_ml", password: "FacultyPass_ML_2026!", rememberMe: true });
+      setShowSwitchModal(false);
+      navigate("/");
+    } catch {
+      navigate("/login");
+    } finally {
+      setIsSwitching(false);
+    }
+  };
 
   const sidebarContent = (
     <div className="flex flex-col h-full bg-[#3F451F] text-[#EDE8D8] select-none relative overflow-hidden">
@@ -220,15 +247,20 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           </div>
         </div>
 
-        {/* Dynamic Role Badge */}
+        {/* Dynamic Role Badge & Portal Switcher */}
         <div className="flex items-center justify-between px-3 py-1.5 rounded-lg bg-[#2D3216] border border-[#EDE8D8]/10 text-xs">
           <span className="text-[11px] font-bold text-[#D0C6A5] flex items-center space-x-1.5">
             <span className={`w-2 h-2 rounded-full ${isAdmin ? "bg-amber-400" : "bg-emerald-400"}`} />
-            <span>{isAdmin ? "Admin Console" : "Teacher Workspace"}</span>
+            <span>{isAdmin ? "Admin Portal" : "Teacher Workspace"}</span>
           </span>
-          <span className="text-[10px] font-mono font-semibold text-[#EDE8D8]/70 px-1.5 py-0.2 rounded bg-black/20">
-            {isAdmin ? "ADMIN" : "FACULTY"}
-          </span>
+          <button
+            type="button"
+            onClick={() => setShowSwitchModal(true)}
+            title={isAdmin ? "Switch to Teacher View" : "Open Admin Portal"}
+            className="text-[10px] font-bold text-amber-300 hover:text-amber-200 underline cursor-pointer"
+          >
+            {isAdmin ? "Switch Role" : "Admin Portal →"}
+          </button>
         </div>
       </div>
 
@@ -274,6 +306,27 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
             </nav>
           </div>
         ))}
+
+        {/* Quick Admin Portal Button for Teachers */}
+        {!isAdmin && (
+          <div className="pt-2 px-1">
+            <button
+              type="button"
+              onClick={() => setShowSwitchModal(true)}
+              className="w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold text-amber-200 bg-[#2D3216]/80 hover:bg-[#2D3216] border border-amber-400/25 transition-all cursor-pointer shadow-2xs"
+            >
+              <div className="flex items-center space-x-2.5">
+                <svg className="w-4 h-4 text-amber-300" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                </svg>
+                <span>Where is Admin Portal?</span>
+              </div>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-400/20 text-amber-200">
+                Click here
+              </span>
+            </button>
+          </div>
+        )}
       </div>
 
       {/* User Card & Footer */}
@@ -334,6 +387,67 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           </div>
         </div>
       </div>
+
+      {/* Switch Portal Modal */}
+      {showSwitchModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-xs">
+          <div className="bg-[#FBF8F0] text-[#24251C] rounded-2xl border border-[#E4DDCA] shadow-2xl max-w-md w-full p-6 space-y-4 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-center space-x-3">
+              <div className="w-10 h-10 rounded-xl bg-[#6C5119]/10 text-[#6C5119] flex items-center justify-center">
+                <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-lg font-extrabold text-[#24251C]">
+                  {isAdmin ? "Switch to Teacher Workspace" : "Access Admin Portal"}
+                </h3>
+                <p className="text-xs text-[#77735F]">
+                  Current account: <span className="font-mono font-bold text-[#24251C]">{session?.userId || "faculty.ml"}</span> ({session?.role || "FACULTY"})
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#EDE8D8]/50 border border-[#E4DDCA] text-xs text-[#24251C] space-y-2">
+              <p className="font-semibold">
+                {isAdmin
+                  ? "Switch to the Teacher Workspace to take attendance, view individual schedules, and manage assigned batches."
+                  : "The Admin Portal contains institutional administration features:"}
+              </p>
+              {!isAdmin && (
+                <ul className="list-disc list-inside space-y-1 text-[#77735F] text-[11px]">
+                  <li><strong className="text-[#24251C]">Faculty & Depts:</strong> Manage teachers & assigned subjects</li>
+                  <li><strong className="text-[#24251C]">Rooms:</strong> Add and monitor classrooms & laboratories</li>
+                  <li><strong className="text-[#24251C]">Master Registry:</strong> Institutional students and timetable</li>
+                  <li><strong className="text-[#24251C]">Admin Privileges:</strong> Root configuration & reports</li>
+                </ul>
+              )}
+            </div>
+
+            <div className="flex flex-col sm:flex-row gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isSwitching}
+                onClick={isAdmin ? handleSwitchToTeacher : handleSwitchToAdmin}
+                className="flex-1 py-2.5 px-4 rounded-xl bg-[#6C5119] hover:bg-[#543F14] text-white text-xs font-bold transition-all shadow-sm cursor-pointer disabled:opacity-50 text-center"
+              >
+                {isSwitching
+                  ? "Authenticating..."
+                  : isAdmin
+                  ? "Switch to Teacher (faculty.ml)"
+                  : "Switch to Admin (admin_root)"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowSwitchModal(false)}
+                className="py-2.5 px-4 rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] hover:bg-[#EDE8D8] text-xs font-bold text-[#77735F] cursor-pointer text-center"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 
