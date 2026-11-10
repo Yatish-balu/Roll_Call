@@ -6,12 +6,15 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import Role, get_current_user, require_roles
 from app.db import crud
+from app.db.models import Attendance, Session as DbSession, Student, TeacherSubject, Room
 from app.dependencies import get_db
+from app.health import health_band
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.student import (
     StudentBulkCreate,
@@ -47,6 +50,123 @@ def list_students(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+@router.get(
+    "/lookup",
+    summary="Search students by partial USN or name (max 20)",
+    description="Fast parameterised search across USN and student name. Protected against SQL injection.",
+)
+def lookup_students(
+    q: str = Query(..., min_length=1, description="Partial search string for USN or name"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    clean_q = q.strip()
+    if not clean_q:
+        return []
+
+    pattern = f"%{clean_q}%"
+    stmt = (
+        select(Student)
+        .where(
+            or_(
+                Student.usn.ilike(pattern),
+                Student.name.ilike(pattern),
+            )
+        )
+        .order_by(Student.usn.asc())
+        .limit(20)
+    )
+    students = db.execute(stmt).scalars().all()
+    return [{"usn": s.usn, "name": s.name, "branch": s.branch} for s in students]
+
+
+@router.get(
+    "/{usn}/ledger",
+    summary="Individual attendance ledger with time-ordered sessions and health band",
+    description="Returns chronological session history. Teachers see only their assigned subjects; admins see all.",
+)
+def get_student_ledger(
+    usn: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    clean_usn = usn.strip().upper()
+    student = db.get(Student, clean_usn)
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{clean_usn}' not found.",
+        )
+
+    # Determine caller's allowed subject codes
+    role_str = str(current_user.role).upper()
+    is_admin = role_str == "ADMIN" or role_str.endswith(".ADMIN")
+
+    allowed_subjects: Optional[List[str]] = None
+    if not is_admin:
+        ts_stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == current_user.user_id)
+        assigned = db.execute(ts_stmt).scalars().all()
+        allowed_subjects = [s.upper() for s in assigned]
+
+    # Query chronological attendance records
+    stmt = (
+        select(
+            Attendance.session_id,
+            DbSession.date,
+            DbSession.subject,
+            DbSession.subject_code,
+            Attendance.room_id,
+            Attendance.status,
+            Attendance.source,
+        )
+        .join(DbSession, Attendance.session_id == DbSession.session_id)
+        .where(Attendance.usn == clean_usn)
+        .order_by(DbSession.date.asc(), DbSession.session_id.asc())
+    )
+
+    rows = db.execute(stmt).all()
+
+    sessions = []
+    attended_count = 0
+    total_count = 0
+
+    for sess_id, s_date, s_subject, s_code, room_id, status_val, source in rows:
+        subject_identifier = (s_code or s_subject or "").upper()
+        # Non-admin filter: only assigned subjects
+        if not is_admin and allowed_subjects is not None:
+            if not any(code in subject_identifier or subject_identifier in code for code in allowed_subjects):
+                continue
+
+        norm_status = str(status_val).upper()
+        is_p = norm_status in ("PRESENT", "P")
+        if is_p:
+            attended_count += 1
+        total_count += 1
+
+        sessions.append({
+            "session_id": sess_id,
+            "date": s_date,
+            "subject": s_subject,
+            "room": room_id,
+            "status": norm_status,
+            "source": source or "CSV",
+        })
+
+    pct = round((attended_count / total_count) * 100.0, 1) if total_count > 0 else 0.0
+    band = health_band(pct)
+
+    return {
+        "usn": student.usn,
+        "name": student.name,
+        "branch": student.branch,
+        "percent": pct,
+        "band": band,
+        "total_sessions": total_count,
+        "attended_sessions": attended_count,
+        "sessions": sessions,
     }
 
 

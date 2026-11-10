@@ -1,7 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/context/AuthContext";
 import { AppShell } from "@/components/layout";
-import { ProtectedRoute } from "@/components/auth";
+import { ProtectedRoute, LoginView } from "@/components/auth";
 import { DashboardView } from "@/features/dashboard";
 import { StudentsView } from "@/features/students";
 import { AttendanceView } from "@/features/attendance";
@@ -18,14 +18,7 @@ export function App() {
     <AuthProvider>
       <BrowserRouter>
         <Routes>
-          <Route
-            path="/login"
-            element={
-              <AppShell title="Sign In">
-                <DashboardView />
-              </AppShell>
-            }
-          />
+          <Route path="/login" element={<LoginView />} />
           <Route
             path="/"
             element={

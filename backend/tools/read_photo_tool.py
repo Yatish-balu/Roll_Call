@@ -513,6 +513,21 @@ def read_photo_tool(
         ValueError:        if the image cannot be decoded.
     """
     image_path = str(image_path)
+    if not os.path.exists(image_path):
+        raise FileNotFoundError(f"Image file not found: {image_path}")
+
+    from tools.quality_gate import check_image_quality
+    q_res = check_image_quality(image_path)
+    if not q_res["ok"]:
+        logger.warning("Image %s rejected by quality gate: %s", image_path, q_res["reasons"])
+        return PhotoExtractionResult(
+            image_path=image_path,
+            rows=[],
+            source=ExtractionSource.LLM,
+            warnings=q_res["reasons"],
+            error=f"Image rejected by quality gate: {'; '.join(q_res['reasons'])}",
+        )
+
     resolved_key = api_key or os.getenv("GEMINI_API_KEY", "")
     resolved_model = model or os.getenv("PHOTO_LLM_MODEL", DEFAULT_MODEL)
     resolved_min_conf = min_confidence or float(os.getenv("PHOTO_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE)))

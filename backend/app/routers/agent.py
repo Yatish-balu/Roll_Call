@@ -181,6 +181,22 @@ async def agent_process_file(
                     detail=f"Uploaded file header does not match valid image signature for '{ext}'.",
                 )
 
+            # N9: Photographic quality gate check
+            from tools.quality_gate import check_image_quality
+            q_gate = check_image_quality(temp_path)
+            if not q_gate["ok"]:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail={
+                        "code": "QUALITY_REJECTED",
+                        "message": f"Photo quality rejected: {'; '.join(q_gate['reasons'])}",
+                        "sharpness": q_gate["sharpness"],
+                        "brightness": q_gate["brightness"],
+                        "thresholds": q_gate["thresholds"],
+                        "reasons": q_gate["reasons"],
+                    },
+                )
+
         agent = AttendanceAgent(db_target=db)
 
         # Pre-load master USNs and Rooms if available for master data validation

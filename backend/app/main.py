@@ -34,6 +34,9 @@ from app.routers import (
     analytics_router,
     attendance_router,
     auth_router,
+    calendar_router,
+    chat_router,
+    defaulters_router,
     me_router,
     meta_router,
     reports_router,
@@ -255,6 +258,9 @@ app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(calendar_router, prefix="/api/v1")
+app.include_router(chat_router, prefix="/api/v1")
+app.include_router(defaulters_router, prefix="/api/v1")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
 app.include_router(auth_router, prefix="/api")
@@ -268,6 +274,9 @@ app.include_router(attendance_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+app.include_router(calendar_router, prefix="/api")
+app.include_router(chat_router, prefix="/api")
+app.include_router(defaulters_router, prefix="/api")
 
 
 

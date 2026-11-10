@@ -48,6 +48,19 @@ class ExportResult:
         return asdict(self)
 
 
+def _sanitize_dataframe(df: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Sanitize all text cells against CSV/Excel formula injection (=, +, -, @)."""
+    if df is None or df.empty:
+        return df
+    clean_df = df.copy()
+    for col in clean_df.columns:
+        if clean_df[col].dtype == object or str(clean_df[col].dtype) == "string":
+            clean_df[col] = clean_df[col].apply(
+                lambda val: f"'{val}" if isinstance(val, str) and val.startswith(("=", "+", "-", "@")) else val
+            )
+    return clean_df
+
+
 def _prepare_export_dataframes(
     data: Union[pd.DataFrame, List[Dict[str, Any]], SummaryReport, Dict[str, Any]]
 ) -> Tuple[Optional[pd.DataFrame], Optional[pd.DataFrame], Optional[pd.DataFrame]]:
@@ -88,7 +101,7 @@ def _prepare_export_dataframes(
         if branch_df is None:
             branch_df = summary_rep.branch_wise.copy()
 
-    return detail_df, room_df, branch_df
+    return _sanitize_dataframe(detail_df), _sanitize_dataframe(room_df), _sanitize_dataframe(branch_df)
 
 
 def _validate_output_path(output_path: Union[str, Path], overwrite: bool = False) -> Path:

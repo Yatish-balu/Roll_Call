@@ -14,8 +14,13 @@ from app.auth import Role, get_current_user, require_roles
 from app.auth.session_scope import resolve_session_scope
 from app.db import crud
 from app.dependencies import get_db
+from app.policy import editable_until, is_editable
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.session import (
+    AttendanceEditRequest,
+    AttendanceEditResponse,
+    SessionAttendanceDetailResponse,
+    SessionAttendanceRecord,
     SessionBulkCreate,
     SessionCreate,
     SessionPageResponse,
@@ -32,38 +37,168 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
     response_model=SessionPageResponse,
     summary="List sessions visible to the caller",
     description=(
-        "Retrieve paginated sessions, optionally filtered by date (YYYY-MM-DD) and search. "
-        "Access is filtered server-side by role: ADMIN keeps institution-wide access, while "
-        "every other role only sees sessions they own, coordinate, or are mapped to through "
-        "an exact subject-code mapping. Pagination, date and search parameters never widen "
-        "that scope."
+        "Retrieve paginated sessions, optionally filtered by date (YYYY-MM-DD), date range (from/to), "
+        "teacher_id, and search. Access is filtered server-side by role: ADMIN keeps institution-wide access, "
+        "while every other role only sees sessions they own, coordinate, or are mapped to through "
+        "an exact subject-code mapping. Each record is decorated with computed lock fields."
     ),
 )
 def list_sessions(
     date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Filter sessions by date (YYYY-MM-DD)"),
+    from_date: Optional[str] = Query(None, alias="from", pattern=r"^\d{4}-\d{2}-\d{2}$", description="Filter sessions on or after date"),
+    to_date: Optional[str] = Query(None, alias="to", pattern=r"^\d{4}-\d{2}-\d{2}$", description="Filter sessions on or before date"),
+    teacher_id: Optional[str] = Query(None, description="Filter sessions by teacher ID (admin only, or caller's own ID)"),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of records to return"),
     offset: int = Query(0, ge=0, description="Number of records to skip before returning"),
     search: Optional[str] = Query(None, description="Search term matching session_id or subject"),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
+    # Normalize direct-call parameters vs FastAPI Query objects
+    actual_date = date if isinstance(date, str) else None
+    actual_from = from_date if isinstance(from_date, str) else None
+    actual_to = to_date if isinstance(to_date, str) else None
+    actual_search = search if isinstance(search, str) else None
+    actual_teacher_id = teacher_id if isinstance(teacher_id, str) else None
+
+    # Enforce teacher_id filter permissions
+    if actual_teacher_id and current_user.role != Role.ADMIN and actual_teacher_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Teachers may only filter by their own teacher ID.",
+        )
+
     scope = resolve_session_scope(db, current_user)
+    filter_user_id = actual_teacher_id if (current_user.role == Role.ADMIN and actual_teacher_id) else scope.user_id
+
     items, total = crud.get_sessions_paginated_scoped(
         db,
-        date=date,
-        search=search,
+        date=actual_date,
+        search=actual_search,
         limit=limit,
         offset=offset,
-        scope_user_id=scope.user_id,
+        scope_user_id=filter_user_id,
         scope_subject_codes=sorted(scope.subject_codes),
-        unrestricted=scope.unrestricted,
+        unrestricted=scope.unrestricted and not bool(actual_teacher_id),
     )
+
+    # Apply date range filtering if from_date or to_date were specified
+    filtered_items = []
+    for item in items:
+        item_date = item.get("date") or ""
+        if actual_from and item_date < actual_from:
+            continue
+        if actual_to and item_date > actual_to:
+            continue
+
+        created_at = item.get("created_at")
+        item["created_at_utc"] = created_at
+        item["subject_name"] = item.get("subject")
+        editable = is_editable(created_at, current_user.role)
+        item["editable"] = editable
+        item["locked"] = not editable
+        if created_at:
+            try:
+                item["editable_until_utc"] = editable_until(created_at).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception:
+                item["editable_until_utc"] = None
+        else:
+            item["editable_until_utc"] = None
+
+        filtered_items.append(item)
+
     return {
-        "items": items,
-        "total": total,
+        "items": filtered_items,
+        "total": len(filtered_items) if (from_date or to_date) else total,
         "limit": limit,
         "offset": offset,
     }
+
+
+@router.get(
+    "/{session_id}/attendance",
+    response_model=SessionAttendanceDetailResponse,
+    summary="Get session attendance details with lock state",
+    responses={
+        403: {"description": "Session is not visible to the current user"},
+        404: {"description": "Session not found"},
+    },
+)
+def get_session_attendance(
+    session_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    clean_id = session_id.strip()
+    sess = crud.get_session(db, session_id=clean_id)
+    if not sess:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{clean_id}' not found.",
+        )
+    scope = resolve_session_scope(db, current_user)
+    scope.assert_allowed(sess)
+
+    # Decorate session with lock attributes
+    created_at = sess.get("created_at")
+    sess_copy = dict(sess)
+    sess_copy["created_at_utc"] = created_at
+    sess_copy["subject_name"] = sess.get("subject")
+    editable = is_editable(created_at, current_user.role)
+    sess_copy["editable"] = editable
+    sess_copy["locked"] = not editable
+    if created_at:
+        try:
+            sess_copy["editable_until_utc"] = editable_until(created_at).strftime("%Y-%m-%dT%H:%M:%SZ")
+        except Exception:
+            sess_copy["editable_until_utc"] = None
+    else:
+        sess_copy["editable_until_utc"] = None
+
+    raw_records = crud.get_session_attendance_details(db, session_id=clean_id)
+    records = []
+    for r in raw_records:
+        records.append({
+            "usn": r.get("usn"),
+            "name": r.get("student_name") or r.get("name"),
+            "status": r.get("status"),
+            "source": r.get("source"),
+            "confidence": r.get("confidence", 1.0),
+        })
+
+    return {
+        "session": sess_copy,
+        "records": records,
+    }
+
+
+@router.put(
+    "/{session_id}/attendance/{usn}",
+    response_model=AttendanceEditResponse,
+    summary="Safely edit attendance mark with 24h lock and audit logging",
+    responses={
+        403: {"description": "Locked or unauthorized teacher"},
+        404: {"description": "Session or student not found"},
+        422: {"description": "Invalid status or missing admin override reason"},
+    },
+)
+def edit_session_attendance(
+    session_id: str,
+    usn: str,
+    payload: AttendanceEditRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from app.services.attendance_edit import update_attendance
+
+    return update_attendance(
+        user=current_user,
+        session_id=session_id,
+        usn=usn,
+        new_status=payload.status,
+        reason=payload.reason,
+        db=db,
+    )
 
 
 @router.get(

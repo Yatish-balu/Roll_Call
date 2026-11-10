@@ -38,6 +38,7 @@ from tools.validate_tool import validate_tool, ValidationResult
 from tools.summary_tool import summary_tool, SummaryReport
 from tools.query_tool import query_tool, QueryResult, NO_DATA_MESSAGE
 from tools.export_tool import export_tool, ExportResult
+from tools.update_attendance_tool import update_attendance_tool
 
 logger = logging.getLogger("rollcall.agent")
 
@@ -413,6 +414,27 @@ class ToolRegistry:
                     "required": ["data"],
                 },
                 handler=lambda data, **kw: export_tool(data=data, **_clean(kw)),
+            )
+        )
+
+        # 7. update_attendance_tool (N7: Stage attendance change proposal; no confirm param)
+        self.register(
+            ToolDefinition(
+                name="update_attendance_tool",
+                description="Propose changing an attendance record for a student in a session. Returns a confirmation card payload.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "subject": {"type": "string", "description": "Subject name or code"},
+                        "usn": {"type": "string", "description": "Student USN"},
+                        "new_status": {"type": "string", "enum": ["Present", "Absent"], "description": "New attendance status"},
+                        "date": {"type": "string", "description": "Date ('today' or YYYY-MM-DD)"},
+                    },
+                    "required": ["subject", "usn", "new_status"],
+                },
+                handler=lambda subject, usn, new_status, **kw: update_attendance_tool(
+                    subject=subject, usn=usn, new_status=new_status, **_clean(kw)
+                ),
             )
         )
 

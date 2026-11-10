@@ -52,6 +52,32 @@ CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_usn ON attendance(usn);
 CREATE INDEX IF NOT EXISTS idx_attendance_room ON attendance(room_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_allocation ON attendance(allocation_id);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id TEXT NOT NULL,
+    action TEXT NOT NULL,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    session_id TEXT,
+    usn TEXT,
+    old_value TEXT,
+    new_value TEXT,
+    reason TEXT,
+    timestamp TEXT NOT NULL
+);
+
+CREATE TRIGGER IF NOT EXISTS prevent_audit_log_update
+BEFORE UPDATE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: UPDATE is strictly prohibited');
+END;
+
+CREATE TRIGGER IF NOT EXISTS prevent_audit_log_delete
+BEFORE DELETE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: DELETE is strictly prohibited');
+END;
 """
 
 
