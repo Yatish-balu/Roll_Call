@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.jwt import AuthenticationError, decode_and_verify_token
 from app.auth.roles import Role, normalize_role, role_satisfies
+from app.db.connection import get_sync_session_factory
 from app.db.models import AuthSession, User
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
@@ -83,7 +84,11 @@ def get_current_user(
         session_id = user.claims.get("sid")
         if session_id:
             auth_session = db.get(AuthSession, str(session_id))
-            if auth_session is None or auth_session.revoked_at is not None:
+            if (
+                auth_session is None
+                or auth_session.user_id != user.user_id
+                or auth_session.revoked_at is not None
+            ):
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     detail="Session has been revoked.",

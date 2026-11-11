@@ -18,6 +18,7 @@ if _backend not in sys.path:
     sys.path.insert(0, _backend)
 
 from app.agent import AttendanceAgent
+from app.security.ai_policy import TRUSTED_INTERNAL
 from app.db.schema import init_db
 from app.db.crud import insert_student, insert_room, insert_session, insert_attendance
 from tools.read_photo_tool import PhotoRow, PhotoExtractionResult, ExtractionSource
@@ -42,7 +43,7 @@ def main():
     insert_attendance(conn, session_id="SESS-20261025-01", usn="1MS21CS001", room_id="LH-101", status="PRESENT", source="csv", confidence=1.0)
     insert_attendance(conn, session_id="SESS-20261025-01", usn="1MS21CS002", room_id="LH-101", status="ABSENT", source="csv", confidence=1.0)
 
-    agent = AttendanceAgent(db_target=conn)
+    agent = AttendanceAgent(db_target=conn, actor_role=TRUSTED_INTERNAL)
 
     def _find_repo_root() -> Path:
         current = Path(__file__).resolve().parent

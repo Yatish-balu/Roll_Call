@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import tempfile
 import urllib.parse
@@ -40,6 +41,7 @@ from app.dependencies import get_db
 from app.security.ai_input import PromptInjectionError, screen_agent_input
 from app.security.context import get_request_id
 from app.security.events import log_security_event
+from app.security.ai_input import find_prompt_injection, safe_excerpt
 from app.security.rate_limit import LimitScope, check_limit
 from app.security.uploads import (
     check_declared_content_type,
@@ -58,14 +60,15 @@ from app.schemas.agent import (
     ChatQueryRequest,
 )
 from app.schemas.auth import AuthenticatedUser
-from tools.query_tool import validate_read_only_sql
 from tools.validate_tool import validate_tool
+from tools.query_tool import validate_read_only_sql
 
 logger = logging.getLogger("rollcall.routers.agent")
 
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB limit
+MAX_TEXT_INSPECTION_BYTES = 1024 * 1024  # bounded best-effort telemetry
 # Supported roster formats. Every extension is validated against the file
 # signature below, so an attacker cannot smuggle a different payload through a
 # renamed file.
@@ -96,6 +99,33 @@ def _client_ip(request: Request) -> Optional[str]:
     return None
 
 
+def _log_embedded_instruction(
+    text: str,
+    *,
+    request: Request,
+    actor_id: str,
+    filename: str,
+    source: str,
+) -> None:
+    finding = find_prompt_injection(text[:MAX_TEXT_INSPECTION_BYTES])
+    if finding is None:
+        return
+    log_security_event(
+        "embedded_instruction_detected",
+        severity="warning",
+        outcome="suspicious",
+        actor_id=actor_id,
+        ip_address=_client_ip(request),
+        request_id=get_request_id(),
+        details={
+            "rule": finding.rule,
+            "filename": filename,
+            "source": source,
+            "note": "treated as data; no instruction executed",
+        },
+    )
+
+
 # ==============================================================================
 # 1. POST /api/v1/agent/chat
 # ==============================================================================
@@ -108,8 +138,8 @@ def _client_ip(request: Request) -> Optional[str]:
     dependencies=[Depends(rate_limit_chat)],
 )
 def agent_chat(
-    payload: ChatQueryRequest,
     request: Request,
+    payload: ChatQueryRequest,
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -120,11 +150,15 @@ def agent_chat(
             detail="Chat query cannot be empty or whitespace only.",
         )
 
+    contextual_query = query_text
+    if payload.session_id and f"session {payload.session_id}" not in query_text.lower():
+        contextual_query = f"{query_text} for session {payload.session_id}"
+
     # Prompt-injection screening happens before the text reaches the agent.
     # File contents are parsed as data by the tools; only chat text is model
     # input, so this is the only place instructions can enter.
     try:
-        screen_agent_input(query_text)
+        screen_agent_input(contextual_query)
     except PromptInjectionError as exc:
         log_security_event(
             "prompt_injection_detected",
@@ -150,17 +184,49 @@ def agent_chat(
                 detail=str(exc),
             )
 
+    # Inspect the exact final value passed to the agent, including contextual
+    # fields, before any model or tool can see it.
+    injection = find_prompt_injection(contextual_query)
+    if injection is not None:
+        log_security_event(
+            "prompt_injection_blocked",
+            severity="warning",
+            outcome="blocked",
+            actor_id=current_user.user_id,
+            ip_address=_client_ip(request),
+            request_id=get_request_id(),
+            details={
+                "rule": injection.rule,
+                "excerpt": safe_excerpt(contextual_query),
+            },
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "Request rejected: the message contains instructions that attempt "
+                "to override system, security or authorization controls."
+            ),
+        )
+
+    # Prompt-injection guard: reject instruction-override payloads
+    # before any tool can run. The request text is never treated as authority;
+    # this is an explicit, logged refusal rather than a silent rewrite.
     # The agent runs with the caller's authorization scope: every attendance,
     # session and student read it performs is restricted to the sessions the
     # caller may see. This is enforced in the tool/query layer, never by the
     # prompt or the model.
     scope = resolve_data_scope(db, current_user)
-    agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role)
-    req_id = str(uuid.uuid4())
+    if payload.session_id:
+        from app.db.models import Session as DbSession
 
-    contextual_query = query_text
-    if payload.session_id and f"session {payload.session_id}" not in query_text.lower():
-        contextual_query = f"{query_text} for session {payload.session_id}"
+        selected_session = db.get(DbSession, payload.session_id)
+        if selected_session is None or not scope.is_session_visible(db, payload.session_id):
+            # Use the same answer for missing and out-of-scope ids so callers
+            # cannot probe session existence across tenant boundaries.
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
+    agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role, actor_role=current_user.role)
+    req_id = str(uuid.uuid4())
+    req_id = str(uuid.uuid4())
 
     resp = agent.process_request(user_input=contextual_query, request_id=req_id)
     return resp.to_dict()
@@ -243,6 +309,16 @@ async def agent_process_file(
                     break
                 if first_chunk is None and len(chunk) > 0:
                     first_chunk = chunk
+                    if ext in (".csv", ".txt") and first_chunk.startswith((b"MZ", b"\x7fELF", b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa\xce")):
+                        raise HTTPException(
+                            status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="Uploaded file contains executable binary signature, which is not permitted.",
+                        )
+                if ext in (".csv", ".txt") and b"\x00" in chunk:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Uploaded file contains invalid binary content (null bytes) for a CSV/text document.",
+                    )
                 total_bytes += len(chunk)
                 if total_bytes > MAX_UPLOAD_SIZE:
                     raise HTTPException(
@@ -338,6 +414,17 @@ async def agent_process_file(
         # Malware scanning (when a scanner is configured the file is scanned;
         # without one the deployment limitation is recorded, never hidden).
         scanner = get_malware_scanner()
+        if not scanner.available and os.getenv("APP_ENV", "development").strip().lower() == "production":
+            log_security_event(
+                "upload_rejected", severity="critical", outcome="failure",
+                actor_id=current_user.user_id, ip_address=_client_ip(request),
+                request_id=get_request_id(),
+                details={"reason": "malware_scanner_unavailable", "filename": safe_filename},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Uploads are temporarily unavailable because malware scanning is not configured.",
+            )
         clean, scan_detail = scanner.scan(temp_path)
         if not clean:
             log_security_event(
@@ -363,8 +450,22 @@ async def agent_process_file(
                 details={"filename": safe_filename, "note": "file was not scanned"},
             )
 
+        # Uploaded file contents are untrusted data. Detect embedded
+        # instruction-override payloads for monitoring and response; they are
+        # never executed and never alter the tool pipeline.
+        if ext in (".csv", ".txt"):
+            try:
+                with open(temp_path, "r", encoding="utf-8", errors="replace") as fh:
+                    uploaded_text = fh.read(MAX_TEXT_INSPECTION_BYTES)
+                _log_embedded_instruction(
+                    uploaded_text, request=request, actor_id=current_user.user_id,
+                    filename=safe_filename, source="uploaded_text",
+                )
+            except Exception as exc:  # pragma: no cover - inspection is best effort
+                logger.debug("Unable to inspect upload for embedded instructions: %s", exc)
+
         scope = resolve_data_scope(db, current_user)
-        agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role)
+        agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role, actor_role=current_user.role)
 
         # Pre-load master USNs and Rooms if available for master data validation.
         # The master list is restricted to the caller's scope, so validation
@@ -387,6 +488,14 @@ async def agent_process_file(
             default_room=default_room,
             default_branch=default_branch,
         )
+        if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
+            _log_embedded_instruction(
+                json.dumps(resp.data or [], ensure_ascii=False, default=str),
+                request=request,
+                actor_id=current_user.user_id,
+                filename=safe_filename,
+                source="ocr_output",
+            )
         return resp.to_dict()
     finally:
         try:

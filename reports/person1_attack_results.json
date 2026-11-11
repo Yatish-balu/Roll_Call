@@ -71,7 +71,7 @@
       "category": "auth",
       "severity": "medium",
       "expected": "|delta| < 50 ms",
-      "actual": "3.3 ms",
+      "actual": "10.2 ms",
       "held": true
     },
     {
@@ -263,7 +263,7 @@
       "category": "sql",
       "severity": "critical",
       "expected": "ValueError",
-      "actual": "Quoted table identifiers are not permitted: '\"attendance\"'. ",
+      "actual": "Quoted table identifiers are not permitted: '\"attendance\"'.",
       "held": true
     },
     {
@@ -271,7 +271,7 @@
       "category": "sql",
       "severity": "critical",
       "expected": "ValueError",
-      "actual": "Quoted table identifiers are not permitted: '[attendance]'. ",
+      "actual": "Quoted table identifiers are not permitted: '[attendance]'.",
       "held": true
     },
     {
@@ -279,7 +279,7 @@
       "category": "sql",
       "severity": "critical",
       "expected": "ValueError",
-      "actual": "Quoted table identifiers are not permitted: '`attendance`'. ",
+      "actual": "Quoted table identifiers are not permitted: '`attendance`'.",
       "held": true
     },
     {
@@ -287,7 +287,7 @@
       "category": "sql",
       "severity": "critical",
       "expected": "ValueError",
-      "actual": "Schema-qualified table names are not permitted: 'main.attend",
+      "actual": "Schema-qualified table references are not permitted.",
       "held": true
     },
     {
@@ -447,7 +447,7 @@
       "category": "web",
       "severity": "medium",
       "expected": "restricted",
-      "actual": "status=400 methods='GET, POST, PUT, PATCH, DELETE, OPTIONS' headers='Accept, Accept-Language, Authorization, Content-Language, Content-Type, Origin, X-Request-ID, X-Requested-With, X-RollCall-CSRF'",
+      "actual": "status=400 methods='GET, POST, PUT, PATCH, DELETE, OPTIONS' headers='Accept, Accept-Language, Authorization, Content-Language, Content-Type, Origin, X-CSRF-Token, X-Request-ID, X-Requested-With, X-RollCall-CSRF'",
       "held": true
     },
     {

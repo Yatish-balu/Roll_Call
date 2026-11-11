@@ -34,6 +34,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from app.agent import AttendanceAgent
+from app.security.ai_policy import TRUSTED_INTERNAL
 from app.db.schema import init_db
 from app.db.crud import insert_student, insert_room, insert_session, insert_attendance
 from tools.read_photo_tool import PhotoRow, PhotoExtractionResult, ExtractionSource
@@ -135,7 +136,7 @@ def create_test_files(tmp_dir: Path) -> Dict[str, Path]:
 def run_evaluation() -> Dict[str, Any]:
     """Execute all 15 scenarios and collect detailed verification metrics."""
     db_conn = setup_test_database()
-    agent = AttendanceAgent(db_target=db_conn)
+    agent = AttendanceAgent(db_target=db_conn, actor_role=TRUSTED_INTERNAL)
 
     temp_dir = Path(tempfile.mkdtemp(prefix="rollcall_eval_"))
     test_files = create_test_files(temp_dir)

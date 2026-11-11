@@ -1,0 +1,46 @@
+# RollCall AI - Caddy example (automatic HTTPS)
+#
+# Caddy obtains and renews certificates automatically. Replace app.example.com
+# and the static build path with your deployment values.
+
+app.example.com {
+	encode zstd gzip
+
+	# Security headers (Person 2, Phase 1). The app applies the same headers
+	# as a safety net; keep the two policies aligned.
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), gyroscope=(), accelerometer=(), interest-cohort=()"
+		X-Frame-Options "DENY"
+		Content-Security-Policy "default-src 'self'; base-uri 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: https:; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://app.example.com; font-src 'self' data:; form-action 'self'"
+		Cross-Origin-Opener-Policy "same-origin"
+		Cross-Origin-Resource-Policy "same-origin"
+		X-Permitted-Cross-Domain-Policies "none"
+		-Server
+	}
+
+	# FastAPI
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8000 {
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Real-IP {remote_host}
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	handle /health {
+		reverse_proxy 127.0.0.1:8000
+	}
+
+	# React/Vite static build
+	handle {
+		root * /var/www/rollcall/frontend
+		try_files {path} /index.html
+		file_server
+	}
+}

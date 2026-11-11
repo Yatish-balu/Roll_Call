@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from app.agent import AttendanceAgent
+from app.security.ai_policy import TRUSTED_INTERNAL
 from app.db import init_db, insert_student, insert_room, insert_session, get_attendance_by_session
 from app.ui import (
     process_uploaded_file,
@@ -73,7 +74,7 @@ def test_ui_upload_clean_csv_success():
     ).encode("utf-8")
     uploaded = MockUploadedFile("clean.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -92,7 +93,7 @@ def test_ui_upload_empty_csv_returns_clean_failure():
     csv_content = "".encode("utf-8")
     uploaded = MockUploadedFile("empty.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -115,7 +116,7 @@ def test_ui_upload_csv_with_whitespace_rows():
     ).encode("utf-8")
     uploaded = MockUploadedFile("whitespace.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -136,7 +137,7 @@ def test_ui_upload_csv_with_unrecognized_status_normalizes():
     ).encode("utf-8")
     uploaded = MockUploadedFile("bad_status.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -157,7 +158,7 @@ def test_ui_upload_csv_missing_room_fails_validation():
     ).encode("utf-8")
     uploaded = MockUploadedFile("missing_room.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -177,7 +178,7 @@ def test_ui_upload_csv_missing_branch_fails_validation():
     ).encode("utf-8")
     uploaded = MockUploadedFile("missing_branch.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -198,7 +199,7 @@ def test_ui_upload_csv_with_duplicate_usn_fails_validation():
     ).encode("utf-8")
     uploaded = MockUploadedFile("duplicate.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -221,7 +222,7 @@ def test_ui_upload_csv_with_conflicting_status_fails_validation():
     ).encode("utf-8")
     uploaded = MockUploadedFile("conflict.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = process_uploaded_file(
         agent,
         uploaded,
@@ -250,7 +251,7 @@ def test_ui_photo_upload_low_confidence_requires_confirmation(monkeypatch):
         source=ExtractionSource.OCR_FALLBACK,
     )
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     agent.registry.tools["read_photo_tool"].handler = lambda image_path, **kw: mock_result
 
     photo_path = REPO_ROOT / "data" / "photos" / "sheet_clean.jpg"
@@ -290,7 +291,7 @@ def test_ui_photo_upload_high_confidence_proceeds(monkeypatch):
         source=ExtractionSource.OCR_FALLBACK,
     )
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     agent.registry.tools["read_photo_tool"].handler = lambda image_path, **kw: mock_result
     agent.registry.tools["validate_tool"].handler = MagicMock(return_value=MagicMock(is_valid=True, valid_records=[mock_row.to_dict()], invalid_records=[], errors=[]))
 
@@ -323,7 +324,7 @@ def test_ui_photo_upload_empty_result_is_failure(monkeypatch):
         source=ExtractionSource.OCR_FALLBACK,
     )
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     agent.registry.tools["read_photo_tool"].handler = lambda image_path, **kw: mock_result
 
     photo_path = REPO_ROOT / "data" / "photos" / "sheet_clean.jpg"
@@ -353,7 +354,7 @@ def test_ui_revalidation_clears_confirmation():
         {"usn": "1MS21CS002", "name": "Bob Jones", "branch": "CSE", "room_id": "LH-101", "status": "ABSENT"},
     ]
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = revalidate_and_summarise(
         agent,
         corrected_records,
@@ -376,7 +377,7 @@ def test_ui_revalidation_with_renamed_columns():
         {"usn": "1MS21CS002", "name": "Bob Jones", "dept": "CSE", "room": "LH-101", "status": "ABSENT"},
     ]
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     resp, tmp_file = revalidate_and_summarise(
         agent,
         corrected_records,
@@ -568,7 +569,7 @@ def test_ui_chat_query_returns_exact_no_data_for_unanswerable():
         init_db(conn)
         conn.close()
 
-        agent = AttendanceAgent(db_target=db_file)
+        agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL, db_target=db_file)
 
         resp = agent.process_request("What was the average exam score in session SESS-20261024-01?")
         assert "I do not have that data." in resp.message
@@ -582,7 +583,7 @@ def test_ui_chat_query_returns_no_data_for_nonexistent_session():
         insert_session(conn, session_id="REAL-SESSION", date="2026-10-25", subject="Lab")
         conn.close()
 
-        agent = AttendanceAgent(db_target=db_file)
+        agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL, db_target=db_file)
 
         resp = agent.process_request("Who was absent in session SESS-DOESNOTEXIST-999?")
         assert "I do not have that data." in resp.message
@@ -596,7 +597,7 @@ def test_ui_chat_query_logs_tool_execution():
         insert_session(conn, session_id="SESS-20261024-01", date="2026-10-24", subject="Lab")
         conn.close()
 
-        agent = AttendanceAgent(db_target=db_file)
+        agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL, db_target=db_file)
 
         resp = agent.process_request("Who was absent in session SESS-20261024-01?")
         assert resp.request_id is not None

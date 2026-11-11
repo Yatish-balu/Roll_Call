@@ -43,5 +43,6 @@ dist/
 *~
 .DS_Store
 Thumbs.db
+backend/.test-tmp/
 data/exports/*
 !data/exports/.gitkeep

@@ -57,6 +57,12 @@ async def lifespan(app: FastAPI):
     # Validate JWT configuration on startup
     from app.auth.jwt import DEV_FALLBACK_SECRET, validate_jwt_secret_configuration
     env = os.getenv("APP_ENV", "development").lower()
+    if env == "production" and os.getenv("SECURITY_HEADERS_ENABLED", "true").strip().lower() in {
+        "0", "false", "no", "off",
+    }:
+        raise RuntimeError(
+            "Production security violation: SECURITY_HEADERS_ENABLED cannot be disabled."
+        )
     secret = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY")
     if env == "production" or secret:
         if env == "production" and (secret or "").strip() == DEV_FALLBACK_SECRET:
@@ -81,6 +87,16 @@ async def lifespan(app: FastAPI):
                 "DEPLOYMENT BLOCKER: no email provider is configured; password "
                 "reset links cannot be delivered. Set SMTP_HOST (or the "
                 "configured provider) before relying on self-service resets."
+            )
+        configured_origins = get_allowed_origins()
+        if any(
+            "localhost" in origin or "127.0.0.1" in origin
+            for origin in configured_origins
+        ):
+            logger.warning(
+                "Production CORS ALLOWED_ORIGINS still contains localhost/127.0.0.1 "
+                "entries: %s. Configure the real frontend origin(s).",
+                configured_origins,
             )
 
     # ------------------------------------------------------------------
@@ -127,7 +143,6 @@ async def lifespan(app: FastAPI):
             "Automatic session initialisation is disabled (SESSION_AUTO_INIT=0); "
             "sessions can still be prepared through POST /api/v1/sessions/initialize."
         )
-
     yield
     logger.info("RollCall AI FastAPI application shutting down...")
     if initialisation_task is not None:
@@ -168,6 +183,73 @@ DEFAULT_ALLOWED_ORIGINS = [
     "http://127.0.0.1:5173",
 ]
 
+# Explicit allowlists: only the methods and headers the application uses.
+DEFAULT_ALLOWED_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+DEFAULT_ALLOWED_HEADERS = [
+    "Accept",
+    "Authorization",
+    "Content-Type",
+    "Origin",
+    "X-Request-ID",
+    "X-CSRF-Token",
+    "X-Requested-With",
+    "X-RollCall-CSRF",
+]
+EXPOSED_HEADERS = ["X-Request-ID"]
+CORS_MAX_AGE_SECONDS = 600
+
+
+def _parse_csv_env(raw: Optional[str]) -> List[str]:
+    """Split a comma-separated environment value, dropping blanks and duplicates."""
+    seen: set[str] = set()
+    values: List[str] = []
+    for item in (raw or "").split(","):
+        value = item.strip()
+        if not value:
+            continue
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        values.append(value)
+    return values
+
+
+def normalize_origin(origin: str) -> Optional[str]:
+    """Return a canonical scheme://host[:port] origin, or ``None`` when invalid.
+
+    Wildcards, credentials, paths, queries and fragments are rejected: an
+    allowed origin must be an exact browser origin, never a pattern.
+    """
+    from urllib.parse import urlsplit
+
+    value = (origin or "").strip()
+    if not value or value == "*" or "*" in value:
+        return None
+    try:
+        parts = urlsplit(value)
+    except ValueError:
+        return None
+    if parts.scheme not in ("http", "https"):
+        return None
+    if not parts.hostname:
+        return None
+    if parts.username or parts.password:
+        return None
+    if parts.path not in ("", "/") or parts.query or parts.fragment:
+        return None
+    host = parts.hostname.lower()
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    try:
+        port = parts.port
+    except ValueError:
+        return None
+    if (parts.scheme == "https" and port == 443) or (parts.scheme == "http" and port == 80):
+        port = None
+    port_suffix = f":{port}" if port else ""
+    return f"{parts.scheme}://{host}{port_suffix}"
+
 
 def get_allowed_origins() -> List[str]:
     """
@@ -178,10 +260,21 @@ def get_allowed_origins() -> List[str]:
     if not raw or not raw.strip():
         return list(DEFAULT_ALLOWED_ORIGINS)
 
-    origins = [origin.strip() for origin in raw.split(",") if origin.strip() and origin.strip() != "*"]
+    origins: List[str] = []
+    for candidate in _parse_csv_env(raw):
+        normalized = normalize_origin(candidate)
+        if normalized and normalized not in origins:
+            origins.append(normalized)
+        else:
+            logger.warning(
+                "Ignoring invalid CORS origin %r. Origins must be exact http(s) "
+                "origins without a path, query, fragment, credentials or wildcard.",
+                candidate,
+            )
+
     if not origins:
         logger.warning(
-            "ALLOWED_ORIGINS contains only wildcards or blank entries. "
+            "ALLOWED_ORIGINS contains only wildcards or invalid entries. "
             "Falling back to safe localhost development defaults to prevent CORS vulnerability."
         )
         return list(DEFAULT_ALLOWED_ORIGINS)
@@ -189,27 +282,42 @@ def get_allowed_origins() -> List[str]:
     return origins
 
 
-# Only the verbs and headers the frontend actually uses. A wildcard here would
-# let any allowed origin send arbitrary methods/headers with the user's cookies.
-ALLOWED_CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
-ALLOWED_CORS_HEADERS = [
-    "Authorization",
-    "Content-Type",
-    "Accept",
-    "Origin",
-    "X-Requested-With",
-    "X-RollCall-CSRF",
-    "X-Request-ID",
-]
+def get_allowed_methods() -> List[str]:
+    """Explicit CORS method allowlist (never ``*``)."""
+    configured = [m.upper() for m in _parse_csv_env(os.getenv("ALLOWED_METHODS"))]
+    methods = [m for m in configured if m in DEFAULT_ALLOWED_METHODS] or list(
+        DEFAULT_ALLOWED_METHODS
+    )
+    # OPTIONS is required for preflight and must always be present.
+    if "OPTIONS" not in methods:
+        methods.append("OPTIONS")
+    return methods
 
-allowed_origins = get_allowed_origins()
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=allowed_origins,
-    allow_credentials=True,
-    allow_methods=ALLOWED_CORS_METHODS,
-    allow_headers=ALLOWED_CORS_HEADERS,
-)
+
+def get_allowed_headers() -> List[str]:
+    """Explicit CORS request-header allowlist (never ``*``)."""
+    configured = _parse_csv_env(os.getenv("ALLOWED_HEADERS"))
+    headers = configured or list(DEFAULT_ALLOWED_HEADERS)
+    configured_lower = {header.lower() for header in headers}
+    for required in ("X-Requested-With", "X-RollCall-CSRF"):
+        if required.lower() not in configured_lower:
+            headers.append(required)
+    return headers
+
+
+def build_cors_settings() -> dict:
+    """Return the keyword arguments handed to :class:`CORSMiddleware`."""
+    return {
+        "allow_origins": get_allowed_origins(),
+        "allow_credentials": True,
+        "allow_methods": get_allowed_methods(),
+        "allow_headers": get_allowed_headers(),
+        "expose_headers": list(EXPOSED_HEADERS),
+        "max_age": CORS_MAX_AGE_SECONDS,
+    }
+
+
+app.add_middleware(CORSMiddleware, **build_cors_settings())
 
 # Added after CORS so the headers are the outermost layer: error and preflight
 # responses produced by CORS still carry the browser hardening headers.

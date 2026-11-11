@@ -48,8 +48,18 @@ class AgentRequest(BaseModel):
 class ChatQueryRequest(BaseModel):
     """Schema for natural-language attendance queries."""
 
-    query: str = Field(..., min_length=1, description="Question about attendance, records, or students")
-    session_id: Optional[str] = Field(None, description="Optional target session filter")
+    query: str = Field(
+        ...,
+        min_length=1,
+        max_length=4000,
+        description="Question about attendance, records, or students",
+    )
+    session_id: Optional[str] = Field(
+        None,
+        max_length=64,
+        pattern=r"^[A-Za-z0-9_-]{1,64}$",
+        description="Optional target session identifier",
+    )
 
 
 class FileUploadResponse(BaseModel):

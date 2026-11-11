@@ -53,6 +53,25 @@ def test_export_to_excel_overwrite_protection(sample_attendance_df, tmp_path):
     assert res.success is True
 
 
+def test_export_escapes_formula_like_user_values(tmp_path):
+    from openpyxl import load_workbook
+
+    frame = pd.DataFrame([{
+        "session_id": "SESS-01",
+        "usn": "1MS21CS001",
+        "name": '=HYPERLINK("https://example.invalid","click")',
+        "branch": "CSE",
+        "room_id": "@SUM(1,1)",
+        "status": "PRESENT",
+    }])
+    path = tmp_path / "formula-safe.xlsx"
+    result = export_to_excel(frame, output_path=path, overwrite=True)
+    assert result.success is True
+    workbook = load_workbook(path, data_only=False)
+    assert all(cell.data_type != "f" for sheet in workbook for row in sheet.iter_rows() for cell in row)
+    assert workbook["Attendance_Details"]["C2"].value.startswith("'")
+
+
 def test_export_to_pdf_success(sample_attendance_df, tmp_path):
     out_file = tmp_path / "test_report.pdf"
     res = export_to_pdf(sample_attendance_df, output_path=out_file, overwrite=True)

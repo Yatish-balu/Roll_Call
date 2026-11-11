@@ -129,6 +129,11 @@ def _scope_clause(
         )
     # rooms carry no session link; they are reference data, not attendance.
     return None
+# authorization rewrite of raw SQL).
+_VALIDATED_TABLE_REF_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+(?P<table>(?:\"[^\"]+\"|`[^`]+`|\[[^\]]+\]|[A-Za-z_][A-Za-z0-9_]*)(?:\s*\.\s*[A-Za-z_][A-Za-z0-9_]*)?)",
+    re.IGNORECASE,
+)
 
 
 def _apply_scope_to_sql(sql: str, scope: Any, db: Any = None) -> Tuple[str, Dict[str, Any]]:
@@ -162,7 +167,7 @@ def _apply_scope_to_sql(sql: str, scope: Any, db: Any = None) -> Tuple[str, Dict
     rewritten = re.sub(
         r"\b(FROM|JOIN)\s+(attendance|sessions|students)\b",
         _replace,
-        sql,
+        _replace_sql := sql,
         flags=re.IGNORECASE,
     )
     return rewritten, params
@@ -355,44 +360,21 @@ def validate_read_only_sql(sql: str) -> None:
     if not re.match(r"^(SELECT|WITH)\b", clean_sql, re.IGNORECASE):
         raise ValueError("Only SELECT or WITH queries are permitted. Disallowed keyword.")
 
-    # Extract and validate table names. Quoted identifiers are rejected before
-    # the allowlist check: `FROM "attendance"` used to slip past both the
-    # allowlist and the scope rewrite, exposing every session's rows.
-    for raw_ref in _table_references(clean_sql):
-        _reject_non_plain_table_reference(raw_ref)
-        table = raw_ref.lower()
+    # Extract quoted and unquoted references. Schema-qualified and quoted references are
+    # rejected instead of being parsed as a different or unscoped table.
+    tables = []
+    for match in _VALIDATED_TABLE_REF_RE.finditer(clean_sql):
+        raw = match.group("table").strip()
+        if "." in raw:
+            raise ValueError("Schema-qualified table references are not permitted.")
+        if raw.startswith(('"', "`", "[")):
+            raise ValueError(f"Quoted table identifiers are not permitted: {raw!r}.")
+        tables.append(raw.lower())
+    if not tables:
+        raise ValueError("The query must reference an allowed table.")
+    for table in tables:
         if table not in ALLOWED_TABLES:
             raise ValueError(f"Access to table '{table}' is not permitted.")
-
-
-def _normalize_scoped_params(
-    sql: str,
-    params: Union[Tuple[Any, ...], List[Any], Dict[str, Any]],
-    scope_params: Dict[str, Any],
-) -> Tuple[str, Dict[str, Any]]:
-    """Merge the scope parameters with the caller's parameters.
-
-    The scoped statement uses named placeholders, so any positional parameters
-    are converted to named ones (``?`` -> ``:p0``, ``:p1`` ...) before they are
-    merged.
-    """
-    if not scope_params:
-        return sql, {}
-
-    if isinstance(params, dict):
-        merged = dict(params)
-        merged.update(scope_params)
-        return sql, merged
-
-    positional = list(params or [])
-    named: Dict[str, Any] = {}
-    rewritten = sql
-    for index, value in enumerate(positional):
-        key = f"p{index}"
-        named[key] = value
-        rewritten = re.sub(r"\?", f":{key}", rewritten, count=1)
-    named.update(scope_params)
-    return rewritten, named
 
 
 def safe_sql_query(
@@ -406,11 +388,20 @@ def safe_sql_query(
     Execute an arbitrary read-only SQL query with safety validation and parameterization.
     Enforces LIMIT clause and returns structured QueryResult.
 
-    When a ``scope`` is supplied the statement is rewritten so that it can only
-    read sessions and students inside the caller's scope. The restriction is
-    applied by the database engine, not afterwards by the model.
+    Arbitrary SQL is disabled for scoped callers. Structured query functions
+    enforce their scope directly; raw SQL is available only to unrestricted
+    administrative callers.
     """
     validate_read_only_sql(sql)
+
+    if scope is not None and not getattr(scope, "unrestricted", False):
+        return QueryResult(
+            found=False,
+            data=[],
+            total_count=0,
+            message="Custom SQL is unavailable for scoped callers.",
+            metadata={"error": "scoped_custom_sql_disabled"},
+        )
 
     ro_db = _get_readonly_conn(db_target)
     try:
@@ -419,10 +410,7 @@ def safe_sql_query(
         if not re.search(r"\bLIMIT\s+\d+", clean_sql, re.IGNORECASE):
             clean_sql = f"{clean_sql} LIMIT {limit}"
 
-        scoped_sql, scope_params = _apply_scope_to_sql(clean_sql, scope, db_target)
-        if scope_params:
-            scoped_sql, params = _normalize_scoped_params(scoped_sql, params, scope_params)
-
+        scoped_sql, _ = _apply_scope_to_sql(clean_sql, scope, db_target)
         res = ro_db.execute(scoped_sql, params)
         rows = res.fetchall() if hasattr(res, "fetchall") else list(res)
         results = _rows_to_dicts(rows)
@@ -943,27 +931,10 @@ def query_tool(
             db_target=db_target,
             scope=scope,
         )
-    if clean_type in ("sql", "custom_sql"):
-        if not sql:
-            return QueryResult(
-                found=False,
-                data=[],
-                total_count=0,
-                message="sql parameter is required for custom_sql query.",
-                metadata={},
-            )
-        return safe_sql_query(
-            sql=sql,
-            params=params or (),
-            db_target=db_target,
-            limit=limit,
-            scope=scope,
-        )
-
     return QueryResult(
         found=False,
         data=[],
         total_count=0,
-        message=f"Unsupported query_type '{query_type}'. Allowed: attendance, session_stats, absentees, students, sql.",
+        message=f"Unsupported query_type '{query_type}'. Allowed: attendance, session_stats, absentees, students.",
         metadata={"query_type": query_type},
     )

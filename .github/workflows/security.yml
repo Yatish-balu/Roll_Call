@@ -164,9 +164,7 @@ jobs:
         run: npm run lint
 
       - name: npm audit
-        run: |
-          npm audit --audit-level=high || \
-            echo "::warning::npm audit reported findings (see the job log)"
+        run: npm audit --audit-level=high
 
   # ---------------------------------------------------------------------
   # 6. Security scan script (adversarial suite + dependency gate)

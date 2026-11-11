@@ -1,140 +1,147 @@
-# RollCall AI — Security Operations Runbook
+# RollCall AI — Unified Security Operations Runbook
 
-Operational guidance for running RollCall AI in production. It documents the
-secrets the service needs, the deployment checklist, monitoring, rotation and
-incident response, and the controls that are enforced in code.
+**Owners:** Person 1 (Backend, Auth & Data Security) & Person 2 (Frontend, Infrastructure & AI Security)
 
-The application-layer controls referenced here are covered by
-`backend/tests/test_web_security_controls.py` and `backend/tests/test_person1_security.py`,
-and the black-box probes live in `scripts/person1_attack_suite.py`.
+Operational guidance for running RollCall AI securely in production. It documents required environment secrets, edge and reverse proxy configurations, HTTP headers, AI defense-in-depth, operational checklists, backup/disaster recovery, and incident response.
+
+Application-layer controls are covered by `backend/tests/test_person1_security.py`, `backend/tests/test_person2_security.py`, and `backend/tests/test_security_regression.py`. Black-box probe suites live in `scripts/person1_attack_suite.py` and `scripts/person2_attack_suite.py`.
 
 ---
 
-## 1. Required configuration
+## 1. Required Configuration & Secrets
 
-Secrets must come from the platform secret store (not from a committed file).
+Secrets must come from the platform secret store (e.g. AWS Secrets Manager, Vault, or secure container secrets), **never** from a committed file.
 
-| Variable | Required | Purpose / failure mode |
+| Variable | Required | Purpose / Failure Mode |
 |---|---|---|
-| `APP_ENV=production` | yes | Enables production hardening: docs disabled, HSTS, scanner fail-closed, secret validation. |
-| `JWT_SECRET` | yes | ≥32 chars, not the development fallback. Startup refuses otherwise. |
-| `ADMIN_KEY` | yes | Second factor for ADMIN password login; login fails closed without it. |
-| `MFA_ENCRYPTION_KEY` | yes | URL-safe base64 32-byte key for AES-GCM TOTP secrets. MFA login fails closed if unset. |
-| `ALLOWED_ORIGINS` | yes | Comma-separated exact origins (e.g. `https://rollcall.example.edu`). Wildcards are rejected. |
-| `DATABASE_URL` / `SUPABASE_*` | yes | Production database. SQLite is for local development only. |
-| `SMTP_HOST` (+ credentials) | recommended | Password reset delivery. Without it the startup log records a deployment blocker. |
-| `MALWARE_SCAN_COMMAND` | recommended | ClamAV-compatible scanner. Production uploads are **rejected** when no scanner is configured. |
-| `AUDIT_CHAIN_HMAC_SECRET` | recommended | HMAC key for the append-only audit chain. |
-| `TRUST_PROXY_HEADERS=true` | only behind a trusted proxy | Trust `X-Forwarded-For` / `X-Forwarded-Proto`. Never enable on a directly exposed server. |
-| `REDIS_URL` | recommended for >1 instance | `redis://[:password]@host:6379/0`. Shared counters for account lockout, login/refresh/reset quotas and the chat/upload/report limiter. Without it the counters live in the application database (shared, but one row lock per attempt). |
-| `SEC_*_LIMIT` / `SEC_*_WINDOW` | optional | Per-scope rate-limit overrides (see `app/security/rate_limit.py`). |
+| `APP_ENV=production` | Yes | Enables production hardening: docs disabled, HSTS, scanner fail-closed, secret validation. |
+| `JWT_SECRET` | Yes | ≥32 chars, not the development fallback. Startup refuses otherwise. |
+| `ADMIN_KEY` | Yes | Second factor for ADMIN password login; login fails closed without it. |
+| `MFA_ENCRYPTION_KEY` | Yes | URL-safe base64 32-byte key for AES-GCM TOTP secrets. MFA login fails closed if unset. |
+| `ALLOWED_ORIGINS` | Yes | Comma-separated exact origins (e.g. `https://rollcall.example.edu`). Wildcards are rejected. |
+| `DATABASE_URL` / `SUPABASE_*` | Yes | Production database. SQLite is for local development only. |
+| `SMTP_HOST` (+ credentials) | Recommended | Password reset delivery. Without it the startup log records a deployment blocker. |
+| `MALWARE_SCAN_COMMAND` | Recommended | ClamAV-compatible scanner. Production uploads are **rejected** when no scanner is configured. |
+| `AUDIT_CHAIN_HMAC_SECRET` | Recommended | HMAC key for the append-only audit chain. |
+| `TRUST_PROXY_HEADERS=true` | Behind trusted proxy only | Trust `X-Forwarded-For` / `X-Forwarded-Proto`. Never enable on a directly exposed server. |
+| `REDIS_URL` | Recommended for >1 instance | `redis://[:password]@host:6379/0`. Shared counters for account lockout, login/refresh/reset quotas and chat limiter. Without it, counters live in the application DB. |
+| `SEC_*_LIMIT` / `SEC_*_WINDOW` | Optional | Per-scope rate-limit overrides (see `app/security/rate_limit.py`). |
 
 ---
 
-## 2. Deployment checklist
+## 2. HTTPS & Edge Security Headers
 
-1. `APP_ENV=production`, strong `JWT_SECRET`, `ADMIN_KEY`, `MFA_ENCRYPTION_KEY` set.
-2. `ALLOWED_ORIGINS` contains only the real frontend origin(s) over HTTPS.
-3. Reverse proxy terminates TLS and serves `deploy/nginx.conf` (HSTS, header
-   duplication, login rate limit, `/docs` blocked at the edge).
-4. `TRUST_PROXY_HEADERS=true` only when the proxy is the sole ingress.
-5. `REDIS_URL` configured when more than one application instance runs, so
-   lockouts and endpoint quotas are shared (`backend_mode()` reports `redis`).
-   Locally: `docker compose up -d redis` (see `docker-compose.yml`), then set
-   `REDIS_URL=redis://127.0.0.1:6379/0`. Production Redis must be authenticated
-   and private; the compose service is a localhost-only development convenience.
-6. Email provider configured; request one password reset end-to-end.
-7. Malware scanner configured; upload a known-clean and a known-bad sample.
-8. `python -m pytest tests -q` green on the release commit.
-9. `pwsh -File scripts/security-scan.ps1` green (Bandit, pip-audit, gitleaks,
-   npm audit, tests, attack suite). The `security` workflow runs it on every PR.
-10. The legacy Streamlit UI (`backend/app/ui.py`, port 8501) is **not** exposed.
-11. Database backups verified by an actual restore, not just a snapshot job.
+### Where the Controls Live
 
----
+| Control | Primary Location | Application Fallback |
+|---|---|---|
+| HTTPS / TLS | Reverse proxy or CDN | `uvicorn` TLS flags |
+| HSTS | Reverse proxy/CDN | `backend/app/security/headers.py` |
+| CSP | Reverse proxy/CDN | `backend/app/security/headers.py` |
+| X-Content-Type-Options | Reverse proxy/CDN | `backend/app/security/headers.py` |
+| Referrer-Policy | Reverse proxy/CDN | `backend/app/security/headers.py` |
+| Permissions-Policy | Reverse proxy/CDN | `backend/app/security/headers.py` |
+| Clickjacking | Reverse proxy/CDN | `X-Frame-Options: DENY` + `frame-ancestors 'none'` |
+| CORS | FastAPI (`backend/app/main.py`) | Handled via exact-origin validation |
 
-## 3. Controls enforced in the application
+Reference configurations:
+* `deploy/nginx/rollcall.conf`
+* `deploy/Caddyfile`
 
-| Control | Where |
-|---|---|
-| Browser security headers (nosniff, frame-deny, referrer, permissions, CSP, HSTS over TLS) | `app/security/headers.py` |
-| CORS: exact origins, explicit methods and headers | `app/main.py` |
-| Prompt-injection screening + 4,000-char input cap | `app/security/ai_input.py`, `app/routers/agent.py` |
-| Per-tool minimum role, deny-by-default | `app/security/ai_policy.py`, `app/agent.py` |
-| SQL read-only policy, comment/quote/schema bypass rejection | `tools/query_tool.py` |
-| Session-scoped data access | `app/auth/session_scope.py` |
-| MFA, lockout, single-use reset tokens, refresh-token rotation | `app/routers/auth.py`, `app/security/` |
-| Upload size, magic-byte, image-bomb, malware checks | `app/routers/agent.py`, `app/security/uploads.py` |
-| Security event log + access-denial detection | `app/security/events.py`, `app/security/detection.py` |
+### Required Production Behavior
+
+1. TLS 1.2+ only (prefer TLS 1.3), valid certificate, HTTP redirected to HTTPS.
+2. `Strict-Transport-Security: max-age=31536000; includeSubDomains` (add `preload` only after the domain is ready).
+3. CSP tuned to the frontend origin. Scripts restricted to same-origin.
+4. `X-Content-Type-Options: nosniff`, `Referrer-Policy: strict-origin-when-cross-origin`, `Permissions-Policy`, `X-Frame-Options: DENY`.
+5. Edge upload limit set to `10 MB` to match FastAPI's max upload limit.
 
 ---
 
-## 4. Monitoring and alerting
+## 3. CORS Configuration
 
-Watch the structured security events (`event_type` field):
-
-* `repeated_access_denied` — credential stuffing / broken client.
-* `rate_limit_triggered` — brute force or scraping.
-* `prompt_injection_detected` — someone is steering the assistant. Review the
-  actor and the sessions they can see.
-* `upload_rejected`, `upload_scanner_unavailable` — malware attempts or a
-  misconfigured deployment.
-* `session_revoked`, `token_reuse_detected` — token theft.
-* Audit chain verification failures (`tools/verify_audit_chain.py`) — tampering.
-
-Alert on: any `severity=critical`, more than 10 `prompt_injection_detected` for
-one actor per hour, any `token_reuse_detected`, and audit-chain mismatch.
+Configured by `backend/app/main.py`:
+* `ALLOWED_ORIGINS`: exact `scheme://host[:port]` origins, comma-separated. Wildcards, path prefixes, queries, and fragments are rejected.
+* `ALLOWED_METHODS`: explicit method allowlist; `OPTIONS` is always permitted.
+* `ALLOWED_HEADERS`: explicit allowlist. `X-Requested-With` and `X-RollCall-CSRF` are automatically appended for CSRF verification on cookie-based refresh/logout.
+* In production, setting `SECURITY_HEADERS_ENABLED=false` causes startup to fail.
 
 ---
 
-## 5. Key rotation
+## 4. AI Security & Defense-in-Depth
 
-1. **JWT_SECRET** — issue a new secret, keep the old one valid only for the
-   access-token lifetime (≤1 h), then remove it. All refresh tokens must be
-   revoked if the secret may have leaked.
-2. **MFA_ENCRYPTION_KEY** — decrypt/re-encrypt stored TOTP secrets with a
-   migration script during a maintenance window; never rotate without
-   re-encrypting.
-3. **ADMIN_KEY** — rotate in the secret store; sessions are password-based and
-   remain valid until expiry, so revoke the admin's sessions too.
-4. **Database credentials** — rotate in the provider, update the app, verify
-   connectivity, then revoke the old credential.
+### Tool Permissions
+Enforced by `ToolRegistry.execute` in `backend/app/security/ai_policy.py`:
+* `query_tool`: minimum role `VIEWER`.
+* `read_csv_tool`, `read_photo_tool`, `validate_tool`, `summary_tool`, `export_tool`: minimum role `FACULTY`.
+* Opaque sentinel `TRUSTED_INTERNAL` is required for internal scripts; the legacy Streamlit UI refuses to run when `APP_ENV=production`.
+* Roles originate from cryptographically verified JWT tokens, never model prompts.
 
----
+### Prompt Injection Screening & Obfuscation Decoding
+* `backend/app/security/ai_input.py` sanitizes untrusted input using Unicode NFKC normalization, removing zero-width characters and stripping casing.
+* Multi-layer decoders detect base64, hexadecimal, ROT13, HTML entities, and Unicode escapes before evaluation.
+* Chat inputs exceeding 4000 characters are rejected at the Pydantic schema boundary.
+* Uploaded files are inspected in overlapping chunks to ensure injections are never missed across window boundaries.
 
-## 6. Incident response
-
-1. **Contain** — revoke the affected user's sessions (`POST /api/v1/me/sessions/revoke-all`),
-   disable the account, and if credentials may be compromised rotate the relevant key.
-2. **Preserve** — export the audit log and security events for the window;
-   do not edit attendance or audit records in place.
-3. **Assess** — determine which sessions/students the actor could see using the
-   data-scope policy, and which tools the actor's role could reach.
-4. **Eradicate** — patch the defect, add a regression test in
-   `backend/tests/test_person1_security.py` or `test_web_security_controls.py`,
-   and extend `scripts/person1_attack_suite.py`.
-5. **Recover** — restore from a verified backup only if data integrity is in
-   question; re-run the security scan before redeploying.
-6. **Report** — record timeline, impact, root cause and the regression test that
-   prevents recurrence.
+### Multi-Tenant Data Isolation
+* All database queries run through `resolve_data_scope(db, current_user)`.
+* Raw SQL queries are validated and rewritten: quoted and schema-qualified table references are rejected (`fail closed`), and table names are substituted with row-level sub-selects scoped to the user's assigned classes/sessions.
 
 ---
 
-## 7. Known limitations / residual risk
+## 5. Backups and Disaster Recovery
 
-* **SQLite development database** — production must use PostgreSQL/Supabase;
-  SQLite has no row-level security and weak concurrency.
-* **Rate limiting without `REDIS_URL` is database-backed.** Counters are shared
-  across workers on the same database, but each attempt takes a row lock and a
-  cross-region deployment should set `REDIS_URL`. If Redis is configured but
-  unreachable, the limiter degrades to the database (security scopes) or the
-  process-local window (chat/upload/report quotas) and logs the degraded mode;
-  it never disables itself.
-* **Development docs** — `/docs`, `/redoc`, `/openapi.json` are intentionally
-  available in development and disabled when `APP_ENV=production`.
-* **Malware scanning** depends on `MALWARE_SCAN_COMMAND`; production fails
-  closed (uploads rejected) rather than accepting unscanned files.
-* **Email delivery** must be configured or self-service reset is unavailable.
-* **The AI model is not a security boundary** — scope, SQL policy and tool
-  policy are enforced in code; prompt-injection screening is defence in depth.
-* **HSTS** requires HTTPS end-to-end; on plain HTTP it is intentionally absent.
+### Automated Backup Execution
+```powershell
+pwsh ./deploy/backup/backup.ps1 -RetentionDays 30
+```
+* **SQLite:** Consistent `sqlite3 .backup` snapshot with SHA-256 integrity verification.
+* **PostgreSQL / Supabase:** `pg_dump` execution when `DATABASE_URL_SYNC` is defined.
+* Daily automated backups stored with versioning and encryption at rest.
+
+### Quarterly Restore Drill
+1. Copy the latest archive to an isolated staging environment.
+2. Verify checksum integrity (`sha256sum -c`).
+3. Restore database file or execute schema migration.
+4. Execute smoke test suite (login, attendance query, AI chat, session creation).
+5. Target recovery objectives: RPO ≤ 24h, RTO ≤ 4h.
+
+---
+
+## 6. Dependency Scanning & Local Verification
+
+Run the full security scan locally:
+```powershell
+pwsh ./scripts/security-scan.ps1
+```
+
+Individual checks:
+```bash
+# Backend security analysis
+python -m pip_audit -r backend/requirements.txt
+python -m bandit -r backend/app backend/tools -ll
+gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
+
+# Frontend dependency security
+cd frontend-react
+npm audit --audit-level=high
+npm run build
+npm run lint
+```
+
+---
+
+## 7. Joint Deployment Checklist
+
+- [ ] `APP_ENV=production`, strong `JWT_SECRET`, `ADMIN_KEY`, `MFA_ENCRYPTION_KEY` configured in secret manager.
+- [ ] `ALLOWED_ORIGINS` configured strictly with production HTTPS origins (no wildcards).
+- [ ] Reverse proxy terminates TLS with HTTP -> HTTPS redirection.
+- [ ] Security headers (HSTS, CSP, X-Frame-Options, nosniff, Permissions-Policy) active.
+- [ ] `TRUST_PROXY_HEADERS=true` enabled only if reverse proxy is sole ingress.
+- [ ] `REDIS_URL` configured for multi-instance deployments for shared rate limits and account lockout.
+- [ ] Email provider configured; end-to-end password reset flow verified.
+- [ ] ClamAV malware scanner configured; clean and infected samples verified.
+- [ ] Full automated test suite passing (`pytest tests -q`).
+- [ ] Full security scan script passing (`scripts/security-scan.ps1`).
+- [ ] Legacy Streamlit UI disabled in production.
+- [ ] Database backup and restore drill documented and validated.
