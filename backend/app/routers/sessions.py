@@ -144,7 +144,7 @@ def create_session(
                 )
             if str(teacher.get("role", "")).upper() != "FACULTY":
                 raise HTTPException(
-                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                     detail="Sessions can only be attributed to FACULTY users.",
                 )
         subject_code = payload.subject_code
@@ -152,7 +152,7 @@ def create_session(
         # FACULTY: subject_code is mandatory and must be one of the teacher's assigned codes.
         if not payload.subject_code:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail="subject_code is required for faculty session creation.",
             )
         assigned_codes = crud.get_teacher_subjects(db, user_id=current_user.user_id)

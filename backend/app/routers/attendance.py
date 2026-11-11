@@ -11,6 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import Role, get_current_user, require_roles
+from app.auth.session_scope import resolve_data_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
@@ -22,6 +23,13 @@ from app.schemas.attendance import (
     BulkReconcileRequest,
     ReconcileRequest,
     SessionReconcilePayload,
+)
+from app.services.attendance_edits import (
+    AttendanceChange,
+    actor_identity,
+    assert_session_edit_authorized,
+    capture_attendance_statuses,
+    write_attendance_audit,
 )
 
 logger = logging.getLogger("rollcall.routers.attendance")
@@ -64,58 +72,12 @@ def _assert_session_ownership(
 ) -> None:
     """Enforce faculty ownership of a session (N3).
 
-    ADMIN keeps institutional access to every session. FACULTY access is allowed
-    only when one of these holds:
-      * the session is attributed to that faculty member,
-      * the session is attributed to nobody / the legacy sentinel AND the
-        faculty is mapped to the session's subject code (``teacher_subjects``)
-        or is the session coordinator.
-
-    Legacy sessions are never assigned to anybody, but they are no longer
-    world-readable by every faculty account: an unmapped faculty member is
-    denied, and an authorized administrator can grant access by adding the
-    subject-code mapping. Historical attendance data is not modified.
+    The policy itself lives in ``app.services.attendance_edits`` so that the
+    direct API, the chat confirmation flow and the legacy UI commit all use
+    exactly the same rule. Session age and lifecycle status are not part of
+    the decision: there is no time-based editing lock (N5).
     """
-    if current_user.role == Role.ADMIN:
-        return
-    # Every non-admin role is authorized the same way (ownership / coordinator /
-    # subject mapping); write endpoints are separately role-gated.
-    owner = session.get("teacher_id")
-    owned = owner is not None and str(owner).strip() not in ("", "legacy")
-
-    if owned:
-        if str(owner).strip() == current_user.user_id:
-            return
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                f"Forbidden: session '{session.get('session_id')}' is assigned to another "
-                "faculty member. You can only access your own sessions."
-            ),
-        )
-
-    # Unowned / legacy session: authorize by subject mapping, never by guesswork.
-    coordinator = session.get("coordinator_faculty_id")
-    if coordinator and str(coordinator).strip() == current_user.user_id:
-        return
-
-    subject_code = str(session.get("subject_code") or "").strip()
-    if subject_code and db is not None and crud.is_teacher_assigned_to_subject(
-        db, current_user.user_id, subject_code
-    ):
-        return
-
-    raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail=(
-            f"Forbidden: session '{session.get('session_id')}' has no faculty owner and "
-            + (
-                f"subject code '{subject_code}' is not mapped to your account."
-                if subject_code
-                else "no subject code, so access requires an administrator."
-            )
-        ),
-    )
+    assert_session_edit_authorized(current_user, session, db)
 
 
 def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
@@ -221,17 +183,24 @@ def record_attendance(
 
     try:
         # Audit is part of the same transaction: an unauditable write is rejected.
-        crud.create_audit_entry(
+        # The shared audit service is used for every write path, so the audit
+        # shape (actor, role, session, student, old -> new status, UTC time)
+        # is identical for single and bulk edits.
+        actor_id, actor_role = actor_identity(current_user)
+        write_attendance_audit(
             db,
-            actor_id=current_user.user_id,
-            action="ATTENDANCE_UPSERT" if existing else "ATTENDANCE_RECORD",
-            entity_type="attendance",
-            entity_id=record["attendance_id"],
+            actor_id=actor_id,
+            actor_role=actor_role,
             session_id=session_id,
-            usn=clean_usn,
-            old_value=existing.get("status") if existing else None,
-            new_value=record["status"],
-            timestamp=_utcnow_iso(),
+            action="ATTENDANCE_UPSERT" if existing else "ATTENDANCE_RECORD",
+            changes=[
+                AttendanceChange(
+                    usn=clean_usn,
+                    old_status=existing.get("status") if existing else None,
+                    new_status=record["status"],
+                    attendance_id=record["attendance_id"],
+                )
+            ],
         )
         db.commit()
         response.status_code = status.HTTP_200_OK if existing else status.HTTP_201_CREATED
@@ -310,6 +279,12 @@ def bulk_record_attendance(
         for r in payload.records
     ]
 
+    # Capture the previous status of every affected student before the write so
+    # that every modification can be audited old -> new (N5).
+    previous_statuses = capture_attendance_statuses(
+        db, session_id, [r["usn"] for r in formatted_records]
+    )
+
     try:
         count = crud.insert_attendance_bulk(db, records=formatted_records, upsert=upsert)
     except IntegrityError:
@@ -324,15 +299,21 @@ def bulk_record_attendance(
         raise
 
     try:
-        crud.create_audit_entry(
+        actor_id, actor_role = actor_identity(current_user)
+        write_attendance_audit(
             db,
-            actor_id=current_user.user_id,
-            action="ATTENDANCE_BULK_UPSERT" if upsert else "ATTENDANCE_BULK",
-            entity_type="attendance",
-            entity_id=session_id,
+            actor_id=actor_id,
+            actor_role=actor_role,
             session_id=session_id,
-            new_value=f"{count} records",
-            timestamp=_utcnow_iso(),
+            action="ATTENDANCE_BULK_UPSERT" if upsert else "ATTENDANCE_BULK",
+            changes=[
+                AttendanceChange(
+                    usn=r["usn"],
+                    old_status=previous_statuses.get(r["usn"]),
+                    new_status=crud.normalize_attendance_status(r["status"]),
+                )
+                for r in formatted_records
+            ],
         )
         db.commit()
         return {
@@ -398,19 +379,35 @@ def replace_attendance(
         for r in payload.records
     ]
 
+    # Previous status of every student currently on record for this session.
+    previous_statuses = capture_attendance_statuses(db, session_id)
+
     try:
         replaced_count = crud.replace_session_attendance(
             db, session_id=session_id, records=formatted_records
         )
-        crud.create_audit_entry(
+        actor_id, actor_role = actor_identity(current_user)
+        # One old -> new audit record per affected student (added, changed or
+        # removed by the replacement).
+        new_by_usn = {
+            r["usn"]: crud.normalize_attendance_status(r["status"])
+            for r in formatted_records
+        }
+        changes: List[AttendanceChange] = [
+            AttendanceChange(
+                usn=usn,
+                old_status=previous_statuses.get(usn),
+                new_status=new_by_usn.get(usn),
+            )
+            for usn in sorted(set(previous_statuses) | set(new_by_usn))
+        ]
+        write_attendance_audit(
             db,
-            actor_id=current_user.user_id,
-            action="ATTENDANCE_REPLACE",
-            entity_type="attendance",
-            entity_id=session_id,
+            actor_id=actor_id,
+            actor_role=actor_role,
             session_id=session_id,
-            new_value=f"{replaced_count} records",
-            timestamp=_utcnow_iso(),
+            action="ATTENDANCE_REPLACE",
+            changes=changes,
         )
         db.commit()
         return {
@@ -447,20 +444,24 @@ def delete_attendance(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     _verify_session_exists(db, session_id)
+    # Previous status of every student on record, for a per-student audit trail.
+    previous_statuses = capture_attendance_statuses(db, session_id)
     try:
         deleted_count = crud.delete_session_attendance(db, session_id=session_id)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
-    crud.create_audit_entry(
+    actor_id, actor_role = actor_identity(current_user)
+    write_attendance_audit(
         db,
-        actor_id=current_user.user_id,
-        action="ATTENDANCE_DELETE",
-        entity_type="attendance",
-        entity_id=session_id,
+        actor_id=actor_id,
+        actor_role=actor_role,
         session_id=session_id,
-        old_value=f"{deleted_count} records",
-        timestamp=_utcnow_iso(),
+        action="ATTENDANCE_DELETE",
+        changes=[
+            AttendanceChange(usn=usn, old_status=status, new_status=None)
+            for usn, status in sorted(previous_statuses.items())
+        ],
     )
     db.commit()
     return {
@@ -477,9 +478,13 @@ def delete_attendance(
     "/students/{usn}",
     response_model=List[AttendanceResponse],
     summary="Get attendance history for a student",
-    description="Retrieve all historical attendance marks for a given student.",
+    description=(
+        "Retrieve the historical attendance marks of a student. Only records from sessions "
+        "inside the caller's authorization scope are returned, and a student outside that "
+        "scope is reported as not found so the endpoint never confirms their existence."
+    ),
     responses={
-        404: {"description": "Student not found"},
+        404: {"description": "Student not found or not visible to the caller"},
     },
 )
 def get_student_attendance_history(
@@ -488,8 +493,19 @@ def get_student_attendance_history(
     db: Session = Depends(get_db),
 ) -> List[Dict[str, Any]]:
     clean_usn = usn.strip().upper()
+    scope = resolve_data_scope(db, current_user)
+    if not scope.is_student_visible(db, clean_usn):
+        # Same response as an unknown student: no existence disclosure.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{clean_usn}' not found.",
+        )
     _verify_student_exists(db, clean_usn)
-    return crud.get_attendance_by_student(db, usn=clean_usn)
+    if scope.unrestricted:
+        return crud.get_attendance_by_student(db, usn=clean_usn)
+    return crud.get_attendance_by_student(
+        db, usn=clean_usn, session_ids=scope.visible_session_ids(db)
+    )
 
 
 # ==============================================================================
@@ -527,6 +543,9 @@ def reconcile_attendance(
 
     if resolutions is not None:
         updated_records = []
+        resolved_usns = [res.usn.strip().upper() for res in resolutions]
+        # Previous status per affected student, captured before the write.
+        previous_statuses = capture_attendance_statuses(db, session_id, resolved_usns)
         for res in resolutions:
             clean_usn = res.usn.strip().upper()
             _verify_student_exists(db, clean_usn)
@@ -558,15 +577,21 @@ def reconcile_attendance(
             )
             updated_records.append(updated)
 
-        crud.create_audit_entry(
+        actor_id, actor_role = actor_identity(current_user)
+        write_attendance_audit(
             db,
-            actor_id=current_user.user_id,
-            action="ATTENDANCE_RECONCILE",
-            entity_type="attendance",
-            entity_id=session_id,
+            actor_id=actor_id,
+            actor_role=actor_role,
             session_id=session_id,
-            new_value=f"{len(updated_records)} resolutions",
-            timestamp=_utcnow_iso(),
+            action="ATTENDANCE_RECONCILE",
+            changes=[
+                AttendanceChange(
+                    usn=rec["usn"],
+                    old_status=previous_statuses.get(rec["usn"]),
+                    new_status=rec["status"],
+                )
+                for rec in updated_records
+            ],
         )
         db.commit()
         return {
@@ -603,6 +628,9 @@ def reconcile_attendance(
 
         missing_rooms = set(payload.missing_room_ids or [])
 
+        # Previous status per student, captured before the roster write.
+        previous_statuses = capture_attendance_statuses(db, session_id)
+
         try:
             reconciled = crud.reconcile_session_roster(
                 db,
@@ -618,15 +646,23 @@ def reconcile_attendance(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
 
         if payload.persist:
-            crud.create_audit_entry(
+            actor_id, actor_role = actor_identity(current_user)
+            new_by_usn = {r["usn"]: r["status"] for r in reconciled}
+            changes = [
+                AttendanceChange(
+                    usn=usn,
+                    old_status=previous_statuses.get(usn),
+                    new_status=new_by_usn.get(usn),
+                )
+                for usn in sorted(set(previous_statuses) | set(new_by_usn))
+            ]
+            write_attendance_audit(
                 db,
-                actor_id=current_user.user_id,
-                action="ATTENDANCE_RECONCILE",
-                entity_type="attendance",
-                entity_id=session_id,
+                actor_id=actor_id,
+                actor_role=actor_role,
                 session_id=session_id,
-                new_value=f"{len(reconciled)} reconciled records",
-                timestamp=_utcnow_iso(),
+                action="ATTENDANCE_RECONCILE",
+                changes=changes,
             )
             db.commit()
 

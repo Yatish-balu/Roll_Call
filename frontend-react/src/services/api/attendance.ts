@@ -64,7 +64,7 @@ export async function recordStudentAttendance(
 export async function updateSessionAttendance(
   sessionId: string,
   records: Array<{ usn: string; status: AttendanceStatus; room_id?: string }>
-): Promise<{ success: boolean; count: number }> {
+): Promise<{ success: boolean; count: number; message?: string }> {
   const payload = {
     records: records.map((r) => ({
       session_id: sessionId,
@@ -75,38 +75,42 @@ export async function updateSessionAttendance(
       confidence: 1.0,
     })),
   };
-  await apiClient.put(
+  const res = await apiClient.put<{ replaced_count?: number; message?: string }>(
     `/api/v1/attendance/sessions/${encodeURIComponent(sessionId)}`,
     payload
   );
-  return { success: true, count: records.length };
+  return {
+    success: true,
+    count: res?.replaced_count ?? records.length,
+    message: res?.message,
+  };
 }
 
 export async function reconcileAttendance(
   sessionIdOrData:
     | string
-    | { session_id: string; usn: string; new_status: AttendanceStatus; reason: string },
-  payload?: { usn: string; resolved_status: AttendanceStatus; reason: string }
-): Promise<{ success: boolean; audit_log_id?: string }> {
+    | { session_id: string; usn: string; new_status: AttendanceStatus },
+  payload?: { usn: string; resolved_status: AttendanceStatus }
+): Promise<{ success: boolean }> {
   let sessionId: string;
   let usn: string;
   let resolvedStatus: AttendanceStatus;
-  let reason: string;
 
   if (typeof sessionIdOrData === "string" && payload) {
     sessionId = sessionIdOrData;
     usn = payload.usn;
     resolvedStatus = payload.resolved_status;
-    reason = payload.reason;
   } else if (typeof sessionIdOrData === "object") {
     sessionId = sessionIdOrData.session_id;
     usn = sessionIdOrData.usn;
     resolvedStatus = sessionIdOrData.new_status;
-    reason = sessionIdOrData.reason;
   } else {
     throw new Error("Invalid parameters to reconcileAttendance");
   }
 
+  // No reason/override field is sent: the backend records the actor, role and
+  // the previous -> new status itself (N5). The frontend never authors audit
+  // entries.
   await apiClient.post(
     `/api/v1/attendance/sessions/${encodeURIComponent(sessionId)}/reconcile`,
     {
@@ -114,7 +118,6 @@ export async function reconcileAttendance(
         {
           usn,
           resolved_status: resolvedStatus,
-          reason,
           reconciled_by: "faculty",
           confidence: 1.0,
         },

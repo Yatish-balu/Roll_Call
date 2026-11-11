@@ -9,19 +9,22 @@ export interface DashboardData {
   sessions: VerifiedSessionPage | null;
   overallAnalytics: VerifiedSummaryReport | null;
   todayAnalytics: VerifiedSummaryReport | null;
+  teacherMappings: Array<{ teacher_id: string; subject_code: string }> | null;
 }
 
 export async function fetchDashboardData(todayIsoDate: string): Promise<DashboardData> {
-  const [sessionsRes, overallRes, todayRes] = await Promise.allSettled([
-    apiClient.get<VerifiedSessionPage>("/api/v1/sessions", { limit: 50 }),
+  const [sessionsRes, overallRes, todayRes, mappingsRes] = await Promise.allSettled([
+    apiClient.get<VerifiedSessionPage>("/api/v1/sessions", { limit: 100 }),
     apiClient.get<VerifiedSummaryReport>("/api/v1/analytics/overview"),
     apiClient.get<VerifiedSummaryReport>(`/api/v1/analytics/date/${todayIsoDate}/summary`),
+    apiClient.get<{ items: Array<{ teacher_id: string; subject_code: string }> }>("/api/v1/admin/teacher-subjects"),
   ]);
 
   return {
     sessions: sessionsRes.status === "fulfilled" ? sessionsRes.value : null,
     overallAnalytics: overallRes.status === "fulfilled" ? overallRes.value : null,
     todayAnalytics: todayRes.status === "fulfilled" ? todayRes.value : null,
+    teacherMappings: mappingsRes.status === "fulfilled" ? mappingsRes.value?.items ?? [] : null,
   };
 }
 

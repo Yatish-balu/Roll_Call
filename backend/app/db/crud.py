@@ -12,13 +12,21 @@ from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, Generator, List, Optional, Sequence, Set, Tuple, Union
 from uuid import uuid4
+from weakref import WeakKeyDictionary
 
-from sqlalchemy import and_, delete, func, or_, select, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
+from sqlalchemy import insert as sa_insert
 from sqlalchemy.orm import Session
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.connection import DEFAULT_DB_PATH, get_connection
+from app.security.audit_chain import (
+    DEFAULT_CHAIN_ID,
+    compute_row_hash,
+    get_chain_secret,
+    get_genesis_hash,
+)
 from app.db.models import (
     Student,
     Room,
@@ -27,6 +35,7 @@ from app.db.models import (
     User,
     TeacherSubject,
     AuditLog,
+    AuditChainHead,
     LoginAttempt,
     PendingEdit,
     SessionAllocation,
@@ -281,10 +290,14 @@ def get_students_paginated(
     search: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
+    scope_condition: Optional[Any] = None,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """
     Retrieve paginated student records with optional branch filter and search query.
     Search safely matches USN, name, and branch.
+    ``scope_condition`` is an optional SQLAlchemy predicate applied to the
+    authorization scope; it is applied to the COUNT and the page query so that
+    pagination, counts and search can never widen the caller's scope.
     Returns (items, total_count).
     """
     limit_val = max(1, min(200, limit))
@@ -303,6 +316,8 @@ def get_students_paginated(
                     func.lower(Student.branch).like(term),
                 )
             )
+        if scope_condition is not None:
+            conditions.append(scope_condition)
 
         count_stmt = select(func.count(Student.usn))
         if conditions:
@@ -318,6 +333,12 @@ def get_students_paginated(
 
     where_clauses = []
     params: List[Any] = []
+    if scope_condition is not None:
+        # Fail closed: a scoped listing must never silently fall back to an
+        # unscoped query on a raw connection.
+        raise ValueError(
+            "Scoped student listing requires a SQLAlchemy Session target."
+        )
     if branch and branch.strip():
         where_clauses.append("branch = ?")
         params.append(branch.strip())
@@ -779,27 +800,13 @@ def normalize_subject_code(raw: Optional[str]) -> str:
 def _session_scope_condition_orm(user_id: str, subject_codes: List[str]):
     """SQLAlchemy predicate restricting sessions to one caller's scope.
 
-    Mirrors the N3 session-ownership policy:
-      * sessions owned by the caller are visible;
-      * unowned / legacy sessions are visible when the caller coordinates them
-        or is mapped to the session's subject code (exact, normalized match);
-      * sessions owned by somebody else are never visible.
+    The policy itself lives in ``app.auth.session_scope`` so that the session
+    endpoints, the attendance endpoints and the AI query tools all enforce the
+    exact same rule.
     """
-    unowned = or_(
-        DbSession.teacher_id.is_(None),
-        DbSession.teacher_id.in_(list(LEGACY_SESSION_OWNER_SENTINELS)),
-    )
-    owned_by_viewer = DbSession.teacher_id == user_id
+    from app.auth.session_scope import session_scope_condition
 
-    inner: List[Any] = []
-    if user_id:
-        inner.append(DbSession.coordinator_faculty_id == user_id)
-    if subject_codes:
-        inner.append(func.upper(DbSession.subject_code).in_(subject_codes))
-
-    if not inner:
-        return owned_by_viewer
-    return or_(owned_by_viewer, and_(unowned, or_(*inner)))
+    return session_scope_condition(user_id, subject_codes)
 
 
 def get_sessions_paginated_scoped(
@@ -1579,7 +1586,13 @@ def replace_session_attendance(
                 target.execute(delete(Attendance).where(Attendance.attendance_id.in_(stale_ids)))
 
             target.flush()
-            savepoint.commit()
+            # The SAVEPOINT is intentionally NOT released here.
+            # Releasing it (savepoint.commit()) implicitly commits the outer
+            # transaction in SQLAlchemy 2.0, which would make the replacement
+            # survive a later failure - for example an audit insert that fails
+            # after this call. Leaving it open keeps the replacement, the audit
+            # row and the final commit inside one transaction, so the caller's
+            # commit() persists all of it and its rollback() discards all of it.
             return len(validated_records)
         except Exception:
             savepoint.rollback()
@@ -1867,8 +1880,15 @@ def is_teacher_assigned_to_subject(
 def get_attendance_by_student(
     target_or_usn: Union[sqlite3.Connection, Session, str],
     usn: Optional[str] = None,
+    *,
+    session_ids: Optional[Iterable[str]] = None,
 ) -> List[Dict[str, Any]]:
-    """Retrieve all attendance records for a specific student."""
+    """Retrieve all attendance records for a specific student.
+
+    ``session_ids`` optionally restricts the result to the sessions the caller
+    is authorized to see; it is applied before the records are returned so that
+    a student history can never expose records from an invisible session.
+    """
     if usn is None and not isinstance(target_or_usn, (sqlite3.Connection, Session)):
         target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH
         actual_usn = str(target_or_usn)
@@ -1877,9 +1897,15 @@ def get_attendance_by_student(
         actual_usn = usn or ""
 
     clean_usn = actual_usn.strip()
+    allowed_sessions = None
+    if session_ids is not None:
+        allowed_sessions = {str(s) for s in session_ids}
 
     if isinstance(target, Session):
-        stmt = select(Attendance).where(Attendance.usn == clean_usn).order_by(Attendance.session_id.asc())
+        stmt = select(Attendance).where(Attendance.usn == clean_usn)
+        if allowed_sessions is not None:
+            stmt = stmt.where(Attendance.session_id.in_(allowed_sessions))
+        stmt = stmt.order_by(Attendance.session_id.asc())
         rows = target.scalars(stmt).all()
         return _rows_to_dicts(list(rows))
 
@@ -1887,10 +1913,17 @@ def get_attendance_by_student(
     SELECT session_id, usn, room_id, status, source, confidence
     FROM attendance
     WHERE usn = ?
-    ORDER BY session_id ASC
     """
+    params: List[Any] = [clean_usn]
+    if allowed_sessions is not None:
+        if not allowed_sessions:
+            return []
+        placeholders = ",".join("?" for _ in allowed_sessions)
+        query += f" AND session_id IN ({placeholders})"
+        params.extend(sorted(allowed_sessions))
+    query += " ORDER BY session_id ASC"
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, (clean_usn,))
+        cursor = conn.execute(query, tuple(params))
         return _rows_to_dicts(cursor.fetchall())
 
 
@@ -2115,6 +2148,150 @@ def list_teacher_subject_mappings(
         ]
 
 
+_AUDIT_ROLE_SUPPORT_CACHE: "WeakKeyDictionary[Any, bool]" = WeakKeyDictionary()
+
+
+def _audit_log_supports_actor_role(target: Union[sqlite3.Connection, Session]) -> bool:
+    """True when the audit_log table has the ``actor_role`` column (migration 0014).
+
+    The check keeps the audit path working on databases that have not been
+    migrated yet: the role is simply omitted instead of failing the write.
+
+    The column list is read on the *caller's own* connection. Using an
+    inspector here would check out a second connection from the engine, and
+    returning it to the pool rolls back the caller's pending transaction
+    (which would silently discard the attendance change being audited).
+    """
+    if isinstance(target, Session):
+        bind = target.get_bind()
+        if bind is None:
+            return False
+        cached = _AUDIT_ROLE_SUPPORT_CACHE.get(bind)
+        if cached is not None:
+            return cached
+        try:
+            if bind.dialect.name == "sqlite":
+                rows = target.execute(text("PRAGMA table_info(audit_log)")).fetchall()
+                columns = {row[1] for row in rows}
+            else:
+                rows = target.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'audit_log' AND table_schema = current_schema()"
+                    )
+                ).fetchall()
+                columns = {row[0] for row in rows}
+        except Exception:
+            return False
+        supported = "actor_role" in columns
+        try:
+            _AUDIT_ROLE_SUPPORT_CACHE[bind] = supported
+        except TypeError:  # pragma: no cover - non-weakrefable bind
+            pass
+        return supported
+
+    try:
+        columns = {
+            row[1] for row in target.execute("PRAGMA table_info(audit_log)").fetchall()
+        }
+        return "actor_role" in columns
+    except Exception:
+        return False
+
+
+def _audit_log_supports_chain(target: Union[sqlite3.Connection, Session]) -> bool:
+    """True when the audit_log table has the hash-chain columns."""
+    try:
+        if isinstance(target, Session):
+            bind = target.get_bind()
+            if bind is None:
+                return False
+            if bind.dialect.name == "sqlite":
+                rows = target.execute(text("PRAGMA table_info(audit_log)")).fetchall()
+                columns = {row[1] for row in rows}
+            else:
+                rows = target.execute(
+                    text(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_name = 'audit_log' AND table_schema = current_schema()"
+                    )
+                ).fetchall()
+                columns = {row[0] for row in rows}
+        else:
+            columns = {
+                row[1] for row in target.execute("PRAGMA table_info(audit_log)").fetchall()
+            }
+        return {"chain_id", "prev_hash", "row_hash"}.issubset(columns)
+    except Exception:
+        return False
+
+
+def _audit_chain_lock_and_read_head(
+    target: Union[sqlite3.Connection, Session], chain_id: str
+) -> Optional[str]:
+    """Lock the chain head and return the current tip hash.
+
+    The upsert-with-no-op-update locks the head row (PostgreSQL row lock,
+    SQLite write lock) so that two concurrent writers cannot read the same tip
+    and fork the chain. The lock is released when the caller's transaction
+    commits or rolls back.
+    """
+    lock_sql = text(
+        "INSERT INTO audit_chain_head (chain_id, last_hash, last_log_id, updated_at) "
+        "VALUES (:chain_id, NULL, NULL, NULL) "
+        "ON CONFLICT(chain_id) DO UPDATE SET last_hash = audit_chain_head.last_hash"
+    )
+    if isinstance(target, Session):
+        target.execute(lock_sql, {"chain_id": chain_id})
+        head = target.execute(
+            select(AuditChainHead).where(AuditChainHead.chain_id == chain_id)
+        ).scalars().first()
+        return head.last_hash if head is not None else None
+
+    target.execute(lock_sql, {"chain_id": chain_id})
+    row = target.execute(
+        "SELECT last_hash FROM audit_chain_head WHERE chain_id = ?", (chain_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0] if not isinstance(row, dict) else row.get("last_hash")
+
+
+def _audit_chain_prev_hash(target: Union[sqlite3.Connection, Session], chain_id: str) -> str:
+    """Lock the chain head and return the predecessor hash for the next record."""
+    last_hash = _audit_chain_lock_and_read_head(target, chain_id)
+    return str(last_hash) if last_hash else get_genesis_hash()
+
+
+def _audit_chain_advance_head(
+    target: Union[sqlite3.Connection, Session],
+    chain_id: str,
+    row_hash: str,
+    log_id: Optional[int],
+    timestamp: str,
+) -> None:
+    """Advance the chain head inside the caller's transaction."""
+    if isinstance(target, Session):
+        head = target.get(AuditChainHead, chain_id)
+        if head is None:
+            head = AuditChainHead(chain_id=chain_id)
+            target.add(head)
+        head.last_hash = row_hash
+        head.last_log_id = log_id
+        head.updated_at = timestamp
+        target.flush()
+        return
+
+    with _get_conn(target) as conn:
+        conn.execute(
+            "INSERT INTO audit_chain_head (chain_id, last_hash, last_log_id, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(chain_id) DO UPDATE SET last_hash = excluded.last_hash, "
+            "last_log_id = excluded.last_log_id, updated_at = excluded.updated_at",
+            (chain_id, row_hash, log_id, timestamp),
+        )
+
+
 def create_audit_entry(
     target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
     *,
@@ -2128,39 +2305,116 @@ def create_audit_entry(
     new_value: Optional[str] = None,
     reason: Optional[str] = None,
     timestamp: Optional[str] = None,
+    actor_role: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Create an append-only audit log entry."""
+    """Create an append-only audit log entry.
+
+    When the audit hash chain is provisioned (``AUDIT_CHAIN_HMAC_SECRET``), the
+    record is linked to its predecessor with an HMAC-SHA256 hash. The link and
+    the record are written in the **same transaction**, so an audit entry can
+    never exist without its chain link.
+    """
     clean_actor = actor_id.strip()
     clean_act = action.strip().upper()
     ts = timestamp or _utcnow_iso()
+    clean_role = actor_role.strip().upper() if actor_role else None
 
     if isinstance(target, Session):
-        log = AuditLog(
-            actor_id=clean_actor,
-            action=clean_act,
-            session_id=session_id.strip() if session_id else None,
-            usn=usn.strip().upper() if usn else None,
-            entity_type=entity_type.strip(),
-            entity_id=entity_id.strip(),
-            old_value=old_value,
-            new_value=new_value,
-            reason=reason.strip() if reason else None,
-            timestamp=ts,
-        )
-        target.add(log)
-        target.flush()
-        return _row_to_dict(log)  # type: ignore
+        supports_role = _audit_log_supports_actor_role(target)
+        supports_chain = _audit_log_supports_chain(target)
+        values: Dict[str, Any] = {
+            "actor_id": clean_actor,
+            "action": clean_act,
+            "session_id": session_id.strip() if session_id else None,
+            "usn": usn.strip().upper() if usn else None,
+            "entity_type": entity_type.strip(),
+            "entity_id": entity_id.strip(),
+            "old_value": old_value,
+            "new_value": new_value,
+            "reason": reason.strip() if reason else None,
+            "timestamp": ts,
+        }
+        if supports_role:
+            values["actor_role"] = clean_role
 
-    query = """
-    INSERT INTO audit_log (
-        actor_id, action, session_id, usn, entity_type, entity_id,
-        old_value, new_value, reason, timestamp
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """
+        prev_hash: Optional[str] = None
+        row_hash: Optional[str] = None
+        chain_id: Optional[str] = None
+        if supports_chain:
+            secret = get_chain_secret()
+            if secret is not None:
+                chain_id = DEFAULT_CHAIN_ID
+                prev_hash = _audit_chain_prev_hash(target, chain_id)
+                values["chain_id"] = chain_id
+                values["prev_hash"] = prev_hash
+                values["row_hash"] = compute_row_hash(
+                    {**values, "chain_id": chain_id, "prev_hash": prev_hash}, secret
+                )
+
+        # Core insert with an explicit column set: the ORM entity would always
+        # include actor_role, which would break databases not yet migrated.
+        insert_result = target.execute(sa_insert(AuditLog.__table__).values(**values))
+        target.flush()
+        log_id = None
+        try:
+            log_id = insert_result.inserted_primary_key[0]
+        except Exception:
+            pass
+
+        if chain_id is not None and row_hash is None:
+            row_hash = values.get("row_hash")
+        if chain_id is not None and row_hash:
+            _audit_chain_advance_head(target, chain_id, str(row_hash), log_id, ts)
+
+        result = {
+            "log_id": log_id,
+            "actor_id": clean_actor,
+            "actor_role": clean_role if supports_role else None,
+            "action": clean_act,
+            "session_id": session_id,
+            "usn": usn,
+            "entity_type": entity_type,
+            "entity_id": entity_id,
+            "old_value": old_value,
+            "new_value": new_value,
+            "reason": reason,
+            "timestamp": ts,
+            "chain_id": chain_id,
+            "prev_hash": prev_hash,
+            "row_hash": row_hash,
+        }
+        return result
+
     with _get_conn(target) as conn:
-        cursor = conn.execute(
-            query,
-            (
+        supports_role = _audit_log_supports_actor_role(conn)
+        if supports_role:
+            query = """
+            INSERT INTO audit_log (
+                actor_id, actor_role, action, session_id, usn, entity_type, entity_id,
+                old_value, new_value, reason, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            params = (
+                clean_actor,
+                clean_role,
+                clean_act,
+                session_id.strip() if session_id else None,
+                usn.strip().upper() if usn else None,
+                entity_type.strip(),
+                entity_id.strip(),
+                old_value,
+                new_value,
+                reason.strip() if reason else None,
+                ts,
+            )
+        else:
+            query = """
+            INSERT INTO audit_log (
+                actor_id, action, session_id, usn, entity_type, entity_id,
+                old_value, new_value, reason, timestamp
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """
+            params = (
                 clean_actor,
                 clean_act,
                 session_id.strip() if session_id else None,
@@ -2171,12 +2425,13 @@ def create_audit_entry(
                 new_value,
                 reason.strip() if reason else None,
                 ts,
-            ),
-        )
+            )
+        cursor = conn.execute(query, params)
         log_id = cursor.lastrowid
     return {
         "log_id": log_id,
         "actor_id": clean_actor,
+        "actor_role": clean_role if supports_role else None,
         "action": clean_act,
         "session_id": session_id,
         "usn": usn,
@@ -2186,6 +2441,187 @@ def create_audit_entry(
         "new_value": new_value,
         "reason": reason,
         "timestamp": ts,
+    }
+
+
+def list_audit_entries(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    *,
+    actor_id: Optional[str] = None,
+    actor_role: Optional[str] = None,
+    action: Optional[str] = None,
+    session_id: Optional[str] = None,
+    usn: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """List append-only audit entries, newest first.
+
+    Only the audit columns are returned: the log never contains credentials or
+    unrelated sensitive data. ``actor_role`` is nullable because records
+    written before migration 0014 have no role column.
+    """
+    limit_val = max(1, min(200, limit))
+    offset_val = max(0, offset)
+
+    supports_role = _audit_log_supports_actor_role(target)
+
+    filters: List[Any] = []
+    if actor_id and actor_id.strip():
+        filters.append(AuditLog.actor_id == actor_id.strip())
+    if actor_role and actor_role.strip() and supports_role:
+        filters.append(func.upper(AuditLog.actor_role) == actor_role.strip().upper())
+    if action and action.strip():
+        filters.append(AuditLog.action == action.strip().upper())
+    if session_id and session_id.strip():
+        filters.append(AuditLog.session_id == session_id.strip())
+    if usn and usn.strip():
+        filters.append(AuditLog.usn == usn.strip().upper())
+    if start_date and start_date.strip():
+        filters.append(AuditLog.timestamp >= f"{start_date.strip()}T00:00:00Z")
+    if end_date and end_date.strip():
+        filters.append(AuditLog.timestamp <= f"{end_date.strip()}T23:59:59Z")
+
+    if isinstance(target, Session):
+        table = AuditLog.__table__
+        columns = [
+            table.c.log_id,
+            table.c.actor_id,
+            table.c.action,
+            table.c.session_id,
+            table.c.usn,
+            table.c.entity_type,
+            table.c.entity_id,
+            table.c.old_value,
+            table.c.new_value,
+            table.c.reason,
+            table.c.timestamp,
+        ]
+        if supports_role:
+            columns.insert(2, table.c.actor_role)
+
+        count_stmt = select(func.count(table.c.log_id))
+        if filters:
+            count_stmt = count_stmt.where(and_(*filters))
+        total = target.scalar(count_stmt) or 0
+
+        stmt = select(*columns)
+        if filters:
+            stmt = stmt.where(and_(*filters))
+        stmt = (
+            stmt.order_by(table.c.timestamp.desc(), table.c.log_id.desc())
+            .limit(limit_val)
+            .offset(offset_val)
+        )
+        rows = target.execute(stmt).mappings().all()
+        return [_audit_row_to_dict(row) for row in rows], total
+
+    where_clauses: List[str] = []
+    params: List[Any] = []
+    if actor_id and actor_id.strip():
+        where_clauses.append("actor_id = ?")
+        params.append(actor_id.strip())
+    if actor_role and actor_role.strip() and supports_role:
+        where_clauses.append("UPPER(actor_role) = ?")
+        params.append(actor_role.strip().upper())
+    if action and action.strip():
+        where_clauses.append("action = ?")
+        params.append(action.strip().upper())
+    if session_id and session_id.strip():
+        where_clauses.append("session_id = ?")
+        params.append(session_id.strip())
+    if usn and usn.strip():
+        where_clauses.append("usn = ?")
+        params.append(usn.strip().upper())
+    if start_date and start_date.strip():
+        where_clauses.append("timestamp >= ?")
+        params.append(f"{start_date.strip()}T00:00:00Z")
+    if end_date and end_date.strip():
+        where_clauses.append("timestamp <= ?")
+        params.append(f"{end_date.strip()}T23:59:59Z")
+
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+    select_columns = (
+        "log_id, actor_id, actor_role, action, session_id, usn, entity_type, "
+        "entity_id, old_value, new_value, reason, timestamp"
+        if supports_role
+        else (
+            "log_id, actor_id, action, session_id, usn, entity_type, "
+            "entity_id, old_value, new_value, reason, timestamp"
+        )
+    )
+    with _get_conn(target) as conn:
+        count_cursor = conn.execute(f"SELECT COUNT(*) FROM audit_log {where_sql}", params)
+        total = count_cursor.fetchone()[0]
+        data_query = (
+            f"SELECT {select_columns} FROM audit_log {where_sql} "
+            "ORDER BY timestamp DESC, log_id DESC LIMIT ? OFFSET ?"
+        )
+        data_params = params + [limit_val, offset_val]
+        data_cursor = conn.execute(data_query, data_params)
+        return [_audit_row_to_dict(r) for r in data_cursor.fetchall()], total
+
+
+def _audit_row_to_dict(row: Any) -> Dict[str, Any]:
+    """Normalize an audit row into the public read contract."""
+    if row is None:
+        return {}
+    if isinstance(row, dict):
+        data = dict(row)
+    elif isinstance(row, sqlite3.Row):
+        data = dict(row)
+    elif isinstance(row, AuditLog):
+        data = {
+            "log_id": row.log_id,
+            "actor_id": row.actor_id,
+            "actor_role": row.actor_role,
+            "action": row.action,
+            "session_id": row.session_id,
+            "usn": row.usn,
+            "entity_type": row.entity_type,
+            "entity_id": row.entity_id,
+            "old_value": row.old_value,
+            "new_value": row.new_value,
+            "reason": row.reason,
+            "timestamp": row.timestamp,
+        }
+    elif hasattr(row, "keys"):
+        # SQLAlchemy RowMapping and other mapping-like rows.
+        data = {key: row[key] for key in row.keys()}
+    else:
+        data = {
+            "log_id": row[0],
+            "actor_id": row[1],
+            "actor_role": row[2],
+            "action": row[3],
+            "session_id": row[4],
+            "usn": row[5],
+            "entity_type": row[6],
+            "entity_id": row[7],
+            "old_value": row[8],
+            "new_value": row[9],
+            "reason": row[10],
+            "timestamp": row[11],
+        }
+    return {
+        "id": data.get("log_id"),
+        "log_id": data.get("log_id"),
+        "actor_id": data.get("actor_id"),
+        "actor_role": data.get("actor_role"),
+        "event_type": data.get("action"),
+        "action": data.get("action"),
+        "session_id": data.get("session_id"),
+        "usn": data.get("usn"),
+        "entity_type": data.get("entity_type"),
+        "entity_id": data.get("entity_id"),
+        "old_status": data.get("old_value"),
+        "new_status": data.get("new_value"),
+        "old_value": data.get("old_value"),
+        "new_value": data.get("new_value"),
+        "reason": data.get("reason"),
+        "timestamp": data.get("timestamp"),
     }
 
 
@@ -2372,9 +2808,12 @@ def apply_attendance_edit_atomic(
     if role == "ADMIN":
         pass  # College-wide edit privilege
     elif role == "FACULTY":
-        # Check teacher assigned subjects
+        # Authorization mirrors the shared session policy: the owner, the
+        # coordinator, or a teacher mapped to the session's subject code.
         subj_code = sess.subject_code or sess.subject
         teacher_assigned = (sess.teacher_id == clean_uid)
+        if not teacher_assigned and sess.coordinator_faculty_id == clean_uid:
+            teacher_assigned = True
         if not teacher_assigned and subj_code:
             stmt = select(TeacherSubject).where(
                 TeacherSubject.user_id == clean_uid,
@@ -2424,9 +2863,13 @@ def apply_attendance_edit_atomic(
     if res_edit.rowcount == 0:
         raise ValueError(f"Pending edit '{clean_eid}' was concurrently consumed.")
 
-    # Step 8: Insert audit log entry in the same transaction
-    audit = AuditLog(
+    # Step 8: Insert audit log entry in the same transaction.
+    # Uses the shared append-only audit helper so the actor role is recorded
+    # and databases without migration 0014 keep working.
+    audit = create_audit_entry(
+        session,
         actor_id=clean_uid,
+        actor_role=role,
         action="ATTENDANCE_EDIT",
         session_id=edit.session_id,
         usn=edit.usn,
@@ -2437,8 +2880,6 @@ def apply_attendance_edit_atomic(
         reason=reason.strip() if reason else None,
         timestamp=now_ts,
     )
-    session.add(audit)
-    session.flush()
 
     return {
         "edit_id": clean_eid,
@@ -2447,7 +2888,7 @@ def apply_attendance_edit_atomic(
         "old_status": edit.old_status,
         "new_status": edit.new_status,
         "consumed": 1,
-        "audit_log_id": audit.log_id,
+        "audit_log_id": audit.get("log_id"),
         "timestamp": now_ts,
     }
 

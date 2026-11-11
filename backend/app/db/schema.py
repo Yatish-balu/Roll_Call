@@ -52,6 +52,48 @@ CREATE INDEX IF NOT EXISTS idx_attendance_session ON attendance(session_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_usn ON attendance(usn);
 CREATE INDEX IF NOT EXISTS idx_attendance_room ON attendance(room_id);
 CREATE INDEX IF NOT EXISTS idx_attendance_allocation ON attendance(allocation_id);
+
+-- Audit infrastructure (mirrors migration 0002). Required so that every
+-- attendance write path - including the raw SQLite/legacy UI path - can
+-- record an append-only audit entry for the change it performs.
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    email TEXT NOT NULL UNIQUE,
+    role TEXT NOT NULL,
+    hashed_password TEXT,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+    log_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actor_id TEXT NOT NULL,
+    actor_role TEXT,
+    action TEXT NOT NULL,
+    session_id TEXT,
+    usn TEXT,
+    entity_type TEXT NOT NULL,
+    entity_id TEXT NOT NULL,
+    old_value TEXT,
+    new_value TEXT,
+    reason TEXT,
+    timestamp TEXT NOT NULL,
+    FOREIGN KEY (actor_id) REFERENCES users(user_id) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS idx_audit_log_actor_ts ON audit_log (actor_id, timestamp);
+
+-- Append-only protection for the audit log (mirrors migration 0002).
+CREATE TRIGGER IF NOT EXISTS trg_audit_log_no_update
+BEFORE UPDATE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: updates forbidden');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_audit_log_no_delete
+BEFORE DELETE ON audit_log
+BEGIN
+    SELECT RAISE(ABORT, 'audit_log is append-only: deletions forbidden');
+END;
 """
 
 

@@ -11,7 +11,10 @@ import { FacultyView } from "@/features/faculty";
 import { RoomsView } from "@/features/rooms";
 import { ReportsView } from "@/features/reports";
 import { AssistantView } from "@/features/assistant";
+import { AuditLogView } from "@/features/audit";
 import { SettingsView } from "@/features/settings";
+import { DefaultersView } from "@/features/defaulters";
+import { CalendarView } from "@/features/calendar";
 
 export function App() {
   return (
@@ -67,6 +70,16 @@ export function App() {
             }
           />
           <Route
+            path="/calendar"
+            element={
+              <AppShell title="Attendance Calendar">
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Calendar & Heatmap">
+                  <CalendarView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
             path="/sessions"
             element={
               <AppShell title="Sessions">
@@ -97,6 +110,16 @@ export function App() {
             }
           />
           <Route
+            path="/defaulters"
+            element={
+              <AppShell title="Defaulter Registry">
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Defaulters">
+                  <DefaultersView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
             path="/reports"
             element={
               <AppShell title="Reports & Analytics">
@@ -112,6 +135,16 @@ export function App() {
               <AppShell title="AI Assistant">
                 <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="AI Assistant">
                   <AssistantView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/audit"
+            element={
+              <AppShell title="Audit Logs">
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="System Audit Logs">
+                  <AuditLogView />
                 </ProtectedRoute>
               </AppShell>
             }

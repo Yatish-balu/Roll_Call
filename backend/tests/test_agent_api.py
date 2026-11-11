@@ -151,8 +151,13 @@ def test_process_file_photo_success(seeded_client):
     fake_result = PhotoExtractionResult(image_path="sheet.png", rows=fake_rows, source=ExtractionSource.LLM)
 
     with patch("app.agent.read_photo_tool", return_value=fake_result):
-        # A minimal 1x1 valid PNG image
-        png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        # A minimal but *valid* 1x1 PNG image (the upload endpoint rejects
+        # malformed images, so the fixture must be decodable).
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
+            b"\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe"
+            b"\x02\xfe\r\xefF\xb8\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
         files = {"file": ("sheet.png", io.BytesIO(png_bytes), "image/png")}
         data = {"session_id": "SESS-001", "default_room": "LH-101"}
 
@@ -188,7 +193,12 @@ def test_process_file_low_confidence_triggers_confirmation(seeded_client):
     fake_result = PhotoExtractionResult(image_path="sheet.png", rows=fake_rows, source=ExtractionSource.LLM)
 
     with patch("app.agent.read_photo_tool", return_value=fake_result):
-        png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15c4\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xb4\x00\x00\x00\x00IEND\xaeB`\x82"
+        # A minimal but *valid* 1x1 PNG image.
+        png_bytes = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
+            b"\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe"
+            b"\x02\xfe\r\xefF\xb8\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
         files = {"file": ("sheet.png", io.BytesIO(png_bytes), "image/png")}
         res = seeded_client.post("/api/v1/agent/process-file", files=files)
         assert res.status_code == 200

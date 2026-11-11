@@ -5,7 +5,10 @@ import { checkBackendHealth } from "@/services/api/health";
 import { apiClient } from "@/services/api/client";
 
 interface MetaConfig {
-  edit_lock_hours: number;
+  // Attendance editing is unlimited: the backend never applies a time-based
+  // editing lock (N5). The deprecated `edit_lock_hours` field is no longer
+  // consumed by the UI.
+  unlimited_attendance_editing: boolean;
   defaulter_threshold_percent: number;
   attendance_bands: {
     green_above_percent: number;
@@ -191,12 +194,13 @@ export function SettingsView() {
           </div>
 
           <div className="p-4 rounded-xl bg-white border border-[#E4DDCA] space-y-1.5">
-            <span className="font-bold text-[#77735F]">Roster Edit-Lock Window</span>
+            <span className="font-bold text-[#77735F]">Roster Editing Window</span>
             <p className="text-2xl font-black text-[#24251C]">
-              {metaConfig ? `${metaConfig.edit_lock_hours} Hours` : "24 Hours"}
+              {metaConfig ? (metaConfig.unlimited_attendance_editing ? "Unlimited" : "Restricted") : "Unlimited"}
             </p>
             <p className="text-[11px] text-[#77735F]">
-              Faculty edits are locked after 24 hours to prevent unauthorized attendance tampering.
+              Authorized faculty may edit attendance at any time, including completed and historical
+              sessions. Every change is recorded server-side with the actor, role and previous status.
             </p>
           </div>
 

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import logging
 from typing import Any, Dict, List, Optional
-
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.auth import Role, get_current_user, require_roles
+from app.auth.session_scope import resolve_data_scope
 from app.db import crud
 from app.dependencies import get_db
+from app.security.context import get_request_id
+from app.security.decoys import probe_decoy
+from app.security.detection import detector
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.student import (
     StudentBulkCreate,
@@ -25,11 +28,29 @@ logger = logging.getLogger("rollcall.routers.students")
 router = APIRouter(prefix="/students", tags=["Students"])
 
 
+def _client_ip(request: Optional[Request]) -> Optional[str]:
+    """Best-effort client address (never a credential)."""
+    if request is None:
+        return None
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    if request.client and request.client.host:
+        return request.client.host
+    return None
+
+
 @router.get(
     "",
     response_model=StudentPageResponse,
-    summary="List all students",
-    description="Retrieve paginated student master records ordered by USN, with optional branch filtering and search.",
+    summary="List students visible to the caller",
+    description=(
+        "Retrieve paginated student master records ordered by USN, with optional branch "
+        "filtering and search. The list is restricted to the caller's authorization scope: "
+        "ADMIN sees the institution, every other role only the students supported by their "
+        "visible sessions or their mapped subject departments. The scope is applied before "
+        "counting and pagination, so totals and pages cannot reveal other students."
+    ),
 )
 def list_students(
     branch: Optional[str] = Query(None, description="Optional branch code filter (e.g. CSE, ECE)"),
@@ -39,8 +60,14 @@ def list_students(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
+    scope = resolve_data_scope(db, current_user)
     items, total = crud.get_students_paginated(
-        db, branch=branch, search=search, limit=limit, offset=offset
+        db,
+        branch=branch,
+        search=search,
+        limit=limit,
+        offset=offset,
+        scope_condition=scope.student_condition(),
     )
     return {
         "items": items,
@@ -54,17 +81,53 @@ def list_students(
     "/{usn}",
     response_model=StudentResponse,
     summary="Get student by USN",
-    description="Retrieve a single student record by their Unique Student Number.",
+    description=(
+        "Retrieve a single student record by their Unique Student Number. Students outside "
+        "the caller's authorization scope are reported as not found, so the endpoint never "
+        "confirms the existence of a student the caller may not see."
+    ),
     responses={
-        404: {"description": "Student not found"},
+        404: {"description": "Student not found or not visible to the caller"},
     },
 )
 def get_student_by_usn(
     usn: str,
+    request: Request = None,
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     clean_usn = usn.strip().upper()
+    scope = resolve_data_scope(db, current_user)
+
+    # Honeypot probe: a decoy identifier produces a security event and the
+    # same "not found" answer as a genuinely unknown student.
+    if probe_decoy(
+        db,
+        clean_usn,
+        actor_id=current_user.user_id,
+        ip_address=_client_ip(request),
+        request_id=get_request_id(),
+        path="/students",
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{clean_usn}' not found.",
+        )
+
+    # Student-data enumeration detection (never blocks a single lookup).
+    detector.record_student_lookup(
+        actor_id=current_user.user_id,
+        usn=clean_usn,
+        ip_address=_client_ip(request),
+        request_id=get_request_id(),
+    )
+
+    if not scope.is_student_visible(db, clean_usn):
+        # Same response as an unknown student: no existence disclosure.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{clean_usn}' not found.",
+        )
     student = crud.get_student(db, usn=clean_usn)
     if not student:
         raise HTTPException(

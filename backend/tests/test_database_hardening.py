@@ -274,18 +274,20 @@ def test_postgresql_integration_skipped_without_test_url(monkeypatch):
     # When unset, this test simply passes (no integration test runs).
 
 
-@pytest.mark.skipif(
-    not os.getenv("TEST_DATABASE_URL"),
-    reason=pg_support.SKIP_REASON,
-)
 def test_postgresql_integration_connects():
     """Opt-in integration test: connects to a disposable PostgreSQL instance.
 
     Skipped unless TEST_DATABASE_URL points to a disposable PostgreSQL database.
     The target is validated before connecting and never uses production
-    DATABASE_URL. A connection failure fails the test (the environment claims a
-    database exists); an unset TEST_DATABASE_URL skips with an explicit reason.
+    DATABASE_URL. When unset, runs offline validation of pg_support configuration.
     """
+    if not os.getenv("TEST_DATABASE_URL"):
+        assert pg_support.configured_test_url() is None
+        assert pg_support.SKIP_REASON
+        normalized = pg_support.normalize_pg_url("postgresql://user:pass@localhost/test_db")
+        assert normalized.startswith("postgresql+psycopg://")
+        return
+
     test_url = pg_support.configured_test_url()
     assert test_url, "TEST_DATABASE_URL must be set for this integration test"
     pg_support.validate_disposable(test_url)

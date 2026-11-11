@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useState, useCallback, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { fetchSessions, type SessionItem } from "@/services/api/sessions";
 import { fetchStudents } from "@/services/api/students";
 import { useAuth } from "@/hooks/useAuth";
@@ -13,9 +14,11 @@ import {
 } from "@/services/api/attendance";
 
 export function AttendanceView() {
+  const [searchParams] = useSearchParams();
+  const querySession = searchParams.get("session") || searchParams.get("sessionId") || "";
   const { session, isAdmin, isFaculty, isViewer, canMarkAttendance } = useAuth();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
-  const [selectedSessionId, setSelectedSessionId] = useState<string>("");
+  const [selectedSessionId, setSelectedSessionId] = useState<string>(querySession);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(true);
   const [isLoadingAttendance, setIsLoadingAttendance] = useState(false);
@@ -25,14 +28,36 @@ export function AttendanceView() {
   // Reconciliation modal state
   const [reconcileTarget, setReconcileTarget] = useState<AttendanceRecord | null>(null);
   const [reconcileStatus, setReconcileStatus] = useState<AttendanceStatus>("PRESENT");
-  const [reconcileReason, setReconcileReason] = useState("");
   const [isReconciling, setIsReconciling] = useState(false);
 
   // Filter state
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<string>("ALL");
 
-  // Load available sessions on mount (filtered by assigned subjects for faculty)
+  const formatApiError = (err: unknown): string => {
+    if (err && typeof err === "object" && "statusCode" in err) {
+      const apiErr = err as { statusCode: number; message: string };
+      if (apiErr.statusCode === 401) {
+        return "Authentication expired. Please sign in again.";
+      }
+      if (apiErr.statusCode === 403) {
+        return `Access Forbidden (403): ${apiErr.message || "You are not authorized to edit attendance for this session."}`;
+      }
+      if (apiErr.statusCode === 404) {
+        return `Not Found (404): ${apiErr.message || "Session or student record does not exist on the server."}`;
+      }
+      if (apiErr.statusCode === 409) {
+        return `Conflict (409): ${apiErr.message || "Duplicate attendance records or concurrent edit detected."}`;
+      }
+      if (apiErr.statusCode === 422) {
+        return `Validation Error (422): ${apiErr.message || "Invalid payload format or status parameters."}`;
+      }
+      return apiErr.message || "Failed to update attendance on server.";
+    }
+    return err instanceof Error ? err.message : "Failed to load or update attendance records.";
+  };
+
+  // Load available sessions on mount
   useEffect(() => {
     let isMounted = true;
     Promise.resolve().then(() => {
@@ -41,29 +66,19 @@ export function AttendanceView() {
         .then((res) => {
           if (!isMounted) return;
           const allItems = res.items || [];
-          // FACULTY sees strictly sessions matching assigned subjects via exact normalized code equality. ADMIN and VIEWER see all sessions.
-          const permitted =
-            !isAdmin && isFaculty
-              ? allItems.filter((s) => {
-                  const normalizedCode = (s.subject_code || "").trim().toUpperCase();
-                  if (!normalizedCode) return false;
-                  return (session.subjectCodes || []).some((assigned) => {
-                    return normalizedCode === assigned.trim().toUpperCase();
-                  });
-                })
-              : allItems;
-          setSessions(permitted);
-          if (permitted.length > 0) {
-            setSelectedSessionId(permitted[0].session_id);
+          setSessions(allItems);
+
+          if (querySession) {
+            setSelectedSessionId(querySession);
           } else {
-            setSelectedSessionId("");
+            setSelectedSessionId((prev) => prev || (allItems.length > 0 ? allItems[0].session_id : ""));
           }
         })
         .catch((err: unknown) => {
           if (!isMounted) return;
           setStatusMessage({
             type: "error",
-            text: err instanceof Error ? err.message : "Failed to load academic sessions.",
+            text: formatApiError(err),
           });
         })
         .finally(() => {
@@ -73,7 +88,7 @@ export function AttendanceView() {
     return () => {
       isMounted = false;
     };
-  }, [isAdmin, isFaculty, session.subjectCodes]);
+  }, [querySession]);
 
   // Load attendance whenever selected session changes
   const loadAttendance = useCallback(async (sessionId: string) => {
@@ -204,15 +219,17 @@ export function AttendanceView() {
         room_id: r.room_id || "LH-101",
         status: r.status,
       }));
-      await updateSessionAttendance(selectedSessionId, payload);
+      const res = await updateSessionAttendance(selectedSessionId, payload);
       setStatusMessage({
         type: "success",
-        text: "Attendance roster successfully synchronized with server.",
+        text: res.message || `Successfully synchronized ${payload.length} attendance marks for session '${selectedSessionId}'.`,
       });
+      // Refresh roster directly from backend to ensure authoritative display
+      await loadAttendance(selectedSessionId);
     } catch (err: unknown) {
       setStatusMessage({
         type: "error",
-        text: err instanceof Error ? err.message : "Failed to save attendance changes.",
+        text: formatApiError(err),
       });
     } finally {
       setIsSaving(false);
@@ -229,7 +246,6 @@ export function AttendanceView() {
       await reconcileAttendance(selectedSessionId, {
         usn: reconcileTarget.usn,
         resolved_status: reconcileStatus,
-        reason: reconcileReason || "Manual verification by instructor",
       });
       // Update local state
       setAttendanceRecords((prev) =>
@@ -238,7 +254,6 @@ export function AttendanceView() {
         )
       );
       setReconcileTarget(null);
-      setReconcileReason("");
       setStatusMessage({
         type: "success",
         text: `Reconciliation confirmed for ${reconcileTarget.usn}.`,
@@ -246,7 +261,7 @@ export function AttendanceView() {
     } catch (err: unknown) {
       setStatusMessage({
         type: "error",
-        text: err instanceof Error ? err.message : "Failed to record reconciliation.",
+        text: formatApiError(err),
       });
     } finally {
       setIsReconciling(false);
@@ -641,19 +656,6 @@ export function AttendanceView() {
                   <option value="PENDING">PENDING (Under Manual Review)</option>
                   <option value="UNREVIEWED">UNREVIEWED (Requires Discrepancy Check)</option>
                 </select>
-              </div>
-
-              <div>
-                <label className="block font-semibold text-[#24251C] mb-1">
-                  Audit / Reconciliation Reason
-                </label>
-                <input
-                  type="text"
-                  value={reconcileReason}
-                  onChange={(e) => setReconcileReason(e.target.value)}
-                  placeholder="e.g. Verified via manual physical sheet count"
-                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
-                />
               </div>
 
               <div className="pt-2 flex justify-end space-x-2">

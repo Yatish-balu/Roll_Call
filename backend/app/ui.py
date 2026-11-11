@@ -41,6 +41,15 @@ from app.db import (
 )
 from tools.summary_tool import summary_tool, SummaryReport
 from tools.export_tool import export_to_excel, export_to_pdf
+from app.services.attendance_edits import (
+    SYSTEM_ACTOR_ROLE,
+    AttendanceChange,
+    actor_exists,
+    actor_identity,
+    capture_attendance_statuses,
+    ensure_system_actor,
+    write_attendance_audit,
+)
 
 
 # ==============================================================================
@@ -172,9 +181,17 @@ def commit_session_to_database(
     records: List[Dict[str, Any]],
     date: str = "2026-10-25",
     subject: str = "RollCall Attendance",
+    actor_id: Optional[str] = None,
+    actor_role: Optional[str] = None,
 ) -> Tuple[bool, str]:
     """
     Write confirmed attendance records into SQLite database with full transaction integrity.
+
+    The commit goes through the same audit service as the direct API, so every
+    successful modification is recorded in the append-only audit log. The actor
+    identity and role come from the verified authentication context when the
+    caller has one; a write without an authenticated caller is recorded against
+    the non-privileged system principal instead of being left unaudited.
     """
     if not records:
         return False, "No records to commit."
@@ -200,9 +217,43 @@ def commit_session_to_database(
                 "confidence": float(r.get("confidence", 1.0)),
             })
         try:
+            # Previous status per student, so the audit records old -> new.
+            previous_statuses = capture_attendance_statuses(
+                conn, session_id, [r["usn"] for r in formatted_records]
+            )
             rows_affected = replace_session_attendance(conn, session_id=session_id, records=formatted_records)
+
+            # Same audit path as the API: one append-only record per student.
+            if actor_id:
+                if not actor_exists(conn, actor_id):
+                    conn.rollback()
+                    return False, (
+                        f"Unknown acting user '{actor_id}'. The audit log can only "
+                        "record an existing user identity."
+                    )
+                audit_actor, audit_role = actor_id, (actor_role or "").strip().upper() or "SYSTEM"
+            else:
+                audit_actor = ensure_system_actor(conn)
+                audit_role = SYSTEM_ACTOR_ROLE
+            write_attendance_audit(
+                conn,
+                actor_id=audit_actor,
+                actor_role=audit_role,
+                session_id=session_id,
+                action="ATTENDANCE_UI_COMMIT",
+                changes=[
+                    AttendanceChange(
+                        usn=r["usn"],
+                        old_status=previous_statuses.get(r["usn"]),
+                        new_status=r["status"],
+                    )
+                    for r in formatted_records
+                ],
+            )
+            conn.commit()
             return True, f"Successfully committed {rows_affected} records for session '{session_id}'."
         except Exception as exc:
+            conn.rollback()
             return False, f"Failed to commit attendance: {exc}"
     finally:
         conn.close()

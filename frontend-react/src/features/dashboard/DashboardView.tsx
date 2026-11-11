@@ -7,6 +7,8 @@ import { TodaysClasses } from "./components/TodaysClasses";
 import { AiAssistantCard } from "./components/AiAssistantCard";
 import { RecentSessionsTable } from "./components/RecentSessionsTable";
 import { TodaysSummary } from "./components/TodaysSummary";
+import { InstitutionalBreakdownTables } from "./components/InstitutionalBreakdownTables";
+import { FacultyUploadActivityTable } from "./components/FacultyUploadActivityTable";
 
 export function DashboardView() {
   const [data, setData] = useState<DashboardData | null>(null);
@@ -116,6 +118,19 @@ export function DashboardView() {
           />
         </div>
       </div>
+
+      {/* Row 4: Institutional KPIs, Branch Breakdown, and Room Breakdown (N8 - F5) */}
+      <InstitutionalBreakdownTables
+        overviewReport={data?.overallAnalytics ?? null}
+        isLoading={isLoading}
+      />
+
+      {/* Row 5: Faculty Session Generation & Upload Activity Table (N8 - F5) */}
+      <FacultyUploadActivityTable
+        sessions={data?.sessions?.items ?? []}
+        teacherMappings={data?.teacherMappings ?? null}
+        isLoading={isLoading}
+      />
     </div>
   );
 }

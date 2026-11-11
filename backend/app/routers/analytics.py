@@ -29,7 +29,7 @@ def _validate_iso_date(date_str: str) -> str:
         datetime.date.fromisoformat(cleaned)
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Invalid ISO date '{date_str}'. Expected valid calendar date in YYYY-MM-DD format.",
         )
     return cleaned

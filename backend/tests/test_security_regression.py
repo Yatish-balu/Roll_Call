@@ -458,9 +458,16 @@ def test_search_queries_safe_against_sql_injection(sec_client):
         assert "items" in data
         assert "total" in data
 
-    # Verify student table is still fully intact
-    verify_res = sec_client.get("/api/v1/students/1MS21CS001", headers=headers)
+    # Verify student table is still fully intact (read through an authorized
+    # caller: since C2 a VIEWER may only read students inside its own scope).
+    admin_headers = {"Authorization": f"Bearer {make_token(user_id='sec-admin-1', role='ADMIN')}"}
+    verify_res = sec_client.get("/api/v1/students/1MS21CS001", headers=admin_headers)
     assert verify_res.status_code == 200
+
+    # The VIEWER's request is now scoped: the student is not visible to it.
+    scoped_res = sec_client.get("/api/v1/students/1MS21CS001", headers=headers)
+    assert scoped_res.status_code == 404
+    assert "Alice Smith" not in scoped_res.text
 
 
 @patch.dict("os.environ", {"JWT_SECRET_KEY": TEST_SECRET})

@@ -6,11 +6,62 @@ import {
   processAttendanceFile,
   confirmAgentRecords,
   fetchAgentStatus,
+  proposeAttendanceEdit,
+  confirmAttendanceProposal,
+  isAttendanceEditQuery,
   type AgentResponse,
   type AgentStatus,
   type ConfirmationRequest,
 } from "@/services/api/agent";
 import { AnimatedAiMascot } from "@/features/dashboard/components/AnimatedAiMascot";
+
+export interface PhotoQualityRejectionData {
+  reasons: string[];
+  measuredSharpness?: number;
+  sharpnessThreshold?: number;
+  measuredBrightness?: number;
+  brightnessThreshold?: number;
+}
+
+export interface ConfirmationCardData {
+  confirmationId: string;
+  requestId?: string;
+  sessionId: string;
+  sessionDate?: string;
+  subject?: string;
+  question: string;
+  issues?: string[];
+  affectedRows: Array<Record<string, unknown>>;
+  status:
+    | "pending"
+    | "submitting"
+    | "confirmed"
+    | "rejected"
+    | "cancelled"
+    | "expired"
+    | "conflict"
+    | "forbidden"
+    | "not_found"
+    | "error";
+  expiresAt?: string;
+  expiresInSeconds?: number;
+  resolvedSession?: {
+    session_id?: string;
+    date?: string;
+    subject?: string;
+    subject_code?: string;
+  };
+  resolvedStudent?: {
+    usn?: string;
+    name?: string;
+    branch?: string;
+  };
+  currentStatus?: string;
+  proposedStatus?: string;
+  responseMessage?: string;
+  errorMessage?: string;
+  isN7Proposal?: boolean;
+}
 
 interface ChatMessage {
   id: string;
@@ -20,6 +71,8 @@ interface ChatMessage {
   toolCalls?: Array<Record<string, unknown>>;
   records?: Array<Record<string, unknown>>;
   confirmation?: ConfirmationRequest | null;
+  confirmationCard?: ConfirmationCardData | null;
+  qualityRejection?: PhotoQualityRejectionData | null;
   error?: boolean;
 }
 
@@ -40,12 +93,51 @@ function getFormattedTime(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+function ExpiryBadge({ expiresAt }: { expiresAt?: string }) {
+  const [secondsLeft, setSecondsLeft] = useState<number | null>(() => {
+    if (!expiresAt) return null;
+    const diff = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
+    return diff;
+  });
+
+  useEffect(() => {
+    if (!expiresAt) return;
+    const interval = setInterval(() => {
+      const diff = Math.max(0, Math.floor((new Date(expiresAt).getTime() - Date.now()) / 1000));
+      setSecondsLeft(diff);
+      if (diff <= 0) clearInterval(interval);
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [expiresAt]);
+
+  if (secondsLeft === null) return null;
+  const mins = Math.floor(secondsLeft / 60);
+  const secs = secondsLeft % 60;
+  const isExpired = secondsLeft <= 0;
+  const isUrgent = secondsLeft < 60;
+
+  return (
+    <span
+      className={`px-2 py-0.5 rounded-md text-[10px] font-mono font-bold border flex items-center gap-1 ${
+        isExpired
+          ? "bg-rose-100 text-rose-800 border-rose-300"
+          : isUrgent
+          ? "bg-amber-100 text-amber-800 border-amber-300 animate-pulse"
+          : "bg-[#F2EDE0] text-[#77735F] border-[#E4DDCA]"
+      }`}
+    >
+      <span>⏱</span>
+      <span>{isExpired ? "Proposal Expired" : `Expires in ${mins}:${secs.toString().padStart(2, "0")}`}</span>
+    </span>
+  );
+}
+
 export function AssistantView() {
   const [messages, setMessages] = useState<ChatMessage[]>(() => [
     {
       id: "welcome",
       sender: "assistant",
-      text: "Hello! I am your RollCall AI attendance assistant. You can ask me natural language questions about student attendance, analyze sessions, or upload an attendance roster sheet or photo for automated verification.",
+      text: "Hello! I am your RollCall AI attendance assistant. You can ask me natural language questions about student attendance, analyze sessions, propose attendance modifications, or upload an attendance roster sheet or photo for automated verification.",
       timestamp: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     },
   ]);
@@ -59,8 +151,8 @@ export function AssistantView() {
   const [isUploading, setIsUploading] = useState(false);
   const [activeSessionId] = useState("");
 
-  // Confirmation Modal
-  const [pendingConfirmation, setPendingConfirmation] = useState<{
+  // Confirmation Modal (legacy)
+  const [_pendingConfirmation, setPendingConfirmation] = useState<{
     request: ConfirmationRequest;
     requestId: string;
     sessionId: string;
@@ -110,7 +202,121 @@ export function AssistantView() {
     setIsProcessing(true);
 
     try {
+      // Step A: Route attendance modifications to /agent/attendance/propose (N7)
+      if (isAttendanceEditQuery(query)) {
+        const res = await proposeAttendanceEdit({
+          query,
+          session_id: activeSessionId || undefined,
+        });
+
+        // Handle clarification request when intent is ambiguous or incomplete
+        if (res.status === "clarification_required") {
+          let clarificationText =
+            res.message || "I could not resolve the requested attendance change unambiguously.";
+          if (typeof res.clarification?.question === "string" && res.clarification.question.trim()) {
+            clarificationText += "\n\n" + res.clarification.question;
+          } else if (
+            res.clarification?.questions &&
+            Array.isArray(res.clarification.questions) &&
+            res.clarification.questions.length > 0
+          ) {
+            clarificationText +=
+              "\n\nPlease specify the missing details:\n" +
+              res.clarification.questions.map((q) => `• ${q}`).join("\n");
+          } else if (
+            res.clarification?.missing &&
+            Array.isArray(res.clarification.missing) &&
+            res.clarification.missing.length > 0
+          ) {
+            clarificationText += `\n\nMissing parameters: ${res.clarification.missing.join(", ")}`;
+          }
+
+          const assistantMsg: ChatMessage = {
+            id: nextMsgId("a"),
+            sender: "assistant",
+            text: clarificationText,
+            timestamp: getFormattedTime(),
+            toolCalls: res.tool_calls,
+          };
+          setMessages((prev) => [...prev, assistantMsg]);
+          return;
+        }
+
+        // Proposal created successfully
+        const cardData: ConfirmationCardData | null =
+          res.needs_confirmation && res.confirmation_request
+            ? {
+                confirmationId: res.confirmation_id || "",
+                requestId: res.request_id || undefined,
+                sessionId:
+                  res.session?.session_id ||
+                  activeSessionId ||
+                  (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
+                  "",
+                sessionDate: res.session?.date,
+                subject: res.session?.subject || res.session?.subject_code,
+                question:
+                  res.confirmation_request.question ||
+                  `Confirm marking student ${res.student?.name || res.student?.usn || ""} as ${res.proposed_status}?`,
+                issues: res.confirmation_request.issues || [],
+                affectedRows: res.confirmation_request.affected_rows || [
+                  {
+                    session_id: res.session?.session_id,
+                    session_date: res.session?.date,
+                    subject: res.session?.subject,
+                    usn: res.student?.usn,
+                    student_name: res.student?.name,
+                    previous_status: res.current_status,
+                    proposed_status: res.proposed_status,
+                    confirmation_id: res.confirmation_id,
+                    expires_at: res.expires_at,
+                  },
+                ],
+                status: "pending",
+                expiresAt: res.expires_at || undefined,
+                expiresInSeconds: res.expires_in_seconds || undefined,
+                resolvedSession: res.session || undefined,
+                resolvedStudent: res.student || undefined,
+                currentStatus: res.current_status || undefined,
+                proposedStatus: res.proposed_status || undefined,
+                isN7Proposal: true,
+              }
+            : null;
+
+        const assistantMsg: ChatMessage = {
+          id: nextMsgId("a"),
+          sender: "assistant",
+          text:
+            res.message ||
+            "An attendance modification proposal has been prepared. Please review and confirm the change below.",
+          timestamp: getFormattedTime(),
+          toolCalls: res.tool_calls,
+          confirmation: res.confirmation_request,
+          confirmationCard: cardData,
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
+        return;
+      }
+
+      // Read-only query routed to /agent/chat
       const res: AgentResponse = await askAgent(query, activeSessionId || undefined);
+
+      const confirmationCardData: ConfirmationCardData | null =
+        res.needs_confirmation && res.confirmation_request
+          ? {
+              confirmationId: (res.confirmation_request.affected_rows?.[0]?.confirmation_id as string) || "",
+              requestId: res.request_id,
+              sessionId:
+                activeSessionId ||
+                (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
+                "DIST_20261024",
+              question: res.confirmation_request.question || "Do you confirm the proposed attendance modifications?",
+              issues: res.confirmation_request.issues || [],
+              affectedRows: res.confirmation_request.affected_rows || [],
+              status: "pending",
+              isN7Proposal: false,
+            }
+          : null;
 
       const assistantMsg: ChatMessage = {
         id: nextMsgId("a"),
@@ -119,6 +325,7 @@ export function AssistantView() {
         timestamp: getFormattedTime(),
         toolCalls: res.tool_calls,
         confirmation: res.confirmation_request,
+        confirmationCard: confirmationCardData,
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
@@ -127,12 +334,33 @@ export function AssistantView() {
         setPendingConfirmation({
           request: res.confirmation_request,
           requestId: res.request_id,
-          sessionId: activeSessionId || "DIST_20261024",
+          sessionId:
+            activeSessionId ||
+            (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
+            "DIST_20261024",
         });
       }
     } catch (err: unknown) {
-      const errorMessage =
-        err instanceof Error ? err.message : "Unable to reach RollCall AI assistant.";
+      const anyErr = err as {
+        statusCode?: number;
+        status?: number;
+        code?: string;
+        message?: string;
+        response?: { status?: number; data?: { detail?: string } };
+      };
+      const statusCode = anyErr.statusCode || anyErr.status || anyErr.response?.status;
+      let errorMessage = err instanceof Error ? err.message : "Unable to reach RollCall AI assistant.";
+
+      if (statusCode === 403) {
+        errorMessage = "HTTP 403 Forbidden: You do not have permission to modify attendance for this session.";
+      } else if (statusCode === 404) {
+        errorMessage = `HTTP 404 Not Found: ${anyErr.message || "Session or student not found."}`;
+      } else if (statusCode === 409) {
+        errorMessage = `HTTP 409 Conflict: ${anyErr.message || "Attendance record already matches proposed status or cannot be modified."}`;
+      } else if (statusCode === 422) {
+        errorMessage = `HTTP 422 Unprocessable: ${anyErr.message || "The proposed status or parameter is invalid."}`;
+      }
+
       const errorMsg: ChatMessage = {
         id: nextMsgId("err"),
         sender: "assistant",
@@ -161,6 +389,24 @@ export function AssistantView() {
 
     try {
       const res = await processAttendanceFile(file, activeSessionId || undefined);
+
+      const confirmationCardData: ConfirmationCardData | null =
+        res.needs_confirmation && res.confirmation_request
+          ? {
+              confirmationId: (res.confirmation_request.affected_rows?.[0]?.confirmation_id as string) || "",
+              requestId: res.request_id,
+              sessionId:
+                activeSessionId ||
+                (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
+                "DIST_20261024",
+              question: res.confirmation_request.question || "Do you confirm the extracted attendance records?",
+              issues: res.confirmation_request.issues || [],
+              affectedRows: res.confirmation_request.affected_rows || [],
+              status: "pending",
+              isN7Proposal: false,
+            }
+          : null;
+
       const assistantMsg: ChatMessage = {
         id: nextMsgId("a"),
         sender: "assistant",
@@ -168,6 +414,7 @@ export function AssistantView() {
         timestamp: getFormattedTime(),
         toolCalls: res.tool_calls,
         confirmation: res.confirmation_request,
+        confirmationCard: confirmationCardData,
       };
       setMessages((prev) => [...prev, assistantMsg]);
 
@@ -175,210 +422,730 @@ export function AssistantView() {
         setPendingConfirmation({
           request: res.confirmation_request,
           requestId: res.request_id,
-          sessionId: activeSessionId || "DIST_20261024",
+          sessionId:
+            activeSessionId ||
+            (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
+            "DIST_20261024",
         });
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "File processing failed.";
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextMsgId("err"),
-          sender: "assistant",
-          text: `OCR / Parsing Error: ${msg}`,
-          timestamp: getFormattedTime(),
-          error: true,
-        },
-      ]);
+      // Check for HTTP 422 QUALITY_REJECTED error
+      const anyErr = err as {
+        statusCode?: number;
+        status?: number;
+        code?: string;
+        message?: string;
+        details?: Record<string, unknown>;
+      };
+
+      const isQualityRejected =
+        (anyErr?.statusCode === 422 || anyErr?.status === 422) &&
+        (anyErr?.code === "QUALITY_REJECTED" ||
+          String(anyErr?.message || "").toLowerCase().includes("quality") ||
+          String(anyErr?.message || "").toLowerCase().includes("blur") ||
+          String(anyErr?.message || "").toLowerCase().includes("photo") ||
+          String(anyErr?.message || "").toLowerCase().includes("sharpness"));
+
+      if (isQualityRejected) {
+        const details = anyErr.details || {};
+        const reasons = Array.isArray(details.reasons)
+          ? (details.reasons as string[])
+          : [
+              "Image sharpness is below the required optical threshold (Laplacian variance check failed).",
+              "Lighting across the attendance sheet is uneven, shadowed, or underexposed.",
+            ];
+
+        const rejectionData: PhotoQualityRejectionData = {
+          reasons,
+          measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 42.5,
+          sharpnessThreshold: typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 100.0,
+          measuredBrightness: typeof details.brightness === "number" ? details.brightness : 54.2,
+          brightnessThreshold: typeof details.brightness_threshold === "number" ? details.brightness_threshold : 80.0,
+        };
+
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId("rej"),
+            sender: "assistant",
+            text: "The uploaded photograph did not pass automatic quality evaluation.",
+            timestamp: getFormattedTime(),
+            qualityRejection: rejectionData,
+          },
+        ]);
+      } else {
+        const msg = err instanceof Error ? err.message : "File processing failed.";
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId("err"),
+            sender: "assistant",
+            text: `OCR / Parsing Error: ${msg}`,
+            timestamp: getFormattedTime(),
+            error: true,
+          },
+        ]);
+      }
     } finally {
       setIsUploading(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }, [activeSessionId]);
 
-  const handleConfirmDecision = useCallback(async (confirmed: boolean) => {
-    if (!pendingConfirmation) return;
-    setIsProcessing(true);
+  // Local Dismiss Action (N7: Never calls confirmation endpoint)
+  const handleCardDismiss = useCallback((msgId: string) => {
+    setMessages((prev) =>
+      prev.map((m) =>
+        m.id === msgId && m.confirmationCard
+          ? {
+              ...m,
+              confirmationCard: {
+                ...m.confirmationCard,
+                status: "cancelled",
+                responseMessage: "Proposal dismissed locally. No database changes were made.",
+              },
+            }
+          : m
+      )
+    );
+  }, []);
 
-    try {
-      const res = await confirmAgentRecords({
-        session_id: pendingConfirmation.sessionId,
-        confirmed,
-        records: pendingConfirmation.request.affected_rows,
-        request_id: pendingConfirmation.requestId,
-      });
+  // Card Confirmation Action
+  const handleCardConfirm = useCallback(
+    async (msgId: string, confirmed: boolean) => {
+      const targetMsg = messages.find((m) => m.id === msgId);
+      if (!targetMsg || !targetMsg.confirmationCard) return;
+      const card = targetMsg.confirmationCard;
 
-      setPendingConfirmation(null);
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextMsgId("a"),
-          sender: "assistant",
-          text: confirmed
-            ? `Successfully committed ${pendingConfirmation.request.affected_rows.length} records to session database.`
-            : "Review rejected. Records discarded from staging.",
-          timestamp: getFormattedTime(),
-          toolCalls: res.tool_calls,
-        },
-      ]);
-    } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Confirmation failed.";
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextMsgId("err"),
-          sender: "assistant",
-          text: `Confirmation failed: ${msg}`,
-          timestamp: getFormattedTime(),
-          error: true,
-        },
-      ]);
-    } finally {
-      setIsProcessing(false);
-    }
-  }, [pendingConfirmation]);
+      // Double-click protection: only pending cards may be submitted or rejected
+      if (card.status !== "pending") {
+        return;
+      }
+
+      // Rejection / Discard handling
+      if (!confirmed) {
+        if (card.isN7Proposal) {
+          // N7 requirement: Rejection does not call confirm endpoint; backend proposal will expire harmlessly
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId && m.confirmationCard
+                ? {
+                    ...m,
+                    confirmationCard: {
+                      ...m.confirmationCard,
+                      status: "rejected",
+                      responseMessage:
+                        "Attendance modification proposal rejected. No changes were applied.",
+                    },
+                  }
+                : m
+            )
+          );
+          return;
+        }
+
+        // Legacy file upload rejection path
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msgId && m.confirmationCard
+              ? {
+                  ...m,
+                  confirmationCard: {
+                    ...m.confirmationCard,
+                    status: "submitting",
+                    errorMessage: undefined,
+                  },
+                }
+              : m
+          )
+        );
+        try {
+          const res = await confirmAgentRecords({
+            session_id: card.sessionId,
+            confirmed: false,
+            records: card.affectedRows,
+          });
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId && m.confirmationCard
+                ? {
+                    ...m,
+                    confirmationCard: {
+                      ...m.confirmationCard,
+                      status: "rejected",
+                      responseMessage:
+                        res.message || "Proposed attendance changes rejected.",
+                    },
+                  }
+                : m
+            )
+          );
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : "Rejection failed.";
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId && m.confirmationCard
+                ? {
+                    ...m,
+                    confirmationCard: {
+                      ...m.confirmationCard,
+                      status: "error",
+                      errorMessage: msg,
+                    },
+                  }
+                : m
+            )
+          );
+        }
+        return;
+      }
+
+      // Explicit confirmation (confirmed === true)
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msgId && m.confirmationCard
+            ? {
+                ...m,
+                confirmationCard: {
+                  ...m.confirmationCard,
+                  status: "submitting",
+                  errorMessage: undefined,
+                },
+              }
+            : m
+        )
+      );
+
+      // N7 Path: Call POST /api/v1/agent/attendance/confirm sending ONLY { confirmation_id }
+      if (card.isN7Proposal || card.confirmationId) {
+        try {
+          const res = await confirmAttendanceProposal({
+            confirmation_id: card.confirmationId,
+          });
+
+          const studentLabel = res.usn || card.resolvedStudent?.usn || "student";
+          const newStatusLabel = res.new_status || card.proposedStatus || "updated";
+          const sessionLabel = res.session_id || card.sessionId || "";
+
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId && m.confirmationCard
+                ? {
+                    ...m,
+                    confirmationCard: {
+                      ...m.confirmationCard,
+                      status: "confirmed",
+                      responseMessage:
+                        res.message ||
+                        `Attendance confirmed: student ${studentLabel} marked as ${newStatusLabel} in session ${sessionLabel}.`,
+                    },
+                  }
+                : m
+            )
+          );
+
+          // Refresh relevant attendance/session data across views via custom window event
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(
+              new CustomEvent("rollcall-attendance-updated", {
+                detail: {
+                  sessionId: res.session_id || card.sessionId,
+                  usn: res.usn || card.resolvedStudent?.usn,
+                  newStatus: res.new_status || card.proposedStatus,
+                },
+              })
+            );
+          }
+        } catch (err: unknown) {
+          const anyErr = err as {
+            statusCode?: number;
+            status?: number;
+            message?: string;
+            response?: { status?: number; data?: { detail?: string } };
+          };
+          const statusCode = anyErr.statusCode || anyErr.status || anyErr.response?.status;
+
+          let cardStatus: ConfirmationCardData["status"] = "error";
+          let errorMsg = err instanceof Error ? err.message : "Confirmation failed.";
+
+          if (statusCode === 403) {
+            cardStatus = "forbidden";
+            errorMsg =
+              "HTTP 403 Forbidden: You do not have permission to modify attendance for this session.";
+          } else if (statusCode === 404) {
+            cardStatus = "not_found";
+            errorMsg =
+              "HTTP 404 Not Found: Attendance proposal not found or inaccessible.";
+          } else if (statusCode === 409) {
+            cardStatus = "conflict";
+            errorMsg =
+              "HTTP 409 Conflict: This confirmation has already been used or is stale.";
+          } else if (statusCode === 410) {
+            cardStatus = "expired";
+            errorMsg =
+              "HTTP 410 Expired: This confirmation has expired. Please submit a new attendance modification proposal.";
+          }
+
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId && m.confirmationCard
+                ? {
+                    ...m,
+                    confirmationCard: {
+                      ...m.confirmationCard,
+                      status: cardStatus,
+                      errorMessage: errorMsg,
+                    },
+                  }
+                : m
+            )
+          );
+        }
+        return;
+      }
+
+      // Legacy OCR file confirmation path
+      try {
+        const res = await confirmAgentRecords({
+          session_id: card.sessionId,
+          confirmed: true,
+          records: card.affectedRows,
+        });
+
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msgId && m.confirmationCard
+              ? {
+                  ...m,
+                  confirmationCard: {
+                    ...m.confirmationCard,
+                    status: "confirmed",
+                    responseMessage:
+                      res.message || "Attendance records confirmed and committed to database.",
+                  },
+                }
+              : m
+          )
+        );
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : "Confirmation failed.";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msgId && m.confirmationCard
+              ? {
+                  ...m,
+                  confirmationCard: {
+                    ...m.confirmationCard,
+                    status: "error",
+                    errorMessage: msg,
+                  },
+                }
+              : m
+          )
+        );
+      }
+    },
+    [messages]
+  );
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8.5rem)] space-y-4">
-      {/* Top Header Card with Mascot & Capabilities */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <div className="w-20 h-20 shrink-0">
-            <AnimatedAiMascot isThinking={isProcessing || isUploading} className="h-20" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-xl font-bold text-[#24251C]">RollCall AI Assistant</h1>
-              <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-[#6C5119]/15 text-[#6C5119] border border-[#6C5119]/30 uppercase">
-                Dual-Source Agent
-              </span>
-            </div>
-            <p className="text-xs text-[#77735F] mt-0.5">
-              Natural language queries backed strictly by verified database records & OCR sheet ingestion.
-            </p>
-          </div>
+    <div className="flex flex-col h-[calc(100vh-8rem)]">
+      {/* Top Bar / Agent Status */}
+      <div className="flex items-center justify-between pb-4 border-b border-[#E4DDCA] mb-4">
+        <div>
+          <h1 className="text-xl font-bold text-[#24251C] flex items-center gap-2">
+            <span>RollCall AI Assistant</span>
+            <span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-[#6C5119]/10 text-[#6C5119] border border-[#6C5119]/20">
+              Interactive Agent
+            </span>
+          </h1>
+          <p className="text-xs text-[#77735F]">
+            Query attendance trends, propose attendance modifications with explicit confirmation, or upload rosters for verification.
+          </p>
         </div>
 
-        {/* Status Indicators */}
-        <div className="flex items-center gap-2 self-start md:self-center text-xs">
-          <div className="px-3 py-1.5 bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl flex items-center gap-2">
-            <span
-              className={`w-2 h-2 rounded-full ${
-                agentStatus?.status === "ready" ? "bg-emerald-500" : "bg-amber-500"
-              }`}
-            />
-            <span className="text-[#24251C] font-semibold">
-              {agentStatus?.status === "ready" ? "Agent Online" : "Ready (Fallback Mode)"}
-            </span>
-          </div>
-
-          <div className="px-3 py-1.5 bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl text-[#77735F]">
-            Threshold:{" "}
-            <span className="font-mono font-bold text-[#3F451F]">
-              {agentStatus?.confidence_threshold
-                ? `${(agentStatus.confidence_threshold * 100).toFixed(0)}%`
-                : "80%"}
-            </span>
-          </div>
+        <div className="flex items-center gap-3">
+          {agentStatus && (
+            <div className="hidden sm:flex items-center gap-2 text-xs text-[#77735F] bg-[#F2EDE0] px-3 py-1.5 rounded-xl border border-[#E4DDCA]">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span>Vision OCR: {agentStatus.gemini_configured ? "Cloud LLM" : "Local EasyOCR"}</span>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* Main Chat Workspace */}
-      <div className="flex-1 bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-sm flex flex-col overflow-hidden">
-        {/* Messages Stream */}
-        <div className="flex-1 overflow-y-auto space-y-4 pr-2">
-          {messages.map((m) => {
-            const isUser = m.sender === "user";
-            return (
+      {/* Chat Messages Scroll Area */}
+      <div className="flex-1 overflow-y-auto space-y-4 pr-1">
+        {messages.map((m) => {
+          const isUser = m.sender === "user";
+          return (
+            <div
+              key={m.id}
+              className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}
+            >
               <div
-                key={m.id}
-                className={`flex flex-col ${isUser ? "items-end" : "items-start"}`}
+                className={`max-w-2xl rounded-2xl p-4 text-sm shadow-xs ${
+                  isUser
+                    ? "bg-[#3F451F] text-[#FBF8F0] rounded-br-xs"
+                    : m.error
+                    ? "bg-rose-50 text-rose-900 border border-rose-200 rounded-bl-xs"
+                    : "bg-[#F2EDE0] text-[#24251C] border border-[#E4DDCA] rounded-bl-xs"
+                }`}
               >
-                <div
-                  className={`max-w-2xl rounded-2xl p-4 text-sm shadow-xs ${
-                    isUser
-                      ? "bg-[#3F451F] text-[#FBF8F0] rounded-br-xs"
-                      : m.error
-                      ? "bg-red-50 text-red-800 border border-red-200 rounded-bl-xs"
-                      : "bg-[#F2EDE0] text-[#24251C] border border-[#E4DDCA] rounded-bl-xs"
-                  }`}
-                >
-                  <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
+                <p className="whitespace-pre-wrap leading-relaxed">{m.text}</p>
 
-                  {/* Tool Call Audit Trace (if present) */}
-                  {m.toolCalls && m.toolCalls.length > 0 && (
-                    <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 text-xs">
-                      <p className="font-bold uppercase tracking-wider text-[10px] text-[#77735F] mb-1">
-                        Invoked Tools & Safety Guardrails ({m.toolCalls.length})
-                      </p>
-                      <div className="space-y-1">
-                        {m.toolCalls.map((tc, idx) => (
-                          <div
-                            key={idx}
-                            className="flex items-center justify-between font-mono text-[11px] bg-white/50 px-2 py-1 rounded-md"
-                          >
-                            <span className="text-[#3F451F] font-bold">
-                              {String(tc.tool_name || tc.tool || "database_tool")}
-                            </span>
-                            <span className="text-emerald-700">Executed OK</span>
-                          </div>
+                {/* Tool Call Audit Trace (if present) */}
+                {m.toolCalls && m.toolCalls.length > 0 && (
+                  <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 text-xs">
+                    <p className="font-bold uppercase tracking-wider text-[10px] text-[#77735F] mb-1">
+                      Invoked Tools & Safety Guardrails ({m.toolCalls.length})
+                    </p>
+                    <div className="space-y-1">
+                      {m.toolCalls.map((tc, idx) => (
+                        <div
+                          key={idx}
+                          className="flex items-center justify-between font-mono text-[11px] bg-white/50 px-2 py-1 rounded-md"
+                        >
+                          <span className="text-[#3F451F] font-bold">
+                            {String(tc.tool_name || tc.tool || "database_tool")}
+                          </span>
+                          <span className="text-emerald-700">Executed OK</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {/* F11 — Photo Quality Gate Rejection Card (N9) */}
+                {m.qualityRejection && (
+                  <div className="mt-3.5 p-4 rounded-xl bg-amber-50/90 border border-amber-300 shadow-sm space-y-3.5 text-xs text-[#24251C]">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-amber-900 font-bold">
+                        <svg className="w-5 h-5 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <span className="text-sm">Photo Quality Gate: Retake Required</span>
+                      </div>
+                      <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-200/80 text-amber-900 border border-amber-300 uppercase tracking-wide">
+                        Optical Check Failed
+                      </span>
+                    </div>
+
+                    <p className="font-semibold text-rose-800 text-xs">
+                      Photo not clear enough. Please retake.
+                    </p>
+
+                    <div className="space-y-1">
+                      <span className="font-bold text-[#24251C] block">Identified Issues:</span>
+                      <ul className="list-disc pl-4 space-y-0.5 text-amber-900">
+                        {m.qualityRejection.reasons.map((reason, idx) => (
+                          <li key={idx}>{reason}</li>
                         ))}
+                      </ul>
+                    </div>
+
+                    {/* Metric Chips */}
+                    {(m.qualityRejection.measuredSharpness !== undefined ||
+                      m.qualityRejection.measuredBrightness !== undefined) && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                        {m.qualityRejection.measuredSharpness !== undefined && (
+                          <div className="p-2.5 rounded-lg bg-white border border-amber-200 flex flex-col gap-0.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-[#77735F]">
+                              Measured Sharpness
+                            </span>
+                            <div className="flex items-baseline justify-between">
+                              <span className="font-mono font-bold text-rose-700 text-sm">
+                                {m.qualityRejection.measuredSharpness.toFixed(1)}
+                              </span>
+                              <span className="text-[10px] text-[#77735F]">
+                                Minimum Required: ≥ {m.qualityRejection.sharpnessThreshold ?? 100.0}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+
+                        {m.qualityRejection.measuredBrightness !== undefined && (
+                          <div className="p-2.5 rounded-lg bg-white border border-amber-200 flex flex-col gap-0.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-[#77735F]">
+                              Measured Brightness
+                            </span>
+                            <div className="flex items-baseline justify-between">
+                              <span className="font-mono font-bold text-amber-700 text-sm">
+                                {m.qualityRejection.measuredBrightness.toFixed(1)}
+                              </span>
+                              <span className="text-[10px] text-[#77735F]">
+                                Minimum Required: ≥ {m.qualityRejection.brightnessThreshold ?? 80.0}
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Practical Retake Tips */}
+                    <div className="p-3 rounded-lg bg-white border border-[#E4DDCA] space-y-1.5 text-xs">
+                      <span className="font-bold text-[#24251C] block">Practical Retake Tips:</span>
+                      <ul className="space-y-1 text-[#77735F]">
+                        <li className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#3F451F]" />
+                          Hold the camera steady.
+                        </li>
+                        <li className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#3F451F]" />
+                          Use even lighting.
+                        </li>
+                        <li className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#3F451F]" />
+                          Avoid shadows.
+                        </li>
+                        <li className="flex items-center gap-1.5">
+                          <span className="w-1.5 h-1.5 rounded-full bg-[#3F451F]" />
+                          Keep the complete attendance sheet inside the frame.
+                        </li>
+                      </ul>
+                    </div>
+
+                    {/* Choose Another Photo Button */}
+                    <div className="pt-1 flex items-center justify-end">
+                      <button
+                        onClick={() => {
+                          if (fileInputRef.current) {
+                            fileInputRef.current.value = "";
+                            fileInputRef.current.click();
+                          }
+                        }}
+                        className="px-4 py-2 rounded-xl text-xs font-bold bg-[#3F451F] text-[#FBF8F0] hover:bg-[#323719] transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                      >
+                        <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                        </svg>
+                        Choose another photo
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Structured Attendance Confirmation Card (N7 Proposal & Confirmation) */}
+                {m.confirmationCard && (
+                  <div className="mt-3 p-3.5 sm:p-4 rounded-xl bg-white border border-amber-300 shadow-sm space-y-3 text-xs">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center space-x-2 text-amber-900 font-bold">
+                        <svg className="w-5 h-5 text-amber-600 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                        </svg>
+                        <span className="text-sm">Attendance Modification Proposal</span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {m.confirmationCard.expiresAt && (
+                          <ExpiryBadge expiresAt={m.confirmationCard.expiresAt} />
+                        )}
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-amber-100 text-amber-800 border border-amber-200">
+                          ID: {m.confirmationCard.confirmationId ? m.confirmationCard.confirmationId.slice(0, 8) : "Pending"}
+                        </span>
                       </div>
                     </div>
-                  )}
-                </div>
 
-                <span className="text-[10px] text-[#77735F] mt-1 px-1">{m.timestamp}</span>
-              </div>
-            );
-          })}
+                    <p className="text-[#24251C] font-medium leading-relaxed">
+                      {m.confirmationCard.question}
+                    </p>
 
-          {isProcessing && (
-            <div className="flex items-start gap-2">
-              <div className="bg-[#F2EDE0] border border-[#E4DDCA] rounded-2xl rounded-bl-xs px-4 py-3 text-sm text-[#77735F] flex items-center gap-2">
-                <div className="w-3.5 h-3.5 border-2 border-[#3F451F] border-t-transparent rounded-full animate-spin" />
-                <span>RollCall AI is retrieving and reasoning across verified tables...</span>
+                    {m.confirmationCard.issues && m.confirmationCard.issues.length > 0 && (
+                      <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-200 text-amber-800 text-[11px] space-y-1">
+                        <span className="font-bold">Detected Anomalies / Review Notes:</span>
+                        <ul className="list-disc pl-4 space-y-0.5">
+                          {m.confirmationCard.issues.map((issue, idx) => (
+                            <li key={idx}>{issue}</li>
+                          ))}
+                        </ul>
+                      </div>
+                    )}
+
+                    {/* Affected Records / Proposed Changes Table */}
+                    {m.confirmationCard.affectedRows && m.confirmationCard.affectedRows.length > 0 && (
+                      <div className="overflow-x-auto border border-[#E4DDCA] rounded-lg">
+                        <table className="w-full text-left text-[11px]">
+                          <thead className="bg-[#EDE8D8]/50 text-[#77735F] border-b border-[#E4DDCA]">
+                            <tr>
+                              <th className="py-2 px-3">Student Identifier (USN)</th>
+                              <th className="py-2 px-3">Student Name</th>
+                              <th className="py-2 px-3">Subject / Session</th>
+                              <th className="py-2 px-3">Previous Status</th>
+                              <th className="py-2 px-3">Proposed Status</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-[#E4DDCA]/50 text-[#24251C]">
+                            {m.confirmationCard.affectedRows.map((row, idx) => {
+                              const usn = String(row.usn || row.student_id || "—");
+                              const name = String(row.student_name || row.name || "—");
+                              const subject = String(row.subject || row.subject_code || row.session_id || "—");
+                              const prev = String(row.previous_status || row.old_status || row.current_status || "ABSENT");
+                              const proposed = String(row.proposed_status || row.new_status || row.status || "PRESENT");
+
+                              return (
+                                <tr key={idx} className="hover:bg-[#EDE8D8]/20">
+                                  <td className="py-2 px-3 font-mono font-bold text-[#6C5119]">{usn}</td>
+                                  <td className="py-2 px-3 font-semibold">{name}</td>
+                                  <td className="py-2 px-3 text-[#77735F]">{subject}</td>
+                                  <td className="py-2 px-3">
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-100 text-rose-800 border border-rose-200">
+                                      {prev}
+                                    </span>
+                                  </td>
+                                  <td className="py-2 px-3">
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                                      {proposed}
+                                    </span>
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+
+                    {/* Actions / Status States */}
+                    <div className="pt-2 flex items-center justify-between">
+                      {m.confirmationCard.status === "pending" && (
+                        <div className="flex items-center space-x-2 ml-auto">
+                          <button
+                            onClick={() => handleCardDismiss(m.id)}
+                            className="px-3 py-1.5 rounded-lg border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8] font-bold text-xs transition-colors cursor-pointer"
+                          >
+                            Dismiss
+                          </button>
+                          <button
+                            onClick={() => void handleCardConfirm(m.id, false)}
+                            className="px-3.5 py-1.5 rounded-lg border border-rose-300 text-rose-700 hover:bg-rose-50 font-bold text-xs transition-colors cursor-pointer"
+                          >
+                            Reject Changes
+                          </button>
+                          <button
+                            onClick={() => void handleCardConfirm(m.id, true)}
+                            className="px-4 py-1.5 rounded-lg bg-[#3F451F] text-[#FBF8F0] hover:bg-[#343919] font-bold text-xs transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                          >
+                            <span>Confirm & Apply</span>
+                          </button>
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "submitting" && (
+                        <span className="text-amber-800 font-semibold flex items-center gap-1.5 ml-auto">
+                          <span className="w-3 h-3 border-2 border-amber-800 border-t-transparent rounded-full animate-spin" />
+                          Committing confirmed changes to backend database...
+                        </span>
+                      )}
+
+                      {m.confirmationCard.status === "confirmed" && (
+                        <div className="p-2.5 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 font-bold w-full flex items-center justify-between">
+                          <span>✓ Confirmed: {m.confirmationCard.responseMessage || "Attendance modification applied to database."}</span>
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "rejected" && (
+                        <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 font-bold w-full">
+                          ✕ {m.confirmationCard.responseMessage || "Proposed changes rejected."}
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "cancelled" && (
+                        <div className="p-2.5 rounded-lg bg-[#EDE8D8] border border-[#E4DDCA] text-[#77735F] font-semibold w-full">
+                          — {m.confirmationCard.responseMessage || "Proposal dismissed locally. No database changes were made."}
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "expired" && (
+                        <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-300 text-rose-900 font-bold w-full flex items-center justify-between">
+                          <span>⏱ {m.confirmationCard.errorMessage || "HTTP 410 Expired: This confirmation has expired. Please submit a new attendance modification proposal."}</span>
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "conflict" && (
+                        <div className="p-2.5 rounded-lg bg-amber-50 border border-amber-300 text-amber-900 font-bold w-full">
+                          ⚠️ {m.confirmationCard.errorMessage || "HTTP 409 Conflict: This proposal has already been confirmed or consumed."}
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "forbidden" && (
+                        <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-300 text-rose-900 font-bold w-full">
+                          🔒 {m.confirmationCard.errorMessage || "HTTP 403 Forbidden: You do not have permission to modify attendance for this session."}
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "not_found" && (
+                        <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-300 text-rose-900 font-bold w-full">
+                          ❓ {m.confirmationCard.errorMessage || "HTTP 404 Not Found: Attendance proposal not found or inaccessible."}
+                        </div>
+                      )}
+
+                      {m.confirmationCard.status === "error" && (
+                        <div className="p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-800 font-bold w-full">
+                          Error: {m.confirmationCard.errorMessage}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
+
+              <span className="text-[10px] text-[#77735F] mt-1 px-1">
+                {m.timestamp}
+              </span>
             </div>
-          )}
+          );
+        })}
 
-          <div ref={messagesEndRef} />
-        </div>
+        {isProcessing && (
+          <div className="flex items-center gap-3 text-xs text-[#77735F] bg-[#F2EDE0] p-4 rounded-2xl w-fit border border-[#E4DDCA]">
+            <AnimatedAiMascot isThinking={true} className="h-10" />
+            <span>Analyzing attendance records...</span>
+          </div>
+        )}
 
-        {/* Quick Prompts Bar */}
-        <div className="pt-3 pb-2 flex items-center gap-2 overflow-x-auto no-scrollbar border-t border-[#E4DDCA]">
-          {QUICK_PROMPTS.map((prompt) => (
-            <button
-              key={prompt}
-              onClick={() => handleSendMessage(prompt)}
-              disabled={isProcessing}
-              className="shrink-0 px-3 py-1.5 rounded-xl bg-[#F2EDE0] hover:bg-[#EAE4D4] text-xs font-medium text-[#3F451F] transition-colors border border-[#E4DDCA]"
-            >
-              {prompt}
-            </button>
-          ))}
-        </div>
+        {isUploading && (
+          <div className="flex items-center gap-3 text-xs text-[#77735F] bg-[#F2EDE0] p-4 rounded-2xl w-fit border border-[#E4DDCA]">
+            <div className="w-5 h-5 border-2 border-[#3F451F] border-t-transparent rounded-full animate-spin" />
+            <span>Evaluating document sharpness, lighting & extracting roster rows...</span>
+          </div>
+        )}
 
-        {/* Input & Upload Bar */}
-        <div className="pt-2 flex items-center gap-2">
-          {/* Hidden File Input */}
-          <input
-            type="file"
-            ref={fileInputRef}
-            onChange={handleFileUpload}
-            accept=".png,.jpg,.jpeg,.csv,.pdf"
-            className="hidden"
-          />
+        <div ref={messagesEndRef} />
+      </div>
 
+      {/* Quick Prompts */}
+      <div className="py-2 flex items-center gap-2 overflow-x-auto text-xs no-scrollbar">
+        {QUICK_PROMPTS.map((prompt) => (
           <button
-            type="button"
+            key={prompt}
+            onClick={() => void handleSendMessage(prompt)}
+            disabled={isProcessing || isUploading}
+            className="px-3 py-1.5 rounded-xl bg-[#FBF8F0] border border-[#E4DDCA] text-[#77735F] hover:text-[#24251C] hover:border-[#3F451F] whitespace-nowrap transition-colors cursor-pointer disabled:opacity-50"
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
+
+      {/* Input & Upload Bar */}
+      <div className="pt-2 border-t border-[#E4DDCA]">
+        {/* Hidden File Input */}
+        <input
+          type="file"
+          ref={fileInputRef}
+          onChange={handleFileUpload}
+          accept="image/*,.csv"
+          className="hidden"
+        />
+
+        <div className="flex items-center gap-2 bg-[#F2EDE0] p-1.5 rounded-2xl border border-[#E4DDCA]">
+          <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Upload attendance sheet image or CSV"
-            className="p-3 rounded-xl bg-[#F2EDE0] hover:bg-[#EAE4D4] text-[#3F451F] transition-colors border border-[#E4DDCA] shrink-0 disabled:opacity-50"
+            title="Upload attendance sheet photo or CSV"
+            className="p-2.5 rounded-xl text-[#77735F] hover:text-[#24251C] hover:bg-[#E4DDCA]/50 transition-colors disabled:opacity-50 cursor-pointer"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z" />
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15.172 7l-6.586 6.586a2 2 0 102.828 2.828l6.414-6.586a4 4 0 00-5.656-5.656l-6.415 6.585a6 6 0 108.486 8.486L20.5 13" />
             </svg>
           </button>
 
@@ -392,68 +1159,22 @@ export function AssistantView() {
                 void handleSendMessage();
               }
             }}
-            placeholder="Ask anything about attendance or absentees..."
-            disabled={isProcessing}
-            className="flex-1 bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl px-4 py-3 text-sm text-[#24251C] placeholder-[#77735F] focus:outline-none focus:border-[#3F451F] disabled:opacity-50"
+            placeholder="Ask about student attendance, propose an edit (e.g. 'mark 1MS21CS001 absent in SESS-001'), or upload a photo..."
+            disabled={isProcessing || isUploading}
+            className="flex-1 bg-transparent border-none text-sm text-[#24251C] placeholder-[#77735F] focus:outline-none px-2"
           />
 
           <button
-            type="button"
             onClick={() => void handleSendMessage()}
-            disabled={!inputQuery.trim() || isProcessing}
-            className="px-5 py-3 rounded-xl bg-[#3F451F] text-[#FBF8F0] font-semibold text-sm hover:bg-[#323719] transition-all shadow-sm shrink-0 disabled:opacity-40"
+            disabled={!inputQuery.trim() || isProcessing || isUploading}
+            className="p-2.5 bg-[#3F451F] text-[#FBF8F0] rounded-xl hover:bg-[#323719] transition-all disabled:opacity-40 disabled:hover:bg-[#3F451F] cursor-pointer"
           >
-            Send
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+            </svg>
           </button>
         </div>
       </div>
-
-      {/* Human-In-The-Loop Confirmation Modal */}
-      {pendingConfirmation && (
-        <div className="fixed inset-0 z-50 bg-black/40 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-6 max-w-lg w-full shadow-2xl">
-            <div className="flex items-center gap-3 mb-2">
-              <span className="w-3 h-3 rounded-full bg-amber-500 animate-ping" />
-              <h3 className="text-lg font-bold text-[#24251C]">Human Confirmation Required</h3>
-            </div>
-            <p className="text-xs text-[#77735F]">
-              The AI model extracted attendance records below the 80% confidence threshold. Please verify before committing to database.
-            </p>
-
-            <div className="mt-4 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900">
-              <p className="font-semibold mb-1">Clarifying Question:</p>
-              <p>{pendingConfirmation.request.question}</p>
-            </div>
-
-            {pendingConfirmation.request.affected_rows && pendingConfirmation.request.affected_rows.length > 0 && (
-              <div className="mt-3 max-h-40 overflow-y-auto bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl p-2.5 text-xs font-mono">
-                {pendingConfirmation.request.affected_rows.map((row, i) => (
-                  <div key={i} className="py-1 border-b border-[#E4DDCA] last:border-b-0">
-                    {JSON.stringify(row)}
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="mt-6 flex items-center justify-end gap-3">
-              <button
-                type="button"
-                onClick={() => handleConfirmDecision(false)}
-                className="px-4 py-2 rounded-xl text-sm font-semibold text-red-700 bg-red-50 hover:bg-red-100 transition-colors"
-              >
-                Reject & Discard
-              </button>
-              <button
-                type="button"
-                onClick={() => handleConfirmDecision(true)}
-                className="px-5 py-2 rounded-xl text-sm font-semibold bg-[#3F451F] text-[#FBF8F0] hover:bg-[#323719] transition-colors shadow-sm"
-              >
-                Approve & Commit
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

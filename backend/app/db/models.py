@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Float,
     UniqueConstraint,
+    event,
     text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -44,6 +45,16 @@ class User(Base):
     hashed_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     is_active: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
     created_at: Mapped[str] = mapped_column(String, nullable=False)
+    # Password reset: only the SHA-256 hash of the token is stored, with an
+    # expiry. The token itself is never persisted or returned by the API.
+    password_reset_token: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    password_reset_token_expires: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    # MFA (N5 security): the TOTP secret is stored AES-GCM encrypted; the
+    # encryption key never lives in the database.
+    mfa_secret: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    mfa_enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    mfa_recovery_codes: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    mfa_last_counter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     teacher_subjects: Mapped[List["TeacherSubject"]] = relationship(
         "TeacherSubject", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
@@ -109,6 +120,9 @@ class AuditLog(Base):
     actor_id: Mapped[str] = mapped_column(
         String, ForeignKey("users.user_id", ondelete="RESTRICT"), nullable=False
     )
+    # Role of the actor at the time of the action, captured from the verified
+    # authentication context (never from request payloads or LLM output).
+    actor_role: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     action: Mapped[str] = mapped_column(String, nullable=False)
     session_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     usn: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -118,15 +132,138 @@ class AuditLog(Base):
     new_value: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     reason: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     timestamp: Mapped[str] = mapped_column(String, nullable=False)
+    # Tamper-evidence (security phase 3): HMAC hash chain. Both columns stay
+    # nullable so records written before the chain was activated remain
+    # readable and are reported as *unverified*, never as verified.
+    chain_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    prev_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    row_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
 
     actor: Mapped["User"] = relationship("User", back_populates="audit_logs")
 
     __table_args__ = (
         Index("idx_audit_log_actor_ts", "actor_id", "timestamp"),
+        Index("idx_audit_log_chain", "chain_id", "log_id"),
     )
 
     def __repr__(self) -> str:
         return f"<AuditLog(log_id={self.log_id}, actor_id={self.actor_id!r}, action={self.action!r})>"
+
+
+class AuditChainHead(Base):
+    """Current tip of an audit hash chain.
+
+    The head is advanced inside the same transaction as the audit insert, so a
+    record and its chain link are committed together. Application code never
+    rewrites an earlier value: the verification command detects a head/record
+    mismatch.
+    """
+
+    __tablename__ = "audit_chain_head"
+
+    chain_id: Mapped[str] = mapped_column(String, primary_key=True)
+    last_hash: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    last_log_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    def __repr__(self) -> str:
+        return f"<AuditChainHead(chain_id={self.chain_id!r}, last_log_id={self.last_log_id!r})>"
+
+
+class SecurityRateLimit(Base):
+    """Shared rate-limit counters.
+
+    The counters live in the database so that every application worker (and
+    every instance that uses the same database) sees the same state. This is
+    the documented fallback when Redis is not configured; with Redis the
+    counters are kept there instead.
+    """
+
+    __tablename__ = "security_rate_limits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    key: Mapped[str] = mapped_column(String, nullable=False)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    window_started_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    blocked_until: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("scope", "key", name="uq_security_rate_limits_scope_key"),
+        Index("idx_security_rate_limits_blocked", "blocked_until"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SecurityRateLimit(scope={self.scope!r}, attempts={self.attempts})>"
+
+
+class SecurityDecoy(Base):
+    """Honeypot identifiers that never touch the real master data.
+
+    Decoys live in their own table: they are never inserted into ``students``,
+    ``attendance`` or ``sessions`` and are never part of the AI query tools'
+    allowed tables, so they cannot end up in a normal response.
+    """
+
+    __tablename__ = "security_decoys"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    decoy_kind: Mapped[str] = mapped_column(String, nullable=False)
+    decoy_value: Mapped[str] = mapped_column(String, nullable=False)
+    enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=1, server_default="1")
+    note: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+
+    __table_args__ = (
+        Index("idx_security_decoys_value", "decoy_value"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<SecurityDecoy(id={self.id}, kind={self.decoy_kind!r}, enabled={self.enabled})>"
+
+
+@event.listens_for(AuditLog.__table__, "after_create")
+def _create_audit_log_append_only_triggers(target, connection, **kwargs) -> None:
+    """Make the audit log append-only in every database, not only migrated ones.
+
+    Migration 0002 installs these triggers; creating them from the model as
+    well guarantees the same guarantee for databases that were bootstrapped
+    from ``Base.metadata`` (tests, local tooling).
+    """
+    dialect = connection.dialect.name
+    if dialect == "sqlite":
+        connection.exec_driver_sql(
+            "CREATE TRIGGER IF NOT EXISTS trg_audit_log_no_update "
+            "BEFORE UPDATE ON audit_log BEGIN "
+            "SELECT RAISE(ABORT, 'audit_log is append-only: updates forbidden'); END"
+        )
+        connection.exec_driver_sql(
+            "CREATE TRIGGER IF NOT EXISTS trg_audit_log_no_delete "
+            "BEFORE DELETE ON audit_log BEGIN "
+            "SELECT RAISE(ABORT, 'audit_log is append-only: deletions forbidden'); END"
+        )
+    elif dialect == "postgresql":
+        connection.exec_driver_sql(
+            "CREATE OR REPLACE FUNCTION reject_audit_modification() RETURNS TRIGGER AS $$ "
+            "BEGIN RAISE EXCEPTION 'audit_log is append-only: updates and deletions forbidden'; "
+            "END; $$ LANGUAGE plpgsql"
+        )
+        connection.exec_driver_sql(
+            "DROP TRIGGER IF EXISTS trg_audit_log_no_update ON audit_log"
+        )
+        connection.exec_driver_sql(
+            "CREATE TRIGGER trg_audit_log_no_update BEFORE UPDATE ON audit_log "
+            "FOR EACH ROW EXECUTE FUNCTION reject_audit_modification()"
+        )
+        connection.exec_driver_sql(
+            "DROP TRIGGER IF EXISTS trg_audit_log_no_delete ON audit_log"
+        )
+        connection.exec_driver_sql(
+            "CREATE TRIGGER trg_audit_log_no_delete BEFORE DELETE ON audit_log "
+            "FOR EACH ROW EXECUTE FUNCTION reject_audit_modification()"
+        )
 
 
 class LoginAttempt(Base):

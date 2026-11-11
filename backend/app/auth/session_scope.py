@@ -15,16 +15,23 @@ Policy (mirrors the N3 session-ownership policy in ``app.routers.attendance``):
   normalized equality comparison - never a substring match.
 * Sessions without a subject code and without a coordinator stay ADMIN-only.
   Legacy sessions are never re-assigned as a side effect of being read.
+
+The same module also derives the **student** scope (C2): a student is visible
+to a non-administrator when the student appears in the attendance of a visible
+session, or when the student belongs to a department that offers one of the
+caller's mapped subject codes.
 """
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Iterable, Optional, Set
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Sequence, Set, Tuple
 
 from fastapi import HTTPException, status
+from sqlalchemy import and_, false, func, or_, select
 
+from app.db.models import Attendance, Session as DbSession, Student, Subject
 from app.schemas.auth import AuthenticatedUser, Role
 
 logger = logging.getLogger("rollcall.auth.session_scope")
@@ -32,6 +39,147 @@ logger = logging.getLogger("rollcall.auth.session_scope")
 # Owner values that mean "this session has no real owner". Migration 0002
 # backfills the literal sentinel 'legacy' for pre-ownership sessions.
 LEGACY_OWNER_SENTINELS = ("", "legacy")
+
+
+def session_scope_condition(user_id: str, subject_codes: Sequence[str]):
+    """SQLAlchemy predicate restricting sessions to one caller's scope.
+
+    This is the single implementation of the session-visibility policy; it is
+    used by the session list/detail endpoints, the attendance endpoints and the
+    AI query tools so that every path enforces the same rule.
+    """
+    unowned = or_(
+        DbSession.teacher_id.is_(None),
+        DbSession.teacher_id.in_(list(LEGACY_OWNER_SENTINELS)),
+    )
+    owned_by_viewer = DbSession.teacher_id == user_id
+
+    inner: List[Any] = []
+    if user_id:
+        inner.append(DbSession.coordinator_faculty_id == user_id)
+    codes = [c for c in (subject_codes or []) if c]
+    if codes:
+        inner.append(func.upper(DbSession.subject_code).in_(codes))
+
+    if not inner:
+        return owned_by_viewer
+    return or_(owned_by_viewer, and_(unowned, or_(*inner)))
+
+
+@dataclass(frozen=True)
+class DataScope:
+    """Data-read scope of one authenticated caller.
+
+    ``unrestricted`` is only true for ADMIN. For everybody else the scope
+    restricts which sessions and which students may be read.
+    """
+
+    user_id: str
+    unrestricted: bool
+    subject_codes: FrozenSet[str] = field(default_factory=frozenset)
+
+    # -- sessions ---------------------------------------------------------
+    def session_condition(self):
+        """SQLAlchemy predicate over :class:`DbSession` for this caller."""
+        if self.unrestricted:
+            return None
+        return session_scope_condition(self.user_id, sorted(self.subject_codes))
+
+    def visible_session_ids(self, db) -> FrozenSet[str]:
+        """Session ids this caller may read (empty for a caller with no scope)."""
+        if self.unrestricted:
+            return frozenset()
+        stmt = select(DbSession.session_id).where(session_scope_condition(self.user_id, sorted(self.subject_codes)))
+        try:
+            rows = db.execute(stmt).scalars().all()
+        except Exception:
+            return frozenset()
+        return frozenset(str(r) for r in rows)
+
+    def is_session_visible(self, db, session_id: str) -> bool:
+        """True when the caller may read the given session."""
+        if self.unrestricted:
+            return True
+        clean = (session_id or "").strip()
+        if not clean:
+            return False
+        stmt = select(DbSession.session_id).where(
+            session_scope_condition(self.user_id, sorted(self.subject_codes)),
+            DbSession.session_id == clean,
+        )
+        try:
+            return db.execute(stmt).first() is not None
+        except Exception:
+            return False
+
+    # -- students ---------------------------------------------------------
+    def student_condition(self):
+        """SQLAlchemy predicate over :class:`Student` for this caller.
+
+        A student is in scope when they appear in the attendance of a visible
+        session, or when their department offers one of the caller's mapped
+        subject codes.
+        """
+        if self.unrestricted:
+            return None
+        visible_sessions = select(DbSession.session_id).where(
+            session_scope_condition(self.user_id, sorted(self.subject_codes))
+        )
+        from_attendance = Student.usn.in_(
+            select(Attendance.usn).where(Attendance.session_id.in_(visible_sessions))
+        )
+        codes = sorted(self.subject_codes)
+        if codes:
+            from_department = Student.usn.in_(
+                select(Student.usn).where(
+                    Student.dept_id.in_(
+                        select(Subject.dept_id).where(
+                            func.upper(Subject.subject_code).in_(codes)
+                        )
+                    )
+                )
+            )
+            return or_(from_attendance, from_department)
+        return from_attendance
+
+    def visible_student_usns(self, db) -> FrozenSet[str]:
+        """USNs of the students this caller may read."""
+        if self.unrestricted:
+            return frozenset()
+        condition = self.student_condition()
+        if condition is None:
+            return frozenset()
+        try:
+            rows = db.execute(select(Student.usn).where(condition)).scalars().all()
+        except Exception:
+            return frozenset()
+        return frozenset(str(r) for r in rows)
+
+    def is_student_visible(self, db, usn: str) -> bool:
+        """True when the caller may read this student (and their records)."""
+        if self.unrestricted:
+            return True
+        clean = (usn or "").strip().upper()
+        if not clean:
+            return False
+        condition = self.student_condition()
+        if condition is None:
+            return False
+        try:
+            stmt = select(Student.usn).where(condition, Student.usn == clean)
+            return db.execute(stmt).first() is not None
+        except Exception:
+            return False
+
+
+def resolve_data_scope(db, current_user: AuthenticatedUser) -> DataScope:
+    """Build the :class:`DataScope` of the authenticated caller."""
+    scope = resolve_session_scope(db, current_user)
+    return DataScope(
+        user_id=scope.user_id,
+        unrestricted=scope.unrestricted,
+        subject_codes=scope.subject_codes,
+    )
 
 
 def normalize_subject_code(raw: Optional[str]) -> str:

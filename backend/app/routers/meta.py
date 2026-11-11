@@ -64,7 +64,11 @@ def get_meta_config(
     )
 
     return {
+        # DEPRECATED (N5): kept for API compatibility only. Attendance editing
+        # is unlimited, so this value never gates an edit and is never consulted
+        # by the backend authorization or editing logic.
         "edit_lock_hours": _env_int("EDIT_LOCK_HOURS", 24),
+        "unlimited_attendance_editing": True,
         "admin_override_allowed": True,
         "defaulter_threshold_percent": _env_float("DEFAULTER_THRESHOLD_PERCENT", 75.0),
         "defaulter_required_percent": _env_float("DEFAULTER_REQUIRED_PERCENT", 75.0),

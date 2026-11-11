@@ -55,13 +55,76 @@ class TeacherSubjectListResponse(BaseModel):
     total: int = Field(ge=0)
 
 
+class SecurityDecoyCreate(BaseModel):
+    """Payload registering a honeypot identifier."""
+
+    decoy_kind: str = Field(
+        ..., min_length=1, max_length=50, description="Kind of decoy (e.g. STUDENT, SESSION)"
+    )
+    decoy_value: str = Field(
+        ..., min_length=1, max_length=100, description="The decoy identifier itself"
+    )
+    note: Optional[str] = Field(
+        None, max_length=255, description="Optional operator note"
+    )
+
+
+class AuditLogEntry(BaseModel):
+    """One append-only audit record."""
+
+    id: Optional[int] = Field(None, description="Audit record identifier")
+    log_id: Optional[int] = Field(None, description="Audit record identifier")
+    timestamp: str = Field(..., description="UTC timestamp of the recorded action")
+    event_type: str = Field(..., description="Action recorded (e.g. ATTENDANCE_UPSERT)")
+    action: str = Field(..., description="Action recorded (same value as event_type)")
+    actor_id: str = Field(..., description="User id of the actor")
+    actor_role: Optional[str] = Field(
+        None, description="Role of the actor at the time of the action (null for older records)"
+    )
+    session_id: Optional[str] = Field(None, description="Session the action belongs to")
+    usn: Optional[str] = Field(None, description="Student the action belongs to")
+    entity_type: Optional[str] = Field(None, description="Type of the affected entity")
+    entity_id: Optional[str] = Field(None, description="Identifier of the affected entity")
+    old_status: Optional[str] = Field(None, description="Previous attendance status")
+    new_status: Optional[str] = Field(None, description="New attendance status")
+    reason: Optional[str] = Field(None, description="Optional note recorded with the action")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AuditLogPageResponse(BaseModel):
+    """Paginated audit trail."""
+
+    items: List[AuditLogEntry] = Field(default_factory=list, description="Audit records, newest first")
+    total: int = Field(ge=0, description="Total number of matching audit records")
+    limit: int = Field(ge=1, le=200, description="Maximum records returned per page")
+    offset: int = Field(ge=0, description="Starting offset index")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class MetaConfigResponse(BaseModel):
     """
     Server-decided application configuration for frontend consumption (Golden Rule:
     every number comes from Python code or the database, never React).
     """
 
-    edit_lock_hours: int = Field(..., description="Hours after session creation until editing is locked (N5)")
+    edit_lock_hours: int = Field(
+        ...,
+        description=(
+            "DEPRECATED (N5): hours after session creation until editing is locked. "
+            "Attendance editing is UNLIMITED, so this value is never used for "
+            "authorization or editing decisions. Kept only for API compatibility "
+            "until the frontend removes its 24-hour lock display."
+        ),
+    )
+    unlimited_attendance_editing: bool = Field(
+        ...,
+        description=(
+            "True when attendance may be edited at any time by an authorized actor, "
+            "regardless of session age or lifecycle status (N5)."
+        ),
+    )
     admin_override_allowed: bool = Field(..., description="Whether ADMIN may override an edit lock with a reason (D12)")
     defaulter_threshold_percent: float = Field(..., description="Attendance percentage strictly below which a student is a defaulter (N10)")
     defaulter_required_percent: float = Field(..., description="Attendance percentage required after attending extra classes (N10)")

@@ -39,6 +39,69 @@ class AuthenticationError(Exception):
         self.status_code = status_code
 
 
+def _now() -> int:
+    """Return current time in seconds since epoch (UTC)."""
+    return int(datetime.datetime.now(datetime.timezone.utc).timestamp())
+
+
+def _base32_encode(data: bytes) -> str:
+    """Standard base32 encoding (RFC 4648) for TOTP secrets."""
+    import base64
+    return base64.b32encode(data).decode("utf-8")
+
+
+def _base32_decode(secret: str) -> bytes:
+    """Decode a base32-encoded TOTP secret."""
+    import base64
+    return base64.b32decode(secret.upper().strip())
+
+
+#: The development fallback secret. It must never be accepted in production.
+DEV_FALLBACK_SECRET = "rollcall-dev-secret-key-change-in-production-32bytes-min"
+
+
+def validate_jwt_secret_configuration(
+    secret: Optional[str], env: Optional[str] = None
+) -> str:
+    """Validate and clean a JWT secret string.
+
+    * an unset / empty secret is rejected ("missing or empty"),
+    * a secret shorter than 32 characters is rejected ("too short"),
+    * in production the insecure development fallback is rejected,
+    * a valid secret is returned stripped.
+
+    ``env`` is the deployment mode ("production" / "development"); when it is
+    not supplied the current ``APP_ENV`` is used.
+    """
+    mode = (env or os.getenv("APP_ENV", "development")).strip().lower()
+    clean_secret = (secret or "").strip()
+    if not clean_secret:
+        raise ValueError("JWT secret key is missing or empty.")
+    if len(clean_secret) < 32:
+        raise ValueError("JWT secret key is too short (minimum 32 characters).")
+    if mode == "production" and clean_secret == DEV_FALLBACK_SECRET:
+        raise ValueError(
+            "JWT secret key uses the insecure development fallback and cannot be used in production."
+        )
+    return clean_secret
+
+
+#: Internal alias kept for the modules that use the private name.
+_validate_jwt_secret = validate_jwt_secret_configuration
+
+
+
+def _totp(secret: bytes, time_step: int = 30) -> str:
+    """Generate a TOTP code (RFC 6238) from a base32-secret."""
+    import hmac, hashlib
+    from struct import unpack
+    counter = _now() // time_step
+    hmac_val = hmac.new(secret, counter.to_bytes(8, "big"), hashlib.sha1).digest()
+    # Dynamic truncation (RFC 4226, bytes 4-8 modulo 2^31)
+    offset = hmac_val[19] & 0x0f
+    code_int = unpack(">I", hmac_val[offset : offset + 4])[0] & 0x7fffffff
+    return str(code_int % 1000000).zfill(6)
+
 def validate_jwt_secret_configuration(
     secret: Optional[str] = None,
     env: Optional[str] = None,
@@ -66,16 +129,25 @@ def get_local_jwt_secret() -> str:
     """
     Retrieve configured secret key specifically for signing local RollCall AI JWT tokens.
     Reads JWT_SECRET from environment (or falls back to JWT_SECRET_KEY).
+    In production the development fallback secret is never accepted.
     """
+    env = os.getenv("APP_ENV", "development").strip().lower()
     secret = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY")
     if secret:
-        return validate_jwt_secret_configuration(secret)
+        if env == "production" and secret.strip() == DEV_FALLBACK_SECRET:
+            raise RuntimeError(
+                "Production security violation: Insecure default development secret key "
+                "cannot be used in production."
+            )
+        try:
+            return validate_jwt_secret_configuration(secret, env)
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
 
-    env = os.getenv("APP_ENV", "development").lower()
     if env == "production":
         raise RuntimeError("Production security violation: JWT_SECRET must be configured and >= 32 characters.")
 
-    return "rollcall-dev-secret-key-change-in-production-32bytes-min"
+    return DEV_FALLBACK_SECRET
 
 
 def get_jwt_secret() -> str:
@@ -85,17 +157,17 @@ def get_jwt_secret() -> str:
     Enforces strict security checks in production.
     """
     secret = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY") or os.getenv("SUPABASE_JWT_SECRET")
-    env = os.getenv("APP_ENV", "development").lower()
+    env = os.getenv("APP_ENV", "development").strip().lower()
     is_production = env == "production"
 
     if not secret:
         if not is_production:
-            return "rollcall-dev-secret-key-change-in-production-32bytes-min"
+            return DEV_FALLBACK_SECRET
         raise RuntimeError("Production security violation: JWT secret key is not configured. Set JWT_SECRET or SUPABASE_JWT_SECRET.")
 
     clean_secret = secret.strip()
     if is_production:
-        if clean_secret == "rollcall-dev-secret-key-change-in-production-32bytes-min":
+        if clean_secret == DEV_FALLBACK_SECRET:
             raise RuntimeError("Production security violation: Insecure default development secret key cannot be used in production.")
         if len(clean_secret) < 32:
             raise RuntimeError("Production security violation: JWT secret key must be at least 32 characters long in production.")
@@ -181,17 +253,47 @@ def decode_and_verify_token(
         if secret:
             candidate_keys = [secret]
         else:
-            # Separate local signing secret from Supabase / legacy verification secret
-            local_secret = get_local_jwt_secret()
-            supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
-            legacy_secret = os.getenv("JWT_SECRET_KEY")
-            candidate_keys = [local_secret]
-            for extra in (supabase_secret, legacy_secret):
-                if extra and extra.strip() and extra.strip() not in candidate_keys:
-                    candidate_keys.append(extra.strip())
+            # When no explicit secret is passed, select from available candidates.
+            # In production, the secret must be configured; in development use the fallback.
+            env = os.getenv("APP_ENV", "development").lower()
+            is_prod = env == "production"
+            if is_prod:
+                # Production: secret must already be set via JWT_SECRET or JWT_SECRET_KEY;
+                # never fall back to the development secret.
+                configured = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY")
+                if not configured or len(configured.strip()) == 0:
+                    raise RuntimeError(
+                        "Production security violation: JWT secret is not configured. "
+                        "Set JWT_SECRET or JWT_SECRET_KEY before running."
+                    )
+                candidate_keys = [configured.strip()]
+            else:
+                # Development: use the configured secret or the safe dev fallback.
+                local_secret = get_local_jwt_secret()
+                supabase_secret = os.getenv("SUPABASE_JWT_SECRET")
+                legacy_secret = os.getenv("JWT_SECRET_KEY")
+                candidate_keys = [local_secret]
+                for extra in (supabase_secret, legacy_secret):
+                    if extra and extra.strip() and extra.strip() not in candidate_keys:
+                        candidate_keys.append(extra.strip())
 
     issuer = get_jwt_issuer()
     audience = get_jwt_audience()
+
+    # When running in production, issuer and audience must be configured;
+    # otherwise verify_iss/verify_aud will be False and silently skip checks.
+    env = os.getenv("APP_ENV", "development").lower()
+    if env == "production":
+        if not issuer:
+            raise RuntimeError(
+                "Production security violation: JWT issuer is not configured. "
+                "Set JWT_ISSUER before running."
+            )
+        if not audience:
+            raise RuntimeError(
+                "Production security violation: JWT audience is not configured. "
+                "Set JWT_AUDIENCE before running."
+            )
 
     options = {
         "verify_signature": True,

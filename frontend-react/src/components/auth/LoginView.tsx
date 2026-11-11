@@ -72,10 +72,11 @@ export function LoginView() {
         {/* Form */}
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-[#24251C] mb-1.5">
+            <label htmlFor="user_id" className="block text-xs font-semibold text-[#24251C] mb-1.5">
               User ID
             </label>
             <input
+              id="user_id"
               type="text"
               value={userId}
               onChange={(e) => setUserId(e.target.value)}
@@ -86,10 +87,11 @@ export function LoginView() {
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-[#24251C] mb-1.5">
+            <label htmlFor="password" className="block text-xs font-semibold text-[#24251C] mb-1.5">
               Password
             </label>
             <input
+              id="password"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}

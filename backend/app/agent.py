@@ -192,10 +192,14 @@ class AgentResponse:
 class ToolRegistry:
     """Maintains definitions and handlers for registered tools."""
 
-    def __init__(self, tool_logger: ToolLogger) -> None:
+    def __init__(self, tool_logger: ToolLogger, scope: Any = None) -> None:
         self.logger = tool_logger
         self.tools: Dict[str, ToolDefinition] = {}
         self.validated_requests: set[str] = set()
+        # Authorization scope of the caller the agent runs for. Every
+        # attendance/session/student read performed by a tool is restricted to
+        # this scope, so the model can never widen its own access.
+        self.scope = scope
         self._register_default_tools()
 
     def register(self, tool_def: ToolDefinition) -> None:
@@ -393,7 +397,9 @@ class ToolRegistry:
                     },
                     "required": ["query_type"],
                 },
-                handler=lambda query_type, **kw: query_tool(query_type=query_type, **_clean(kw)),
+                handler=lambda query_type, **kw: query_tool(
+                    query_type=query_type, scope=self.scope, **_clean(kw)
+                ),
             )
         )
 
@@ -431,14 +437,18 @@ class AttendanceAgent:
 
     def __init__(
         self,
-        db_target: Optional[Union[str, sqlite3.Connection, SqlAlchemySession]] = None,
         tool_logger: Optional[ToolLogger] = None,
         confidence_threshold: float = CONFIDENCE_CONFIRMATION_THRESHOLD,
+        db_target: Optional[Union[str, sqlite3.Connection, SqlAlchemySession]] = None,
+        scope: Any = None,
     ) -> None:
-        self.db_target = db_target
-        self.logger = tool_logger or ToolLogger()
-        self.registry = ToolRegistry(tool_logger=self.logger)
+        self.tool_logger = tool_logger or ToolLogger()
+        # Kept under the historical name: other code paths read ``agent.logger``.
+        self.logger = self.tool_logger
+        self.registry = ToolRegistry(tool_logger=self.tool_logger, scope=scope)
         self.confidence_threshold = confidence_threshold
+        self.db_target = db_target
+        self.scope = scope
 
     def get_logs(self, request_id: Optional[str] = None) -> List[ToolCallLog]:
         return self.logger.get_logs(request_id)
@@ -774,9 +784,8 @@ class AttendanceAgent:
 
         # 1. Absentees query
         if "absent" in clean or "absentees" in clean:
-            sess_match = re.search(r"(?:session|sess)[\s_-]*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
+            sess_id = self._extract_session_id(text)
             room_match = re.search(r"(?:room)[\s_-]*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
-            sess_id = sess_match.group(1) if sess_match else None
             room_id = room_match.group(1) if room_match else None
 
             res: QueryResult = self.registry.execute(
@@ -808,12 +817,12 @@ class AttendanceAgent:
         # Check for unrecorded metrics not present in database schema (scores, gpa, grades, etc.)
         unsupported_metrics = ["score", "gpa", "marks", "grade", "exam", "rank", "fee", "tuition", "salary"]
         if any(m in clean for m in unsupported_metrics):
-            sess_match = re.search(r"(?:session|sess)[\s_-]*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
+            sess_id = self._extract_session_id(text)
             self.registry.execute(
                 "query_tool",
                 request_id=request_id,
                 query_type="attendance",
-                session_id=sess_match.group(1) if sess_match else None,
+                session_id=sess_id,
                 db_target=db,
             )
             return AgentResponse(
@@ -827,9 +836,8 @@ class AttendanceAgent:
 
         # 2. Session statistics query
         if "stats" in clean or "rate" in clean or "percentage" in clean or "session" in clean:
-            sess_match = re.search(r"(?:session|sess)[\s_-]*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
-            if sess_match:
-                sess_id = sess_match.group(1)
+            sess_id = self._extract_session_id(text)
+            if sess_id:
                 res = self.registry.execute(
                     "query_tool",
                     request_id=request_id,
@@ -930,6 +938,23 @@ class AttendanceAgent:
         match_code = re.search(r"\b(LH-\d+|LAB-\d+)\b", text, re.IGNORECASE)
         if match_code:
             return match_code.group(1).upper()
+        return None
+
+    @staticmethod
+    def _extract_session_id(text: str) -> Optional[str]:
+        """Extract a session identifier from free text.
+
+        Session identifiers such as ``SESS-20261024-01`` are matched in full
+        first; the shorter ``session <id>`` form is the fallback. A truncated
+        identifier would simply not resolve to a session, so the full token is
+        preferred.
+        """
+        explicit = re.search(r"\bSESS[-_][A-Za-z0-9_-]*", text, re.IGNORECASE)
+        if explicit:
+            return explicit.group(0)
+        fallback = re.search(r"(?:session|sess)\b[\s_:-]*([A-Za-z0-9][A-Za-z0-9_-]*)", text, re.IGNORECASE)
+        if fallback:
+            return fallback.group(1)
         return None
 
     @staticmethod

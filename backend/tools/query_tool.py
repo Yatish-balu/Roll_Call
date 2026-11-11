@@ -17,7 +17,7 @@ import re
 import sqlite3
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from app.db.connection import (
     DEFAULT_DB_PATH,
@@ -36,6 +36,100 @@ DISALLOWED_SQL_KEYWORDS = re.compile(
     r"\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|ATTACH|DETACH|REPLACE|TRUNCATE|PRAGMA|VACUUM|REINDEX|GRANT|REVOKE)\b",
     re.IGNORECASE,
 )
+
+# Table references inside a SELECT statement (used for validation and for the
+# authorization rewrite of raw SQL).
+_TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)", re.IGNORECASE)
+
+
+def _scope_clause(
+    scope: Any,
+    table: str,
+    params: Dict[str, Any],
+    db: Any = None,
+) -> Optional[str]:
+    """Return a scoped replacement for a table reference, or None.
+
+    The replacement is a sub-select restricted to the caller's scope, so the
+    restriction is applied by the database engine and not by the caller (or by
+    the model) afterwards.
+    """
+    if scope is None or getattr(scope, "unrestricted", False):
+        return None
+
+    session_ids = sorted(scope.visible_session_ids(db)) if db is not None else []
+    if not session_ids:
+        # No visible session: the table is empty for this caller.
+        return "(SELECT * FROM {t} WHERE 1 = 0)".format(t=table)
+
+    sess_params = []
+    placeholders = []
+    for idx, sid in enumerate(session_ids):
+        key = f"{table}_sid_{idx}"
+        sess_params.append((key, sid))
+        placeholders.append(f":{key}")
+    sess_list = ", ".join(placeholders)
+    params.update(dict(sess_params))
+
+    codes = sorted(getattr(scope, "subject_codes", frozenset()) or frozenset())
+    code_clause = ""
+    if codes:
+        code_placeholders = []
+        for idx, code in enumerate(codes):
+            key = f"{table}_code_{idx}"
+            params[key] = code
+            code_placeholders.append(f":{key}")
+        code_clause = (
+            " OR usn IN (SELECT st.usn FROM students st "
+            "JOIN subjects sub ON st.dept_id = sub.dept_id "
+            f"WHERE UPPER(sub.subject_code) IN ({', '.join(code_placeholders)}))"
+        )
+
+    if table == "attendance":
+        return (
+            f"(SELECT * FROM attendance WHERE session_id IN ({sess_list}) "
+            f"AND usn IN (SELECT a.usn FROM attendance a "
+            f"WHERE a.session_id IN ({sess_list})){code_clause})"
+        )
+    if table == "sessions":
+        return f"(SELECT * FROM sessions WHERE session_id IN ({sess_list}))"
+    if table == "students":
+        return (
+            f"(SELECT * FROM students WHERE usn IN (SELECT a.usn FROM attendance a "
+            f"WHERE a.session_id IN ({sess_list})){code_clause})"
+        )
+    # rooms carry no session link; they are reference data, not attendance.
+    return None
+
+
+def _apply_scope_to_sql(sql: str, scope: Any, db: Any = None) -> Tuple[str, Dict[str, Any]]:
+    """Rewrite a validated SELECT so that it can only read the caller's scope."""
+    if scope is None or getattr(scope, "unrestricted", False):
+        return sql, {}
+
+    params: Dict[str, Any] = {}
+    tables = {t.lower() for t in _TABLE_REF_RE.findall(sql)}
+    scoped_tables = tables & {"attendance", "sessions", "students"}
+    if not scoped_tables:
+        # Nothing session- or student-scoped is referenced.
+        return sql, params
+
+    def _replace(match: "re.Match[str]") -> str:
+        keyword = match.group(1).upper()
+        table = match.group(2)
+        replacement = _scope_clause(scope, table.lower(), params, db)
+        if replacement is None:
+            return match.group(0)
+        return f"{keyword} {replacement}"
+
+    rewritten = re.sub(
+        r"\b(FROM|JOIN)\s+(attendance|sessions|students)\b",
+        _replace,
+        sql,
+        flags=re.IGNORECASE,
+    )
+    return rewritten, params
+
 
 
 @dataclass
@@ -223,15 +317,50 @@ def validate_read_only_sql(sql: str) -> None:
             raise ValueError(f"Access to table '{table}' is not permitted.")
 
 
+def _normalize_scoped_params(
+    sql: str,
+    params: Union[Tuple[Any, ...], List[Any], Dict[str, Any]],
+    scope_params: Dict[str, Any],
+) -> Tuple[str, Dict[str, Any]]:
+    """Merge the scope parameters with the caller's parameters.
+
+    The scoped statement uses named placeholders, so any positional parameters
+    are converted to named ones (``?`` -> ``:p0``, ``:p1`` ...) before they are
+    merged.
+    """
+    if not scope_params:
+        return sql, {}
+
+    if isinstance(params, dict):
+        merged = dict(params)
+        merged.update(scope_params)
+        return sql, merged
+
+    positional = list(params or [])
+    named: Dict[str, Any] = {}
+    rewritten = sql
+    for index, value in enumerate(positional):
+        key = f"p{index}"
+        named[key] = value
+        rewritten = re.sub(r"\?", f":{key}", rewritten, count=1)
+    named.update(scope_params)
+    return rewritten, named
+
+
 def safe_sql_query(
     sql: str,
     params: Union[Tuple[Any, ...], List[Any], Dict[str, Any]] = (),
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     limit: int = 500,
+    scope: Any = None,
 ) -> QueryResult:
     """
     Execute an arbitrary read-only SQL query with safety validation and parameterization.
     Enforces LIMIT clause and returns structured QueryResult.
+
+    When a ``scope`` is supplied the statement is rewritten so that it can only
+    read sessions and students inside the caller's scope. The restriction is
+    applied by the database engine, not afterwards by the model.
     """
     validate_read_only_sql(sql)
 
@@ -242,7 +371,11 @@ def safe_sql_query(
         if not re.search(r"\bLIMIT\s+\d+", clean_sql, re.IGNORECASE):
             clean_sql = f"{clean_sql} LIMIT {limit}"
 
-        res = ro_db.execute(clean_sql, params)
+        scoped_sql, scope_params = _apply_scope_to_sql(clean_sql, scope, db_target)
+        if scope_params:
+            scoped_sql, params = _normalize_scoped_params(scoped_sql, params, scope_params)
+
+        res = ro_db.execute(scoped_sql, params)
         rows = res.fetchall() if hasattr(res, "fetchall") else list(res)
         results = _rows_to_dicts(rows)
 
@@ -279,10 +412,38 @@ def query_attendance(
     status: Optional[str] = None,
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
+    scope: Any = None,
 ) -> QueryResult:
-    """Query attendance records with optional filtering by session, room, branch, USN, or status."""
+    """Query attendance records with optional filtering by session, room, branch, USN, or status.
+
+    When a ``scope`` is supplied, only sessions inside the caller's scope are
+    read, and an explicitly requested session outside that scope yields no data
+    (the existence of the session is not confirmed).
+    """
     conditions = []
     params: List[Any] = []
+
+    if scope is not None and not getattr(scope, "unrestricted", False):
+        visible = sorted(scope.visible_session_ids(db_target))
+        if session_id and session_id.strip() and session_id.strip() not in visible:
+            return QueryResult(
+                found=False,
+                data=[],
+                total_count=0,
+                message=NO_DATA_MESSAGE,
+                metadata={"filters": {"session_id": session_id}},
+            )
+        if not visible:
+            return QueryResult(
+                found=False,
+                data=[],
+                total_count=0,
+                message=NO_DATA_MESSAGE,
+                metadata={},
+            )
+        placeholders = ",".join("?" for _ in visible)
+        conditions.append(f"a.session_id IN ({placeholders})")
+        params.extend(visible)
 
     if session_id:
         conditions.append("a.session_id = ?")
@@ -461,10 +622,29 @@ def query_students(
     name: Optional[str] = None,
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
+    scope: Any = None,
 ) -> QueryResult:
-    """Retrieve students matching optional usn, branch, or name filters."""
+    """Retrieve students matching optional usn, branch, or name filters.
+
+    When a ``scope`` is supplied only students inside the caller's scope are
+    returned.
+    """
     conditions = []
     params: List[Any] = []
+
+    if scope is not None and not getattr(scope, "unrestricted", False):
+        visible = sorted(scope.visible_student_usns(db_target))
+        if not visible:
+            return QueryResult(
+                found=False,
+                data=[],
+                total_count=0,
+                message=NO_DATA_MESSAGE,
+                metadata={},
+            )
+        placeholders = ",".join("?" for _ in visible)
+        conditions.append(f"usn IN ({placeholders})")
+        params.extend(visible)
 
     if usn:
         conditions.append("usn = ?")
@@ -510,9 +690,25 @@ def query_students(
 def query_session_stats(
     session_id: str,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
+    scope: Any = None,
 ) -> QueryResult:
-    """Calculate aggregated attendance metrics for a specific session."""
+    """Calculate aggregated attendance metrics for a specific session.
+
+    When a ``scope`` is supplied, a session outside the caller's scope is
+    reported as "no data" instead of confirming that it exists.
+    """
     clean_id = session_id.strip()
+
+    if scope is not None and not getattr(scope, "unrestricted", False):
+        visible = sorted(scope.visible_session_ids(db_target))
+        if clean_id not in visible:
+            return QueryResult(
+                found=False,
+                data=[],
+                total_count=0,
+                message=NO_DATA_MESSAGE,
+                metadata={"session_id": clean_id},
+            )
 
     ro_db = _get_readonly_conn(db_target)
     try:
@@ -615,6 +811,7 @@ def query_absentees(
     branch: Optional[str] = None,
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
+    scope: Any = None,
 ) -> QueryResult:
     """Retrieve absent students for a given session or room/branch combination."""
     return query_attendance(
@@ -624,6 +821,7 @@ def query_absentees(
         status="ABSENT",
         limit=limit,
         db_target=db_target,
+        scope=scope,
     )
 
 
@@ -638,6 +836,7 @@ def query_tool(
     params: Optional[Union[Tuple[Any, ...], List[Any], Dict[str, Any]]] = None,
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
+    scope: Any = None,
     **kwargs: Any,
 ) -> QueryResult:
     """Universal dispatcher for database query operations."""
@@ -652,6 +851,7 @@ def query_tool(
             status=status,
             limit=limit,
             db_target=db_target,
+            scope=scope,
         )
     if clean_type in ("session_stats", "stats", "session"):
         if not session_id:
@@ -662,7 +862,9 @@ def query_tool(
                 message="session_id is required for session_stats query.",
                 metadata={},
             )
-        return query_session_stats(session_id=session_id, db_target=db_target)
+        return query_session_stats(
+            session_id=session_id, db_target=db_target, scope=scope
+        )
     if clean_type in ("absentees", "absent"):
         return query_absentees(
             session_id=session_id,
@@ -670,6 +872,7 @@ def query_tool(
             branch=branch,
             limit=limit,
             db_target=db_target,
+            scope=scope,
         )
     if clean_type in ("students", "student"):
         return query_students(
@@ -678,6 +881,7 @@ def query_tool(
             name=kwargs.get("name"),
             limit=limit,
             db_target=db_target,
+            scope=scope,
         )
     if clean_type in ("sql", "custom_sql"):
         if not sql:
@@ -693,6 +897,7 @@ def query_tool(
             params=params or (),
             db_target=db_target,
             limit=limit,
+            scope=scope,
         )
 
     return QueryResult(

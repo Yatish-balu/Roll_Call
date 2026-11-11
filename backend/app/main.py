@@ -7,7 +7,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 # Ensure backend directory is in sys.path
 _BACKEND_DIR = str(Path(__file__).resolve().parents[1])
@@ -54,10 +54,15 @@ async def lifespan(app: FastAPI):
     logger.info("RollCall AI FastAPI application starting up...")
 
     # Validate JWT configuration on startup
-    from app.auth.jwt import validate_jwt_secret_configuration
+    from app.auth.jwt import DEV_FALLBACK_SECRET, validate_jwt_secret_configuration
     env = os.getenv("APP_ENV", "development").lower()
     secret = os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY")
     if env == "production" or secret:
+        if env == "production" and (secret or "").strip() == DEV_FALLBACK_SECRET:
+            raise RuntimeError(
+                "Production security violation: the insecure development JWT secret "
+                "cannot be used in production."
+            )
         validate_jwt_secret_configuration(secret, env)
 
     # Deliberate database connectivity check for production startup.
@@ -162,7 +167,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "type": err.get("type", "value_error"),
         })
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         content={
             "error": {
                 "code": "VALIDATION",
@@ -219,6 +224,64 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
             "message": "An unexpected internal server error occurred. Please try again later.",
         },
     )
+
+
+# ==============================================================================
+# 3b. Security Middleware: request correlation ids + access-denial events
+# ==============================================================================
+
+from app.security.context import clear_request_id, get_request_id, new_request_id, set_request_id
+from app.security.detection import detector
+from app.security.events import log_security_event
+
+
+def _client_ip(request: Request) -> Optional[str]:
+    """Best-effort client address (never a credential)."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    if request.client and request.client.host:
+        return request.client.host
+    return None
+
+
+@app.middleware("http")
+async def security_context_middleware(request: Request, call_next):
+    """Attach a correlation id and report denied access as a security event.
+
+    The correlation id is echoed back as ``X-Request-ID`` so an operator can
+    tie an application request to the security events it produced. Denied
+    requests are counted by the detector; a single denial never blocks a user.
+    """
+    incoming = request.headers.get("x-request-id", "").strip()
+    request_id = incoming[:64] if incoming else new_request_id()
+    token = set_request_id(request_id)
+    request.state.request_id = request_id
+    try:
+        response = await call_next(request)
+    finally:
+        clear_request_id(token)
+
+    response.headers["X-Request-ID"] = request_id
+
+    if response.status_code in (401, 403):
+        detector.record_access_denied(
+            ip_address=_client_ip(request),
+            path=request.url.path,
+            status_code=response.status_code,
+            request_id=request_id,
+        )
+        log_security_event(
+            "access_denied",
+            severity="warning" if response.status_code == 403 else "info",
+            outcome="failure",
+            ip_address=_client_ip(request),
+            request_id=request_id,
+            path=request.url.path,
+            method=request.method,
+            details={"status_code": response.status_code},
+        )
+    return response
 
 
 # ==============================================================================

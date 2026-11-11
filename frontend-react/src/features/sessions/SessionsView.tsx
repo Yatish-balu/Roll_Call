@@ -1,15 +1,21 @@
 "use client";
 
 import React, { useEffect, useState, useCallback, useMemo } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { fetchSessions, createSession, type SessionItem } from "@/services/api/sessions";
+import { fetchMySubjects } from "@/services/api/faculty";
 import { useAuth } from "@/hooks/useAuth";
 
 export function SessionsView() {
+  const navigate = useNavigate();
   const { session, isAdmin, isFaculty, isViewer, canScheduleSessions } = useAuth();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Assigned subjects for faculty (authoritative from backend)
+  const [assignedSubjects, setAssignedSubjects] = useState<string[]>([]);
+  const [isLoadingSubjects, setIsLoadingSubjects] = useState(false);
 
   // Search & Filter
   const [searchQuery, setSearchQuery] = useState("");
@@ -27,24 +33,42 @@ export function SessionsView() {
   // Detail Modal
   const [viewSession, setViewSession] = useState<SessionItem | null>(null);
 
+  // Load faculty assigned subjects authoritatively from backend /api/v1/me/subjects
+  useEffect(() => {
+    let isMounted = true;
+    if (isFaculty && !isAdmin) {
+      setIsLoadingSubjects(true);
+      fetchMySubjects()
+        .then((res) => {
+          if (!isMounted) return;
+          const codes = res.subject_codes || [];
+          setAssignedSubjects(codes);
+          setSubjectCode((prev) => (codes.length === 1 ? codes[0] : (prev || (codes.length > 1 ? codes[0] : ""))));
+        })
+        .catch(() => {
+          if (!isMounted) return;
+          const codes = session.subjectCodes || [];
+          setAssignedSubjects(codes);
+          setSubjectCode((prev) => (codes.length === 1 ? codes[0] : prev));
+        })
+        .finally(() => {
+          if (isMounted) setIsLoadingSubjects(false);
+        });
+    }
+    return () => {
+      isMounted = false;
+    };
+  }, [isFaculty, isAdmin, session.subjectCodes]);
+
   const loadSessions = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
       const res = await fetchSessions({ limit: 50 });
       const allItems = res.items || [];
-      // FACULTY must see strictly sessions matching assigned subjects via exact normalized code equality. ADMIN and VIEWER see all sessions.
-      const scoped =
-        !isAdmin && isFaculty
-          ? allItems.filter((s) => {
-              const normalizedCode = (s.subject_code || "").trim().toUpperCase();
-              if (!normalizedCode) return false;
-              return (session.subjectCodes || []).some((assigned) => {
-                return normalizedCode === assigned.trim().toUpperCase();
-              });
-            })
-          : allItems;
-      setSessions(scoped);
+      // Backend automatically applies session visibility rules for faculty.
+      // We display all items returned by the backend authority.
+      setSessions(allItems);
     } catch (err: unknown) {
       if (err instanceof Error) {
         setError(err.message);
@@ -54,7 +78,7 @@ export function SessionsView() {
     } finally {
       setIsLoading(false);
     }
-  }, [isAdmin, isFaculty, session.subjectCodes]);
+  }, []);
 
   useEffect(() => {
     let isMounted = true;
@@ -91,6 +115,14 @@ export function SessionsView() {
       setFormError("You do not have permission to schedule academic sessions.");
       return;
     }
+    if (!isAdmin && isFaculty && assignedSubjects.length === 0) {
+      setFormError("Cannot schedule session: No assigned subjects found for your account.");
+      return;
+    }
+    if (!isAdmin && isFaculty && !subjectCode.trim()) {
+      setFormError("Please select an assigned subject code.");
+      return;
+    }
     if (!sessionId.trim() || !subject.trim() || !sessionDate.trim()) {
       setFormError("Please fill out all required fields.");
       return;
@@ -109,7 +141,11 @@ export function SessionsView() {
       setIsCreateOpen(false);
       setSessionId("");
       setSubject("");
-      setSubjectCode("");
+      if (assignedSubjects.length === 1) {
+        setSubjectCode(assignedSubjects[0]);
+      } else {
+        setSubjectCode("");
+      }
     } catch (err: unknown) {
       if (err instanceof Error) {
         setFormError(err.message);
@@ -170,7 +206,9 @@ export function SessionsView() {
         {canScheduleSessions && !isViewer ? (
           <button
             onClick={() => setIsCreateOpen(true)}
-            className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto"
+            disabled={!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0}
+            className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto disabled:opacity-50 disabled:cursor-not-allowed"
+            title={!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0 ? "No subjects assigned. Session creation disabled." : "Schedule Session"}
           >
             <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M12 4v16m8-8H4" />
@@ -186,6 +224,18 @@ export function SessionsView() {
           </span>
         )}
       </div>
+
+      {/* No Assigned Subjects Warning Banner for Faculty */}
+      {!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0 && (
+        <div className="bg-[#FFF8E1] border border-[#FFE082] rounded-xl p-3.5 text-xs text-[#6C5119] flex items-center space-x-2.5">
+          <svg className="w-5 h-5 text-[#F57F17] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+          <span>
+            You have no assigned subjects. Session creation is disabled until an administrator assigns a subject code to your faculty account.
+          </span>
+        </div>
+      )}
 
       {/* Error Banner */}
       {error && (
@@ -273,12 +323,18 @@ export function SessionsView() {
                   </div>
 
                   <div>
-                    <h3 className="font-extrabold text-base text-[#24251C] line-clamp-1">
+                    <h3
+                      onClick={() => navigate(`/attendance?session=${encodeURIComponent(sess.session_id)}`)}
+                      className="font-extrabold text-base text-[#24251C] line-clamp-1 cursor-pointer hover:text-[#6C5119] transition-colors"
+                      title="Click to open attendance ledger"
+                    >
                       {sess.subject}
                     </h3>
-                    <p className="text-xs text-[#77735F] mt-0.5">
-                      Session ID: <span className="font-mono text-[#24251C]">{sess.session_id}</span>
-                    </p>
+                    <div className="flex items-center space-x-2 text-xs text-[#77735F] mt-0.5 flex-wrap">
+                      <span>ID: <span className="font-mono text-[#24251C]">{sess.session_id}</span></span>
+                      <span>•</span>
+                      <span>Faculty: <span className="font-semibold text-[#24251C]">{sess.teacher_id || "Institutional Faculty"}</span></span>
+                    </div>
                   </div>
 
                   {/* Multi-room and Multi-slot allocation preview */}
@@ -307,7 +363,7 @@ export function SessionsView() {
                     to={`/attendance?session=${encodeURIComponent(sess.session_id)}`}
                     className="inline-flex items-center space-x-1 px-3 py-1.5 rounded-xl text-xs font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors"
                   >
-                    <span>Take Roster</span>
+                    <span>Attendance Ledger</span>
                     <span>→</span>
                   </Link>
                 </div>
@@ -418,18 +474,51 @@ export function SessionsView() {
                 />
               </div>
 
-              <div>
-                <label className="block font-semibold text-[#24251C] mb-1">
-                  Subject Code
-                </label>
-                <input
-                  type="text"
-                  value={subjectCode}
-                  onChange={(e) => setSubjectCode(e.target.value)}
-                  placeholder="e.g. DIST-SYS"
-                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] uppercase focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
-                />
-              </div>
+              {/* Subject Code Selector / Input */}
+              {!isAdmin && isFaculty ? (
+                <div>
+                  <label className="block font-semibold text-[#24251C] mb-1">
+                    Assigned Subject Code *
+                  </label>
+                  {assignedSubjects.length === 0 ? (
+                    <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs">
+                      No subjects are assigned to your faculty account. You cannot create a session.
+                    </div>
+                  ) : assignedSubjects.length === 1 ? (
+                    <div className="px-3.5 py-2.5 rounded-xl bg-[#EDE8D8]/70 border border-[#E4DDCA] text-xs font-mono font-bold text-[#6C5119] flex items-center justify-between">
+                      <span>{assignedSubjects[0]}</span>
+                      <span className="text-[11px] font-sans font-normal text-[#77735F]">Auto-selected</span>
+                    </div>
+                  ) : (
+                    <select
+                      value={subjectCode}
+                      onChange={(e) => setSubjectCode(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] uppercase focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
+                    >
+                      <option value="">-- Select Assigned Subject --</option>
+                      {assignedSubjects.map((code) => (
+                        <option key={code} value={code}>
+                          {code}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                </div>
+              ) : (
+                <div>
+                  <label className="block font-semibold text-[#24251C] mb-1">
+                    Subject Code
+                  </label>
+                  <input
+                    type="text"
+                    value={subjectCode}
+                    onChange={(e) => setSubjectCode(e.target.value)}
+                    placeholder="e.g. DIST-SYS"
+                    className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] uppercase focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="block font-semibold text-[#24251C] mb-1">

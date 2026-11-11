@@ -10,7 +10,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -24,12 +24,35 @@ from app.auth import (
     rate_limit_confirm,
 )
 from app.db import crud
-from app.auth.session_scope import resolve_session_scope
+from app.auth.session_scope import resolve_data_scope
+from app.services.attendance_edits import (
+    AttendanceChange,
+    actor_identity,
+    assert_session_edit_authorized,
+    capture_attendance_statuses,
+    confirm_attendance_edit,
+    propose_attendance_edit,
+    resolve_edit_intent,
+    write_attendance_audit,
+)
 from app.dependencies import get_db
+from app.security.context import get_request_id
+from app.security.events import log_security_event
+from app.security.rate_limit import LimitScope, check_limit
+from app.security.uploads import (
+    check_declared_content_type,
+    check_extension_consistency,
+    check_image_dimensions,
+    get_malware_scanner,
+)
 from app.schemas.agent import (
     AgentConfirmRequest,
     AgentResponseSchema,
     AgentStatusResponse,
+    AttendanceEditConfirmRequest,
+    AttendanceEditConfirmResponse,
+    AttendanceEditProposalRequest,
+    AttendanceEditProposalResponse,
     ChatQueryRequest,
 )
 from app.schemas.auth import AuthenticatedUser
@@ -42,6 +65,16 @@ router = APIRouter(prefix="/agent", tags=["Agent"])
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB limit
 ALLOWED_EXTENSIONS = {".csv", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+
+
+def _client_ip(request: Request) -> Optional[str]:
+    """Best-effort client address (never a credential)."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    if request.client and request.client.host:
+        return request.client.host
+    return None
 
 
 # ==============================================================================
@@ -77,7 +110,12 @@ def agent_chat(
                 detail=str(exc),
             )
 
-    agent = AttendanceAgent(db_target=db)
+    # The agent runs with the caller's authorization scope: every attendance,
+    # session and student read it performs is restricted to the sessions the
+    # caller may see. This is enforced in the tool/query layer, never by the
+    # prompt or the model.
+    scope = resolve_data_scope(db, current_user)
+    agent = AttendanceAgent(db_target=db, scope=scope)
     req_id = str(uuid.uuid4())
 
     contextual_query = query_text
@@ -105,6 +143,7 @@ def agent_chat(
     },
 )
 async def agent_process_file(
+    request: Request,
     file: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
     default_room: Optional[str] = Form(None),
@@ -112,6 +151,32 @@ async def agent_process_file(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
+    # Upload rate limit (per caller and per IP), shared between workers.
+    client_ip = _client_ip(request)
+    upload_decision = check_limit(
+        db, LimitScope.UPLOAD, f"user:{current_user.user_id}", record_failure=True, commit=True
+    )
+    if not upload_decision.allowed:
+        log_security_event(
+            "rate_limit_triggered",
+            severity="warning",
+            outcome="blocked",
+            actor_id=current_user.user_id,
+            ip_address=client_ip,
+            request_id=get_request_id(),
+            details={"scope": "upload", "retry_after_seconds": upload_decision.retry_after_seconds},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail={
+                "error": {
+                    "code": "RATE_LIMITED",
+                    "message": "Too many uploads. Please try again later.",
+                }
+            },
+            headers={"Retry-After": str(upload_decision.retry_after_seconds)},
+        )
+
     # 1. Filename and extension check (Path traversal & null byte protection)
     raw_filename = file.filename or ""
     clean_filename = os.path.basename(raw_filename).replace("\x00", "")
@@ -141,7 +206,7 @@ async def agent_process_file(
                 total_bytes += len(chunk)
                 if total_bytes > MAX_UPLOAD_SIZE:
                     raise HTTPException(
-                        status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+                        status_code=status.HTTP_413_CONTENT_TOO_LARGE,
                         detail=f"Uploaded file exceeds maximum allowed limit of {MAX_UPLOAD_SIZE // (1024 * 1024)}MB.",
                     )
                 f.write(chunk)
@@ -181,10 +246,67 @@ async def agent_process_file(
                     detail=f"Uploaded file header does not match valid image signature for '{ext}'.",
                 )
 
-        agent = AttendanceAgent(db_target=db)
+            # Extension / content consistency (a .png that is really a JPEG is
+            # rejected) and the declared MIME type must not contradict the bytes.
+            consistency = check_extension_consistency(safe_filename, first_chunk)
+            if not consistency.ok:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=consistency.detail,
+                )
+            declared = check_declared_content_type(file.content_type, consistency.content_type)
+            if not declared.ok:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=declared.detail,
+                )
 
-        # Pre-load master USNs and Rooms if available for master data validation
+            # Image dimension / pixel-count limits (decompression-bomb guard).
+            dimensions = check_image_dimensions(temp_path)
+            if not dimensions.ok:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=dimensions.detail,
+                )
+
+        # Malware scanning (when a scanner is configured the file is scanned;
+        # without one the deployment limitation is recorded, never hidden).
+        scanner = get_malware_scanner()
+        clean, scan_detail = scanner.scan(temp_path)
+        if not clean:
+            log_security_event(
+                "upload_rejected",
+                severity="critical",
+                outcome="failure",
+                actor_id=current_user.user_id,
+                ip_address=_client_ip(request),
+                request_id=get_request_id(),
+                details={"reason": "malware_detected", "filename": safe_filename},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The uploaded file was rejected by the malware scanner.",
+            )
+        if not scanner.available:
+            log_security_event(
+                "upload_scanner_unavailable",
+                severity="warning",
+                outcome="suspicious",
+                actor_id=current_user.user_id,
+                request_id=get_request_id(),
+                details={"filename": safe_filename, "note": "file was not scanned"},
+            )
+
+        scope = resolve_data_scope(db, current_user)
+        agent = AttendanceAgent(db_target=db, scope=scope)
+
+        # Pre-load master USNs and Rooms if available for master data validation.
+        # The master list is restricted to the caller's scope, so validation
+        # issues can never be used to probe the full student roster.
         all_students = crud.get_all_students(db)
+        if not scope.unrestricted:
+            visible_usns = scope.visible_student_usns(db)
+            all_students = [s for s in all_students if str(s.get("usn", "")).upper() in visible_usns]
         all_rooms = crud.get_all_rooms(db)
         master_usns = [s["usn"] for s in all_students] if all_students else None
         master_rooms = [r["room_id"] for r in all_rooms] if all_rooms else None
@@ -252,8 +374,9 @@ def agent_confirm(
 
     # Committing attendance is a write into that session, so the caller must be
     # authorized for it: owner, coordinator, or exact subject-code mapping.
-    scope = resolve_session_scope(db, current_user)
-    scope.assert_allowed(session)
+    # The same policy the direct API uses - never a decision taken from the
+    # chat text or the LLM output.
+    assert_session_edit_authorized(current_user, session, db)
 
     if not payload.records:
         raise HTTPException(
@@ -308,8 +431,32 @@ def agent_confirm(
         for r in payload.records
     ]
 
+    # Previous status of the affected students (the confirmation must record
+    # the real old -> new transition).
+    previous_statuses = capture_attendance_statuses(
+        db, clean_sess, [r["usn"] for r in formatted_records]
+    )
+
     try:
         count = crud.insert_attendance_bulk(db, records=formatted_records, upsert=False)
+        # Same audit service as the direct API path: one append-only record per
+        # confirmed student, in the same transaction as the write.
+        actor_id, actor_role = actor_identity(current_user)
+        write_attendance_audit(
+            db,
+            actor_id=actor_id,
+            actor_role=actor_role,
+            session_id=clean_sess,
+            action="ATTENDANCE_AGENT_CONFIRM",
+            changes=[
+                AttendanceChange(
+                    usn=r["usn"],
+                    old_status=previous_statuses.get(r["usn"]),
+                    new_status=crud.normalize_attendance_status(r["status"]),
+                )
+                for r in formatted_records
+            ],
+        )
         db.commit()
         return {
             "success": True,
@@ -330,7 +477,97 @@ def agent_confirm(
 
 
 # ==============================================================================
-# 4. GET /api/v1/agent/status
+# 5. POST /api/v1/agent/attendance/propose  (N7 step A)
+# ==============================================================================
+
+@router.post(
+    "/attendance/propose",
+    response_model=AttendanceEditProposalResponse,
+    summary="Propose an attendance modification",
+    description=(
+        "Step A of the AI attendance-editing workflow: resolve the intended session, student "
+        "and status, verify that the caller is authorized for that session and store a pending "
+        "confirmation. NOTHING is written to attendance at this stage. The pending confirmation "
+        "is bound to the authenticated user and expires after five minutes."
+    ),
+    dependencies=[Depends(rate_limit_chat)],
+    responses={
+        200: {"description": "Proposal created, or a clarification was requested"},
+        403: {"description": "Caller is not authorized for the session"},
+        404: {"description": "Session or student not found"},
+        409: {"description": "No attendance record to modify, or the status is already set"},
+        422: {"description": "Invalid proposed status"},
+    },
+)
+def propose_attendance_modification(
+    payload: AttendanceEditProposalRequest,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    try:
+        intent = resolve_edit_intent(
+            db,
+            query=payload.query,
+            session_id=payload.session_id,
+            usn=payload.usn,
+            new_status=payload.new_status,
+        )
+    except ValueError as exc:
+        # An explicitly supplied status that is not a valid attendance status.
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        )
+
+    return propose_attendance_edit(
+        db,
+        current_user,
+        intent=intent,
+        reason=payload.reason,
+        request_id=payload.request_id,
+    )
+
+
+# ==============================================================================
+# 6. POST /api/v1/agent/attendance/confirm  (N7 step B)
+# ==============================================================================
+
+@router.post(
+    "/attendance/confirm",
+    response_model=AttendanceEditConfirmResponse,
+    summary="Confirm a proposed attendance modification",
+    description=(
+        "Step B of the AI attendance-editing workflow: apply the stored proposal after an "
+        "explicit confirmation. Only the confirmation identifier is accepted - the student, "
+        "session and proposed status come from the stored proposal and the actor identity and "
+        "role from the verified authentication context."
+    ),
+    dependencies=[Depends(rate_limit_confirm)],
+    responses={
+        200: {"description": "The stored proposal was applied"},
+        400: {"description": "Missing confirmation identifier"},
+        403: {"description": "Authorization for the session has been lost"},
+        404: {"description": "Confirmation not found or not accessible"},
+        409: {"description": "Confirmation already used, conflicting or stale"},
+        410: {"description": "Confirmation expired"},
+    },
+)
+def confirm_attendance_modification(
+    payload: AttendanceEditConfirmRequest,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    return confirm_attendance_edit(
+        db,
+        current_user,
+        confirmation_id=payload.confirmation_id,
+        reason=payload.reason,
+        request_id=payload.request_id,
+    )
+
+
+# ==============================================================================
+# 7. GET /api/v1/agent/status
 # ==============================================================================
 
 @router.get(
