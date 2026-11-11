@@ -437,10 +437,13 @@ def test_attendance_mutations_are_audited(api):
 # N2 authentication / rate limiting
 # ---------------------------------------------------------------------------
 
-def test_unknown_user_logins_are_rate_limited_by_ip():
+def test_unknown_user_logins_are_rate_limited_by_ip(monkeypatch):
     """Regression: unknown accounts were never throttled (user_id stored NULL)."""
     from app.routers.auth import _check_rate_limit, _record_attempt
 
+    # The IP quota is deployment-tunable and generous enough for shared NATs;
+    # pin it here so the test exercises the limit rather than its default.
+    monkeypatch.setenv("LOGIN_IP_FAILURE_LIMIT", "20")
     now_dt = datetime.now(timezone.utc)
     now_iso = _iso(now_dt)
     ip = "203.0.113.77"
@@ -500,10 +503,16 @@ def test_authentication_fails_closed_when_database_is_unavailable(api, monkeypat
     client, _factory = api
     headers = {"Authorization": f"Bearer {_token('faculty_ds', 'FACULTY')}"}
 
-    def boom():
-        raise RuntimeError("database down")
+    class _BrokenSession:
+        def get(self, *args, **kwargs):
+            raise RuntimeError("database down")
 
-    monkeypatch.setattr("app.auth.dependencies.get_sync_session_factory", boom)
+    def broken_db():
+        yield _BrokenSession()
+
+    # Authentication now resolves the user through the request-scoped session,
+    # so a failing session must still fail closed with 503.
+    monkeypatch.setitem(app.dependency_overrides, get_db, broken_db)
     res = client.get("/api/v1/students", headers=headers)
     assert res.status_code == 503, res.text
 

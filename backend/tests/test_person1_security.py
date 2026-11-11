@@ -41,7 +41,7 @@ from app.main import app
 from app.security import mfa as mfa_module
 from app.security.rate_limit import LimitScope, check_limit, clear_limit, get_policy
 
-TEST_SECRET = "person1-test-secret-key-at-least-32-characters-long"
+TEST_SECRET = "person1-test-secret-key-at-least-32-characters-long"  # gitleaks:allow - dummy signing key for tests, never a deployed credential
 MFA_KEY = mfa_module.base64.urlsafe_b64encode(b"0" * 32).decode("ascii")
 
 # Real JWT verification (no mock admin user) for every test in this module.
@@ -97,7 +97,6 @@ def client(engine, monkeypatch):
     # isolated test database so the test never touches another database.
     monkeypatch.setattr("app.db.connection.get_sync_session_factory", lambda eng=None: factory)
     monkeypatch.setattr("app.routers.auth.get_sync_session_factory", lambda: factory)
-    monkeypatch.setattr("app.auth.dependencies.get_sync_session_factory", lambda: factory)
     now = "2026-01-01T00:00:00Z"
     import bcrypt
 
@@ -251,34 +250,38 @@ def test_login_error_is_generic_and_does_not_enumerate_accounts(client):
     assert "password" not in unknown.text.lower() or "invalid" in unknown.text.lower()
 
 
-def test_repeated_failed_logins_lock_the_account_temporarily(client, monkeypatch):
+def test_repeated_failed_logins_are_throttled_without_locking_out_the_owner(client, monkeypatch):
     monkeypatch.setenv("SEC_LOGIN_LIMIT", "3")
     monkeypatch.setenv("SEC_LOGIN_BASE_DELAY_SECONDS", "0")
     statuses = [_login(client).status_code for _ in range(6)]
     assert 429 in statuses, statuses
-    locked = client.post("/api/v1/auth/login",
-                         json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!"})
-    assert locked.status_code == 429, locked.text
+    # The correct credential is never refused: otherwise an attacker could keep
+    # any known account locked out with a handful of bad attempts (DoS).
+    unlocked = client.post("/api/v1/auth/login",
+                           json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!"})
+    assert unlocked.status_code == 200, unlocked.text
 
 
-def test_lockout_expires_and_the_user_can_log_in_again(client, engine, monkeypatch):
+def test_lockout_still_applies_to_wrong_credentials_and_expires(client, engine, monkeypatch):
     monkeypatch.setenv("SEC_LOGIN_LIMIT", "2")
     monkeypatch.setenv("SEC_LOGIN_BASE_DELAY_SECONDS", "0")
     for _ in range(4):
         _login(client)
-    assert _login(client, password="FacultyPassw0rd!").status_code == 429
+    # Guessing keeps being throttled...
+    assert _login(client).status_code == 429
 
-    # Expire the lockout window and let the account recover (both the shared
-    # limiter and the legacy per-account attempt quota).
+    # ...while the legitimate credential is accepted regardless of the lockout.
+    assert _login(client, password="FacultyPassw0rd!").status_code == 200
+
+    # Expire the lockout window and let the counters recover.
     factory = sessionmaker(bind=engine, class_=OrmSession, expire_on_commit=False)
     with factory() as db:
         db.execute(text("UPDATE security_rate_limits SET blocked_until = '2000-01-01T00:00:00Z'"))
         db.execute(text("DELETE FROM login_attempts"))
         db.commit()
 
-    recovered = client.post("/api/v1/auth/login",
-                            json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!"})
-    assert recovered.status_code == 200, recovered.text
+    recovered = _login(client)
+    assert recovered.status_code == 401, recovered.text
 
 
 def test_successful_login_clears_the_failure_counters(client, engine, monkeypatch):
@@ -778,3 +781,188 @@ def test_alembic_has_a_single_head_and_migrates_on_a_disposable_database():
         assert "security_rate_limits" in tables
         assert "audit_chain_head" in tables
         assert "security_decoys" in tables
+
+
+# ---------------------------------------------------------------------------
+# 8. Regression tests for the fixed Person 1 findings
+# ---------------------------------------------------------------------------
+
+def test_mfa_is_enforced_at_login(client, monkeypatch):
+    """A password alone must never authenticate an MFA-enabled account."""
+    monkeypatch.setenv("MFA_ENCRYPTION_KEY", MFA_KEY)
+    enable = client.post(
+        "/api/v1/auth/mfa/enable",
+        json={"current_password": "FacultyPassw0rd!"},
+        headers=_headers("faculty_ds", "FACULTY"),
+    )
+    assert enable.status_code == 200, enable.text
+    secret = enable.json()["secret"]
+    assert client.post(
+        "/api/v1/auth/mfa/verify",
+        json={"code": mfa_module.totp_code(secret)},
+        headers=_headers("faculty_ds", "FACULTY"),
+    ).status_code == 200
+
+    # Password only -> rejected, no session created.
+    password_only = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!"},
+    )
+    assert password_only.status_code == 401, password_only.text
+
+    # Wrong code -> rejected with the same generic answer.
+    wrong_code = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!", "mfa_code": "000000"},
+    )
+    assert wrong_code.status_code == 401, wrong_code.text
+
+    # A valid next-step TOTP completes the login.
+    next_code = mfa_module.totp_code(secret, timestamp=int(datetime.now(timezone.utc).timestamp()) + 30)
+    ok = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!", "mfa_code": next_code},
+    )
+    assert ok.status_code == 200, ok.text
+
+
+def test_quoted_and_qualified_table_names_are_rejected():
+    """`FROM \"attendance\"` used to bypass both the allowlist and the scope rewrite."""
+    from tools.query_tool import validate_read_only_sql
+
+    for statement in (
+        'SELECT * FROM "attendance"',
+        "SELECT * FROM [attendance]",
+        "SELECT * FROM `attendance`",
+        "SELECT * FROM main.attendance",
+        'SELECT * FROM "sessions" WHERE session_id = ?',
+        "SELECT * FROM/**/users",  # comment used as a separator
+        "SELECT * FROM users -- trailing comment",
+        "SELECT /* hidden */ * FROM users",
+    ):
+        with pytest.raises(ValueError):
+            validate_read_only_sql(statement)
+
+    # Plain identifiers keep working.
+    validate_read_only_sql("SELECT * FROM attendance WHERE session_id = ?")
+
+
+def test_password_reset_can_be_self_service_without_a_session(client, monkeypatch):
+    """A locked-out user must be able to request a reset without logging in."""
+    monkeypatch.setattr("app.routers.auth.get_email_provider", lambda: _RecordingEmailProvider())
+    res = client.post("/api/v1/auth/password/reset", json={"user_id": "faculty_ds"})
+    assert res.status_code == 200, res.text
+    assert res.json()["reset_initiated"] is True
+
+
+def test_logout_without_a_session_is_rejected(client):
+    res = client.post("/api/v1/auth/logout", headers={"X-Requested-With": "XMLHttpRequest"})
+    assert res.status_code == 401, res.text
+
+
+def test_deleted_user_token_is_rejected(client):
+    """A locally issued token whose user row is gone must stop working."""
+    res = client.get("/api/v1/auth/me", headers=_headers("deleted_user", "FACULTY"))
+    assert res.status_code == 401, res.text
+
+
+def test_health_does_not_expose_the_environment(client):
+    res = client.get("/health")
+    assert res.status_code == 200
+    assert "environment" not in res.json()
+
+
+def test_revoke_all_sessions_works(client, engine):
+    factory = sessionmaker(bind=engine, class_=OrmSession, expire_on_commit=False)
+    with factory() as db:
+        db.add(
+            models.AuthSession(
+                session_id="44444444-4444-4444-4444-444444444444",
+                user_id="faculty_ds",
+                created_at="2026-01-01T00:00:00Z",
+                absolute_expiry="2026-02-01T00:00:00Z",
+                revoked_at=None,
+                remember_me=0,
+            )
+        )
+        db.commit()
+
+    res = client.post("/api/v1/auth/sessions/revoke-all", headers=_headers("faculty_ds", "FACULTY"))
+    assert res.status_code == 200, res.text
+
+    with factory() as db:
+        row = db.get(models.AuthSession, "44444444-4444-4444-4444-444444444444")
+        assert row.revoked_at is not None
+
+
+def test_access_jwt_is_invalidated_immediately_on_logout(client):
+    login_res = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!"},
+    )
+    assert login_res.status_code == 200, login_res.text
+    token = login_res.json()["token"]
+
+    assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"}).status_code == 200
+
+    logout_res = client.post("/api/v1/auth/logout", headers={"X-Requested-With": "XMLHttpRequest"})
+    assert logout_res.status_code == 200, logout_res.text
+
+    after = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert after.status_code == 401, after.text
+
+
+def test_production_login_and_refresh_include_issuer_and_audience(client, monkeypatch):
+    monkeypatch.setenv("APP_ENV", "production")
+    monkeypatch.setenv("JWT_ISSUER", "https://rollcall.example")
+    monkeypatch.setenv("JWT_AUDIENCE", "rollcall-api")
+
+    login_res = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "faculty_ds", "password": "FacultyPassw0rd!"},
+    )
+    assert login_res.status_code == 200, login_res.text
+    token = login_res.json()["token"]
+
+    me_res = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    assert me_res.status_code == 200, me_res.text
+
+    refresh_cookie = login_res.cookies.get("rollcall_refresh_token")
+    assert refresh_cookie
+
+    refresh_res = client.post(
+        "/api/v1/auth/refresh",
+        cookies={"rollcall_refresh_token": refresh_cookie},
+        headers={"X-Requested-With": "XMLHttpRequest"},
+    )
+    assert refresh_res.status_code == 200, refresh_res.text
+    refreshed_token = refresh_res.json()["token"]
+    assert client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {refreshed_token}"}).status_code == 200
+
+
+def test_mfa_disable_is_rate_limited(client, monkeypatch):
+    monkeypatch.setenv("MFA_ENCRYPTION_KEY", MFA_KEY)
+    monkeypatch.setenv("SEC_MFA_VERIFY_LIMIT", "2")
+    enable = client.post(
+        "/api/v1/auth/mfa/enable",
+        json={"current_password": "FacultyPassw0rd!"},
+        headers=_headers("faculty_ds", "FACULTY"),
+    )
+    assert enable.status_code == 200, enable.text
+    secret = enable.json()["secret"]
+    assert client.post(
+        "/api/v1/auth/mfa/verify",
+        json={"code": mfa_module.totp_code(secret)},
+        headers=_headers("faculty_ds", "FACULTY"),
+    ).status_code == 200
+
+    statuses = [
+        client.post(
+            "/api/v1/auth/mfa/disable",
+            json={"current_password": "FacultyPassw0rd!", "code": "000000"},
+            headers=_headers("faculty_ds", "FACULTY"),
+        ).status_code
+        for _ in range(4)
+    ]
+    assert 429 in statuses, statuses
+

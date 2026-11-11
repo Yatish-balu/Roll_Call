@@ -166,7 +166,23 @@ Key environment variables:
 - `GEMINI_API_KEY`: Optional; enables Gemini Vision extraction for photo attendance.
 - `ALLOWED_ORIGINS`: Comma-separated list of allowed CORS origins (default: safe localhost ports).
 - `RATE_LIMIT_ENABLED`: `true` to enforce rate limits on expensive operations.
+- `REDIS_URL`: Optional; shared rate-limit counters for multi-worker runs (see below).
 - `DB_POOL_SIZE`, `DB_MAX_OVERFLOW`, `DB_POOL_RECYCLE`: Connection pool tunables for PostgreSQL.
+
+### 4. Optional: Redis for Shared Rate Limiting
+
+Without Redis the limiter uses the shared database counters (or process-local
+counters for the chat/upload/report quotas). To match production, start the
+bundled Redis service and point `REDIS_URL` at it:
+
+```bash
+docker compose up -d redis
+# in .env: REDIS_URL=redis://127.0.0.1:6379/0
+```
+
+The port is bound to `127.0.0.1` only. Check the active backend with
+`python -c "from app.security.rate_limit import backend_mode; print(backend_mode())"`
+from `backend/`; it prints `redis` when the shared counters are in use.
 
 ---
 

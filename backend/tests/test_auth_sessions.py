@@ -52,7 +52,6 @@ def session_test_db(monkeypatch):
     monkeypatch.setenv("APP_ENV", "testing")
     monkeypatch.setattr("app.db.connection.get_sync_session_factory", lambda eng=None: SessionLocal)
     monkeypatch.setattr("app.routers.auth.get_sync_session_factory", lambda: SessionLocal)
-    monkeypatch.setattr("app.auth.dependencies.get_sync_session_factory", lambda: SessionLocal)
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     with SessionLocal() as db:
@@ -82,8 +81,26 @@ def session_test_db(monkeypatch):
         db.add(ts1)
         db.commit()
 
+    # Route sessions and the auth user lookup share the request-scoped session,
+    # so point get_db at this isolated database too.
+    from app.dependencies import get_db
+
+    def override_get_db():
+        session = SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    previous_override = app.dependency_overrides.get(get_db)
+    app.dependency_overrides[get_db] = override_get_db
+
     yield engine, SessionLocal, db_path
 
+    if previous_override is None:
+        app.dependency_overrides.pop(get_db, None)
+    else:
+        app.dependency_overrides[get_db] = previous_override
     engine.dispose()
     shutil.rmtree(temp_dir, ignore_errors=True)
 

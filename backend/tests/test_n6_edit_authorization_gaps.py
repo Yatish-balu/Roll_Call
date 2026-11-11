@@ -35,7 +35,7 @@ from app.main import app
 
 pytestmark = pytest.mark.no_auth_override
 
-TEST_SECRET = "test-secret-key-for-n6-gap-tests-at-least-32-characters"
+TEST_SECRET = "test-secret-key-for-n6-gap-tests-at-least-32-characters"  # gitleaks:allow - dummy signing key for tests, never a deployed credential
 
 
 def _token(user_id: str, role: str) -> str:

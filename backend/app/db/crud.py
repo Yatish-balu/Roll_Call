@@ -350,10 +350,10 @@ def get_students_paginated(
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     with _get_conn(target) as conn:
-        count_cursor = conn.execute(f"SELECT COUNT(*) FROM students {where_sql}", params)
+        count_cursor = conn.execute(f"SELECT COUNT(*) FROM students {where_sql}", params)  # nosec B608
         total = count_cursor.fetchone()[0]
 
-        data_query = f"SELECT usn, name, branch FROM students {where_sql} ORDER BY usn ASC LIMIT ? OFFSET ?"
+        data_query = f"SELECT usn, name, branch FROM students {where_sql} ORDER BY usn ASC LIMIT ? OFFSET ?"  # nosec B608 - fixed literals, bound values
         data_params = params + [limit_val, offset_val]
         data_cursor = conn.execute(data_query, data_params)
         items = _rows_to_dicts(data_cursor.fetchall())
@@ -507,10 +507,10 @@ def get_rooms_paginated(
     where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
     with _get_conn(target) as conn:
-        count_cursor = conn.execute(f"SELECT COUNT(*) FROM rooms {where_sql}", params)
+        count_cursor = conn.execute(f"SELECT COUNT(*) FROM rooms {where_sql}", params)  # nosec B608 - fixed literals, bound values
         total = count_cursor.fetchone()[0]
 
-        data_query = f"SELECT room_id, name FROM rooms {where_sql} ORDER BY room_id ASC LIMIT ? OFFSET ?"
+        data_query = f"SELECT room_id, name FROM rooms {where_sql} ORDER BY room_id ASC LIMIT ? OFFSET ?"  # nosec B608 - fixed literals, bound values
         data_params = params + [limit_val, offset_val]
         data_cursor = conn.execute(data_query, data_params)
         items = _rows_to_dicts(data_cursor.fetchall())
@@ -656,7 +656,7 @@ def get_session(
         available = _session_table_columns(conn)
         select_columns = ", ".join(_session_select_columns(available))
         cursor = conn.execute(
-            f"SELECT {select_columns} FROM sessions WHERE session_id = ?", (clean_id,)
+            f"SELECT {select_columns} FROM sessions WHERE session_id = ?", (clean_id,)  # nosec B608 - columns from a fixed allowlist, value bound
         )
         return _row_to_dict(cursor.fetchone())
 
@@ -674,7 +674,7 @@ def get_all_sessions(
         available = _session_table_columns(conn)
         select_columns = ", ".join(_session_select_columns(available))
         cursor = conn.execute(
-            f"SELECT {select_columns} FROM sessions ORDER BY date DESC, session_id ASC"
+            f"SELECT {select_columns} FROM sessions ORDER BY date DESC, session_id ASC"  # nosec B608 - columns from a fixed allowlist
         )
         return _rows_to_dicts(cursor.fetchall())
 
@@ -702,7 +702,7 @@ def get_sessions_by_date(
         available = _session_table_columns(conn)
         select_columns = ", ".join(_session_select_columns(available))
         cursor = conn.execute(
-            f"SELECT {select_columns} FROM sessions WHERE date = ? ORDER BY session_id ASC",
+            f"SELECT {select_columns} FROM sessions WHERE date = ? ORDER BY session_id ASC",  # nosec B608 - allowlisted columns, value bound
             (clean_date,),
         )
         return _rows_to_dicts(cursor.fetchall())
@@ -764,11 +764,11 @@ def get_sessions_paginated(
     with _get_conn(target) as conn:
         available = _session_table_columns(conn)
         select_columns = ", ".join(_session_select_columns(available))
-        count_cursor = conn.execute(f"SELECT COUNT(*) FROM sessions {where_sql}", params)
+        count_cursor = conn.execute(f"SELECT COUNT(*) FROM sessions {where_sql}", params)  # nosec B608 - fixed literals, bound values
         total = count_cursor.fetchone()[0]
 
         data_query = (
-            f"SELECT {select_columns} FROM sessions {where_sql} "
+            f"SELECT {select_columns} FROM sessions {where_sql} "  # nosec B608 - allowlisted columns, bound values
             "ORDER BY date DESC, session_id ASC LIMIT ? OFFSET ?"
         )
         data_params = params + [limit_val, offset_val]
@@ -920,11 +920,11 @@ def get_sessions_paginated_scoped(
 
         where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
 
-        count_cursor = conn.execute(f"SELECT COUNT(*) FROM sessions {where_sql}", params)
+        count_cursor = conn.execute(f"SELECT COUNT(*) FROM sessions {where_sql}", params)  # nosec B608 - fixed literals, bound values
         total = count_cursor.fetchone()[0]
 
         data_query = (
-            f"SELECT {select_columns} FROM sessions {where_sql} "
+            f"SELECT {select_columns} FROM sessions {where_sql} "  # nosec B608 - allowlisted columns, bound values
             "ORDER BY date DESC, session_id ASC LIMIT ? OFFSET ?"
         )
         data_params = params + [limit_val, offset_val]
@@ -1637,7 +1637,7 @@ def replace_session_attendance(
         if kept_ids:
             placeholders = ",".join("?" for _ in kept_ids)
             conn.execute(
-                f"DELETE FROM attendance WHERE session_id = ? AND attendance_id NOT IN ({placeholders})",
+                f"DELETE FROM attendance WHERE session_id = ? AND attendance_id NOT IN ({placeholders})",  # nosec B608 - placeholders are generated '?' markers
                 (clean_id, *kept_ids),
             )
         else:
@@ -1800,7 +1800,7 @@ def get_existing_attendance_usns(
     FROM attendance
     WHERE session_id = ? AND usn IN ({placeholders})
     ORDER BY usn ASC
-    """
+    """  # nosec B608 - placeholders are generated '?' markers; values are bound
     with _get_conn(target) as conn:
         cursor = conn.execute(query, [clean_sess] + clean_usns)
         return [row[0] if isinstance(row, tuple) else row["usn"] for row in cursor.fetchall()]
@@ -2553,10 +2553,10 @@ def list_audit_entries(
         )
     )
     with _get_conn(target) as conn:
-        count_cursor = conn.execute(f"SELECT COUNT(*) FROM audit_log {where_sql}", params)
+        count_cursor = conn.execute(f"SELECT COUNT(*) FROM audit_log {where_sql}", params)  # nosec B608 - fixed literals, bound values
         total = count_cursor.fetchone()[0]
         data_query = (
-            f"SELECT {select_columns} FROM audit_log {where_sql} "
+            f"SELECT {select_columns} FROM audit_log {where_sql} "  # nosec B608 - select_columns is a constant string
             "ORDER BY timestamp DESC, log_id DESC LIMIT ? OFFSET ?"
         )
         data_params = params + [limit_val, offset_val]

@@ -13,6 +13,7 @@ import { ReportsView } from "@/features/reports";
 import { AssistantView } from "@/features/assistant";
 import { AuditLogView } from "@/features/audit";
 import { SettingsView } from "@/features/settings";
+import { MyProfileView } from "@/features/settings/MyProfileView";
 import { DefaultersView } from "@/features/defaulters";
 import { CalendarView } from "@/features/calendar";
 
@@ -155,6 +156,16 @@ export function App() {
               <AppShell title="Settings">
                 <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Settings & Preferences">
                   <SettingsView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/profile"
+            element={
+              <AppShell title="My Profile">
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="My Profile">
+                  <MyProfileView />
                 </ProtectedRoute>
               </AppShell>
             }

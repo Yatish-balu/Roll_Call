@@ -29,7 +29,9 @@ def get_db() -> Generator[Session, None, None]:
     - Guaranteed session close.
     - Zero separate database connection systems (uses app.db.connection).
     """
-    factory = get_session_factory()
+    # Resolve the factory per call so the patched/configured connection factory
+    # is always the one used (the sessionmaker itself is cheap to build).
+    factory = get_sync_session_factory()
     session: Session = factory()
     try:
         yield session

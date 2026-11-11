@@ -192,7 +192,7 @@ class AgentResponse:
 class ToolRegistry:
     """Maintains definitions and handlers for registered tools."""
 
-    def __init__(self, tool_logger: ToolLogger, scope: Any = None) -> None:
+    def __init__(self, tool_logger: ToolLogger, scope: Any = None, role: Any = None) -> None:
         self.logger = tool_logger
         self.tools: Dict[str, ToolDefinition] = {}
         self.validated_requests: set[str] = set()
@@ -200,6 +200,9 @@ class ToolRegistry:
         # attendance/session/student read performed by a tool is restricted to
         # this scope, so the model can never widen its own access.
         self.scope = scope
+        # Database-verified role of the caller, used for the per-tool policy.
+        # ``None`` means an internal/local pipeline with no HTTP identity.
+        self.role = role
         self._register_default_tools()
 
     def register(self, tool_def: ToolDefinition) -> None:
@@ -246,6 +249,24 @@ class ToolRegistry:
                 error_message=err,
             )
             raise ValueError(err)
+
+        # Second, independent authorization gate at the tool boundary. The
+        # caller's role is database-verified; the model cannot influence it.
+        from app.security.ai_policy import ToolAccessDenied, require_tool_access
+
+        try:
+            require_tool_access(name, self.role)
+        except ToolAccessDenied as exc:
+            self.logger.log(
+                request_id=request_id,
+                tool_name=name,
+                arguments=kwargs,
+                success=False,
+                result_summary="Tool access denied by policy",
+                duration_seconds=0.0,
+                error_message=str(exc),
+            )
+            raise
 
         start_time = time.perf_counter()
         try:
@@ -441,11 +462,12 @@ class AttendanceAgent:
         confidence_threshold: float = CONFIDENCE_CONFIRMATION_THRESHOLD,
         db_target: Optional[Union[str, sqlite3.Connection, SqlAlchemySession]] = None,
         scope: Any = None,
+        role: Any = None,
     ) -> None:
         self.tool_logger = tool_logger or ToolLogger()
         # Kept under the historical name: other code paths read ``agent.logger``.
         self.logger = self.tool_logger
-        self.registry = ToolRegistry(tool_logger=self.tool_logger, scope=scope)
+        self.registry = ToolRegistry(tool_logger=self.tool_logger, scope=scope, role=role)
         self.confidence_threshold = confidence_threshold
         self.db_target = db_target
         self.scope = scope
@@ -613,10 +635,80 @@ class AttendanceAgent:
                     needs_confirmation=False,
                     tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
                 )
+        elif suffix in (".pdf", ".xlsx", ".xls"):
+            # Document rosters (PDF sheets / Excel workbooks) are parsed into the
+            # same canonical record shape as a CSV. Rows with an unusable
+            # identifier or an unknown status are kept and flagged so the
+            # faculty reviews them instead of the pipeline dropping them.
+            try:
+                from app.services.document_extraction import (
+                    extract_rows_from_pdf,
+                    extract_rows_from_xlsx,
+                )
+
+                if suffix == ".pdf":
+                    records, document_issues = extract_rows_from_pdf(str(file_path))
+                else:
+                    records, document_issues = extract_rows_from_xlsx(str(file_path))
+            except Exception as exc:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=f"Error reading {suffix} document: {exc}",
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+
+            if not records:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=(
+                        f"No attendance records could be extracted from the {suffix} document. "
+                        "The file must contain a header row with a USN column and a status column."
+                    ),
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+
+            # Flagged rows (invalid identifier / ambiguous status) always require
+            # an explicit human confirmation before anything is committed.
+            flagged_rows = [
+                r for r in records if r.get("extraction_issue") in ("INVALID_IDENTIFIER", "AMBIGUOUS_STATUS")
+            ]
+            if flagged_rows:
+                issues = document_issues or [
+                    f"Row for '{r.get('usn')}' needs manual review ({r.get('extraction_issue')})."
+                    for r in flagged_rows
+                ]
+                confirm_req = ConfirmationRequest(
+                    needed=True,
+                    affected_rows=flagged_rows,
+                    issues=issues,
+                    question=(
+                        "The document contains invalid or ambiguous student identifiers. "
+                        "Please review and correct these rows before the attendance is applied."
+                    ),
+                )
+                return AgentResponse(
+                    request_id=request_id,
+                    message=(
+                        "The document was read, but some student identifiers are invalid or "
+                        "ambiguous. User confirmation required before proceeding."
+                    ),
+                    success=False,
+                    needs_confirmation=True,
+                    confirmation_request=confirm_req,
+                    data=records,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
         else:
             return AgentResponse(
                 request_id=request_id,
-                message=f"Unsupported file format '{suffix}'. Supported formats: .csv, .png, .jpg, .jpeg.",
+                message=(
+                    f"Unsupported file format '{suffix}'. Supported formats: .csv, .txt, "
+                    ".pdf, .xlsx, .xls, .png, .jpg, .jpeg, .webp, .bmp."
+                ),
                 success=False,
                 needs_confirmation=False,
             )

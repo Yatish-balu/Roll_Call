@@ -688,7 +688,7 @@ def test_ci_workflow_pins_tool_versions():
     workflow = (REPO_ROOT / ".github" / "workflows" / "security.yml").read_text(encoding="utf-8")
     assert re.search(r"PIP_AUDIT_VERSION:\s*\"[0-9][^\"]*\"", workflow)
     assert re.search(r"BANDIT_VERSION:\s*\"[0-9][^\"]*\"", workflow)
-    assert re.search(r"GITLEAKS_VERSION:\s*\"v[^\"]*\"", workflow)
+    assert re.search(r"GITLEAKS_VERSION:\s*\"[0-9][^\"]*\"", workflow)
 
 
 def test_migration_for_the_hash_chain_is_present_and_not_applied():

@@ -206,10 +206,18 @@ export async function fetchAgentStatus(): Promise<AgentStatus> {
   return apiClient.get<AgentStatus>("/api/v1/agent/status");
 }
 
+/**
+ * Upload an attendance roster for extraction.
+ *
+ * The multipart request is built by the browser: the Content-Type header
+ * (including the multipart boundary) is generated automatically, and the
+ * Authorization header is injected by the shared API client.
+ */
 export async function processAttendanceFile(
   file: File,
   sessionId?: string,
-  userConfirmation?: string
+  userConfirmation?: string,
+  onProgress?: (percent: number) => void
 ): Promise<AgentResponse> {
   const formData = new FormData();
   formData.append("file", file);
@@ -217,8 +225,11 @@ export async function processAttendanceFile(
   if (userConfirmation) formData.append("user_confirmation", userConfirmation);
 
   return apiClient.post<AgentResponse>("/api/v1/agent/process-file", formData, {
-    headers: {
-      "Content-Type": "multipart/form-data",
+    onUploadProgress: (event) => {
+      if (!onProgress) return;
+      const total = event.total ?? 0;
+      const percent = total > 0 ? Math.round((event.loaded / total) * 100) : 0;
+      onProgress(percent);
     },
   });
 }

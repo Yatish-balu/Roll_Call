@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -36,6 +37,7 @@ from app.services.attendance_edits import (
     write_attendance_audit,
 )
 from app.dependencies import get_db
+from app.security.ai_input import PromptInjectionError, screen_agent_input
 from app.security.context import get_request_id
 from app.security.events import log_security_event
 from app.security.rate_limit import LimitScope, check_limit
@@ -64,7 +66,24 @@ logger = logging.getLogger("rollcall.routers.agent")
 router = APIRouter(prefix="/agent", tags=["Agent"])
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB limit
-ALLOWED_EXTENSIONS = {".csv", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".bmp"}
+# Supported roster formats. Every extension is validated against the file
+# signature below, so an attacker cannot smuggle a different payload through a
+# renamed file.
+ALLOWED_EXTENSIONS = {
+    ".csv",
+    ".txt",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".webp",
+    ".bmp",
+    ".pdf",
+    ".xlsx",
+    ".xls",
+}
+
+# Document formats that carry an attendance table (as opposed to a photo).
+DOCUMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 
 
 def _client_ip(request: Request) -> Optional[str]:
@@ -90,6 +109,7 @@ def _client_ip(request: Request) -> Optional[str]:
 )
 def agent_chat(
     payload: ChatQueryRequest,
+    request: Request,
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -98,6 +118,26 @@ def agent_chat(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Chat query cannot be empty or whitespace only.",
+        )
+
+    # Prompt-injection screening happens before the text reaches the agent.
+    # File contents are parsed as data by the tools; only chat text is model
+    # input, so this is the only place instructions can enter.
+    try:
+        screen_agent_input(query_text)
+    except PromptInjectionError as exc:
+        log_security_event(
+            "prompt_injection_detected",
+            severity="warning",
+            outcome="blocked",
+            actor_id=current_user.user_id,
+            ip_address=_client_ip(request),
+            request_id=get_request_id(),
+            details={"pattern": exc.pattern},
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "PROMPT_INJECTION", "message": str(exc)}},
         )
 
     # Check for raw SQL attempts that violate read-only rules
@@ -115,7 +155,7 @@ def agent_chat(
     # caller may see. This is enforced in the tool/query layer, never by the
     # prompt or the model.
     scope = resolve_data_scope(db, current_user)
-    agent = AttendanceAgent(db_target=db, scope=scope)
+    agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role)
     req_id = str(uuid.uuid4())
 
     contextual_query = query_text
@@ -219,15 +259,41 @@ async def agent_process_file(
 
         # 3. Content and format inspection
         if ext in (".csv", ".txt"):
-            if first_chunk.startswith((b"MZ", b"\x7fELF", b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa\xce")):
+            # Inspect the whole (already size-limited) file, not just the first
+            # chunk: an executable or NUL byte placed after 64 KB would otherwise
+            # pass the check.
+            with open(temp_path, "rb") as scan_handle:
+                content = scan_handle.read(MAX_UPLOAD_SIZE + 1)
+            if content.startswith((b"MZ", b"\x7fELF", b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa\xce")):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Uploaded file contains executable binary signature, which is not permitted.",
                 )
-            if b"\x00" in first_chunk:
+            if b"\x00" in content:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Uploaded file contains invalid binary content (null bytes) for a CSV/text document.",
+                )
+        elif ext == ".pdf":
+            # A PDF must start with the %PDF- magic bytes.
+            if not first_chunk.startswith(b"%PDF-"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Uploaded file header does not match a valid PDF signature.",
+                )
+        elif ext in (".xlsx", ".xls"):
+            # OOXML workbooks are ZIP archives (PK), legacy .xls files are OLE
+            # compound documents (D0CF11E0A1B11AE1).
+            if ext == ".xlsx":
+                if not first_chunk.startswith(b"PK\x03\x04"):
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Uploaded file header does not match a valid XLSX (OOXML) signature.",
+                    )
+            elif not first_chunk.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Uploaded file header does not match a valid XLS (OLE2) signature.",
                 )
         elif ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             is_valid_magic = False
@@ -298,7 +364,7 @@ async def agent_process_file(
             )
 
         scope = resolve_data_scope(db, current_user)
-        agent = AttendanceAgent(db_target=db, scope=scope)
+        agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role)
 
         # Pre-load master USNs and Rooms if available for master data validation.
         # The master list is restricted to the caller's scope, so validation
@@ -586,13 +652,20 @@ def get_agent_status(
     # Probe Ollama reachability with short non-blocking timeout
     ollama_url = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
     ollama_available = False
-    try:
-        req = urllib.request.Request(f"{ollama_url}/api/tags", headers={"User-Agent": "RollCall-Agent-Probe"})
-        with urllib.request.urlopen(req, timeout=0.3) as response:
-            if response.status == 200:
-                ollama_available = True
-    except Exception:
-        ollama_available = False
+    parsed_ollama = urllib.parse.urlparse(ollama_url)
+    # Only plain HTTP(S) endpoints are probed: file://, ftp:// and similar
+    # schemes are rejected before any request is opened.
+    if parsed_ollama.scheme in ("http", "https") and parsed_ollama.netloc:
+        try:
+            req = urllib.request.Request(
+                f"{ollama_url}/api/tags",
+                headers={"User-Agent": "RollCall-Agent-Probe"},
+            )
+            with urllib.request.urlopen(req, timeout=0.3) as response:  # nosec B310 - scheme restricted to http/https above
+                if response.status == 200:
+                    ollama_available = True
+        except Exception:
+            ollama_available = False
 
     tools = [
         "read_csv_tool",

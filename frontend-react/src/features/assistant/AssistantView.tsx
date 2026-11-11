@@ -15,6 +15,11 @@ import {
 } from "@/services/api/agent";
 import { AnimatedAiMascot } from "@/features/dashboard/components/AnimatedAiMascot";
 
+/** Roster formats accepted by the backend upload endpoint. */
+const SUPPORTED_UPLOAD_EXTENSIONS = [".pdf", ".xlsx", ".xls", ".csv", ".txt"];
+/** The backend enforces a 10 MB upload limit. */
+const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
+
 export interface PhotoQualityRejectionData {
   reasons: string[];
   measuredSharpness?: number;
@@ -149,6 +154,13 @@ export function AssistantView() {
   // File Upload
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [isUploading, setIsUploading] = useState(false);
+  const [uploadProgress, setUploadProgress] = useState(0);
+  const [uploadStage, setUploadStage] = useState<"uploading" | "processing" | "done">("uploading");
+  const [selectedFile, setSelectedFile] = useState<{
+    name: string;
+    type: string;
+    size: number;
+  } | null>(null);
   const [activeSessionId] = useState("");
 
   // Confirmation Modal (legacy)
@@ -308,8 +320,7 @@ export function AssistantView() {
               requestId: res.request_id,
               sessionId:
                 activeSessionId ||
-                (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
-                "DIST_20261024",
+                ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
               question: res.confirmation_request.question || "Do you confirm the proposed attendance modifications?",
               issues: res.confirmation_request.issues || [],
               affectedRows: res.confirmation_request.affected_rows || [],
@@ -336,8 +347,7 @@ export function AssistantView() {
           requestId: res.request_id,
           sessionId:
             activeSessionId ||
-            (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
-            "DIST_20261024",
+            ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
         });
       }
     } catch (err: unknown) {
@@ -378,7 +388,52 @@ export function AssistantView() {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Client side validation (the backend validates the bytes again).
+    const extension = file.name.includes(".")
+      ? `.${file.name.split(".").pop()?.toLowerCase()}`
+      : "";
+    const supported = SUPPORTED_UPLOAD_EXTENSIONS.includes(extension);
+    const isImage = file.type.startsWith("image/");
+
+    if (!supported && !isImage) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: nextMsgId("err"),
+          sender: "assistant",
+          text: `Unsupported file type "${extension || file.type || "unknown"}". Supported formats: ${SUPPORTED_UPLOAD_EXTENSIONS.join(", ")} and images (PNG, JPEG).`,
+          timestamp: getFormattedTime(),
+          error: true,
+        },
+      ]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: nextMsgId("err"),
+          sender: "assistant",
+          text: `The file is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). The maximum upload size is ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`,
+          timestamp: getFormattedTime(),
+          error: true,
+        },
+      ]);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      return;
+    }
+
+    setSelectedFile({
+      name: file.name,
+      type: file.type || extension.toUpperCase().replace(".", ""),
+      size: file.size,
+    });
+    setUploadProgress(0);
+    setUploadStage("uploading");
     setIsUploading(true);
+
     const userMsg: ChatMessage = {
       id: nextMsgId("u"),
       sender: "user",
@@ -388,7 +443,13 @@ export function AssistantView() {
     setMessages((prev) => [...prev, userMsg]);
 
     try {
-      const res = await processAttendanceFile(file, activeSessionId || undefined);
+      const res = await processAttendanceFile(
+        file,
+        activeSessionId || undefined,
+        undefined,
+        (percent) => setUploadProgress(percent)
+      );
+      setUploadStage("processing");
 
       const confirmationCardData: ConfirmationCardData | null =
         res.needs_confirmation && res.confirmation_request
@@ -397,8 +458,7 @@ export function AssistantView() {
               requestId: res.request_id,
               sessionId:
                 activeSessionId ||
-                (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
-                "DIST_20261024",
+                ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
               question: res.confirmation_request.question || "Do you confirm the extracted attendance records?",
               issues: res.confirmation_request.issues || [],
               affectedRows: res.confirmation_request.affected_rows || [],
@@ -424,8 +484,7 @@ export function AssistantView() {
           requestId: res.request_id,
           sessionId:
             activeSessionId ||
-            (res.confirmation_request.affected_rows?.[0]?.session_id as string) ||
-            "DIST_20261024",
+            ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
         });
       }
     } catch (err: unknown) {
@@ -488,6 +547,8 @@ export function AssistantView() {
       }
     } finally {
       setIsUploading(false);
+      setUploadProgress(100);
+      setUploadStage("done");
       if (fileInputRef.current) fileInputRef.current.value = "";
     }
   }, [activeSessionId]);
@@ -1103,9 +1164,35 @@ export function AssistantView() {
         )}
 
         {isUploading && (
-          <div className="flex items-center gap-3 text-xs text-[#77735F] bg-[#F2EDE0] p-4 rounded-2xl w-fit border border-[#E4DDCA]">
-            <div className="w-5 h-5 border-2 border-[#3F451F] border-t-transparent rounded-full animate-spin" />
-            <span>Evaluating document sharpness, lighting & extracting roster rows...</span>
+          <div className="w-full max-w-md text-xs text-[#77735F] bg-[#F2EDE0] p-4 rounded-2xl border border-[#E4DDCA] space-y-2">
+            <div className="flex items-center gap-3">
+              <div className="w-5 h-5 border-2 border-[#3F451F] border-t-transparent rounded-full animate-spin" />
+              <span className="font-semibold text-[#24251C]">
+                {uploadStage === "uploading" ? "Uploading the roster…" : "Extracting attendance records…"}
+              </span>
+            </div>
+            {selectedFile && (
+              <div className="flex items-center justify-between gap-3">
+                <span className="truncate font-mono text-[11px]">
+                  {selectedFile.name} · {selectedFile.type} ·{" "}
+                  {(selectedFile.size / 1024).toFixed(0)} KB
+                </span>
+                <span className="font-mono text-[11px] font-bold text-[#3F451F]">
+                  {uploadProgress}%
+                </span>
+              </div>
+            )}
+            <div className="h-1.5 w-full rounded-full bg-[#E4DDCA] overflow-hidden">
+              <div
+                className="h-full bg-[#6C5119] transition-[width] duration-200"
+                style={{ width: `${uploadStage === "uploading" ? uploadProgress : 100}%` }}
+              />
+            </div>
+            <p className="text-[11px]">
+              {uploadStage === "uploading"
+                ? "Sending the file to the RollCall AI extraction endpoint."
+                : "The backend is parsing the roster and validating every student identifier."}
+            </p>
           </div>
         )}
 
@@ -1133,7 +1220,7 @@ export function AssistantView() {
           type="file"
           ref={fileInputRef}
           onChange={handleFileUpload}
-          accept="image/*,.csv"
+          accept=".pdf,.xlsx,.xls,.csv,.txt,image/png,image/jpeg"
           className="hidden"
         />
 
@@ -1141,7 +1228,7 @@ export function AssistantView() {
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Upload attendance sheet photo or CSV"
+            title="Upload an attendance roster (PDF, XLSX, CSV, TXT, PNG or JPEG)"
             className="p-2.5 rounded-xl text-[#77735F] hover:text-[#24251C] hover:bg-[#E4DDCA]/50 transition-colors disabled:opacity-50 cursor-pointer"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

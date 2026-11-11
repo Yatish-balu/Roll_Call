@@ -38,8 +38,36 @@ DISALLOWED_SQL_KEYWORDS = re.compile(
 )
 
 # Table references inside a SELECT statement (used for validation and for the
-# authorization rewrite of raw SQL).
+# authorization rewrite of raw SQL). A reference may be plain, quoted
+# (`"t"`, `` `t` ``, `[t]`) or schema-qualified (`main.t`); the quoted and
+# qualified forms are rejected, because the scope rewrite below only rewrites
+# plain identifiers. Accepting them would let a caller read a table with the
+# row-level scope silently skipped.
 _TABLE_REF_RE = re.compile(r"\b(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)", re.IGNORECASE)
+_TABLE_REF_WITH_QUOTES_RE = re.compile(
+    r"\b(?:FROM|JOIN)\s+(?P<ref>\"[^\"]*\"|`[^`]*`|\[[^\]]*\]|[A-Za-z0-9_.]+)",
+    re.IGNORECASE,
+)
+
+
+def _table_references(sql: str) -> List[str]:
+    """Return every table reference following FROM/JOIN, quotes included."""
+    return [match.group("ref") for match in _TABLE_REF_WITH_QUOTES_RE.finditer(sql)]
+
+
+def _reject_non_plain_table_reference(raw_ref: str) -> None:
+    """Reject quoted or schema-qualified table references (fail closed)."""
+    if not raw_ref:
+        return
+    if raw_ref[0] in ('"', "`", "["):
+        raise ValueError(
+            f"Quoted table identifiers are not permitted: {raw_ref!r}. "
+            "Reference tables by their plain name."
+        )
+    if "." in raw_ref:
+        raise ValueError(
+            f"Schema-qualified table names are not permitted: {raw_ref!r}."
+        )
 
 
 def _scope_clause(
@@ -60,7 +88,8 @@ def _scope_clause(
     session_ids = sorted(scope.visible_session_ids(db)) if db is not None else []
     if not session_ids:
         # No visible session: the table is empty for this caller.
-        return "(SELECT * FROM {t} WHERE 1 = 0)".format(t=table)
+        # nosec B608 - table names are restricted to ALLOWED_TABLES by _validate_sql.
+        return "(SELECT * FROM {t} WHERE 1 = 0)".format(t=table)  # nosec B608
 
     sess_params = []
     placeholders = []
@@ -80,22 +109,22 @@ def _scope_clause(
             params[key] = code
             code_placeholders.append(f":{key}")
         code_clause = (
-            " OR usn IN (SELECT st.usn FROM students st "
+            " OR usn IN (SELECT st.usn FROM students st "  # nosec B608 - generated ':' placeholders, values bound
             "JOIN subjects sub ON st.dept_id = sub.dept_id "
             f"WHERE UPPER(sub.subject_code) IN ({', '.join(code_placeholders)}))"
         )
 
     if table == "attendance":
         return (
-            f"(SELECT * FROM attendance WHERE session_id IN ({sess_list}) "
+            f"(SELECT * FROM attendance WHERE session_id IN ({sess_list}) "  # nosec B608 - generated placeholders, values bound
             f"AND usn IN (SELECT a.usn FROM attendance a "
             f"WHERE a.session_id IN ({sess_list})){code_clause})"
         )
     if table == "sessions":
-        return f"(SELECT * FROM sessions WHERE session_id IN ({sess_list}))"
+        return f"(SELECT * FROM sessions WHERE session_id IN ({sess_list}))"  # nosec B608 - generated placeholders, values bound
     if table == "students":
         return (
-            f"(SELECT * FROM students WHERE usn IN (SELECT a.usn FROM attendance a "
+            f"(SELECT * FROM students WHERE usn IN (SELECT a.usn FROM attendance a "  # nosec B608 - generated placeholders, values bound
             f"WHERE a.session_id IN ({sess_list})){code_clause})"
         )
     # rooms carry no session link; they are reference data, not attendance.
@@ -106,6 +135,14 @@ def _apply_scope_to_sql(sql: str, scope: Any, db: Any = None) -> Tuple[str, Dict
     """Rewrite a validated SELECT so that it can only read the caller's scope."""
     if scope is None or getattr(scope, "unrestricted", False):
         return sql, {}
+
+    # Defence in depth: never rewrite a statement whose table references the
+    # scope rewrite cannot see (quoted / schema-qualified names, or a comment
+    # used as a separator).
+    if "--" in sql or "/*" in sql:
+        raise ValueError("SQL comments are not permitted.")
+    for raw_ref in _table_references(sql):
+        _reject_non_plain_table_reference(raw_ref)
 
     params: Dict[str, Any] = {}
     tables = {t.lower() for t in _TABLE_REF_RE.findall(sql)}
@@ -296,6 +333,12 @@ def validate_read_only_sql(sql: str) -> None:
     if not clean_sql:
         raise ValueError("SQL statement cannot be empty.")
 
+    # Comments can hide a table reference from the allowlist and the scope
+    # rewrite (`SELECT * FROM/**/users` is valid SQLite), so they are rejected
+    # outright. The read-only tool never needs them.
+    if "--" in clean_sql or "/*" in clean_sql:
+        raise ValueError("SQL comments are not permitted.")
+
     # Disallow multiple statements
     if ";" in clean_sql:
         raise ValueError("Multiple SQL statements are not permitted.")
@@ -309,10 +352,12 @@ def validate_read_only_sql(sql: str) -> None:
     if not re.match(r"^(SELECT|WITH)\b", clean_sql, re.IGNORECASE):
         raise ValueError("Only SELECT or WITH queries are permitted. Disallowed keyword.")
 
-    # Extract and validate table names
-    table_pattern = re.compile(r"\b(?:FROM|JOIN)\s+([a-zA-Z0-9_]+)", re.IGNORECASE)
-    tables = [t.lower() for t in table_pattern.findall(clean_sql)]
-    for table in tables:
+    # Extract and validate table names. Quoted identifiers are rejected before
+    # the allowlist check: `FROM "attendance"` used to slip past both the
+    # allowlist and the scope rewrite, exposing every session's rows.
+    for raw_ref in _table_references(clean_sql):
+        _reject_non_plain_table_reference(raw_ref)
+        table = raw_ref.lower()
         if table not in ALLOWED_TABLES:
             raise ValueError(f"Access to table '{table}' is not permitted.")
 
@@ -420,6 +465,12 @@ def query_attendance(
     read, and an explicitly requested session outside that scope yields no data
     (the existence of the session is not confirmed).
     """
+    # LIMIT is interpolated into the SQL text, so coerce it to a bounded int.
+    try:
+        limit = max(1, min(1000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 500
+
     conditions = []
     params: List[Any] = []
 
@@ -484,7 +535,7 @@ def query_attendance(
     {where_clause}
     ORDER BY a.session_id, a.usn
     LIMIT {limit}
-    """
+    """  # nosec B608 - where_clause is a fixed clause list, values bound; limit is a bounded int
 
     ro_db = _get_readonly_conn(db_target)
     try:
@@ -629,6 +680,12 @@ def query_students(
     When a ``scope`` is supplied only students inside the caller's scope are
     returned.
     """
+    # LIMIT is interpolated into the SQL text, so coerce it to a bounded int.
+    try:
+        limit = max(1, min(1000, int(limit)))
+    except (TypeError, ValueError):
+        limit = 500
+
     conditions = []
     params: List[Any] = []
 
@@ -657,7 +714,7 @@ def query_students(
         params.append(f"%{name.strip()}%")
 
     where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"SELECT usn, name, branch FROM students {where_clause} ORDER BY usn LIMIT {limit}"
+    sql = f"SELECT usn, name, branch FROM students {where_clause} ORDER BY usn LIMIT {limit}"  # nosec B608 - fixed clause list, values bound, bounded int
 
     ro_db = _get_readonly_conn(db_target)
     try:

@@ -9,7 +9,6 @@ export function LoginView() {
   const [password, setPassword] = useState("");
   const [adminKey, setAdminKey] = useState("");
   const [showAdminKey, setShowAdminKey] = useState(false);
-  const [rememberMe, setRememberMe] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
@@ -27,7 +26,6 @@ export function LoginView() {
         userId: userId.trim(),
         password,
         adminKey: showAdminKey && adminKey.trim() ? adminKey.trim() : undefined,
-        rememberMe,
       });
       navigate("/");
     } catch (err: unknown) {
@@ -124,20 +122,6 @@ export function LoginView() {
                 />
               </div>
             )}
-          </div>
-
-          {/* Remember Me */}
-          <div className="flex items-center space-x-2 pt-1">
-            <input
-              id="remember_me"
-              type="checkbox"
-              checked={rememberMe}
-              onChange={(e) => setRememberMe(e.target.checked)}
-              className="w-4 h-4 rounded text-[#6C5119] focus:ring-[#6C5119] border-[#E4DDCA]"
-            />
-            <label htmlFor="remember_me" className="text-xs font-medium text-[#24251C] cursor-pointer select-none">
-              Remember me (Keep signed in for 7 days)
-            </label>
           </div>
 
           {/* Submit Button */}

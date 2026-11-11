@@ -8,7 +8,13 @@ import {
   type Student,
   type StudentAttendanceSummary,
 } from "@/services/api/students";
+import {
+  downloadStudentRosterPdf,
+  fetchStudentRosterFilters,
+} from "@/services/api/reports";
 import { useAuth } from "@/hooks/useAuth";
+
+const SEMESTERS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 export function StudentsView() {
   const { canManageStudents } = useAuth();
@@ -21,6 +27,11 @@ export function StudentsView() {
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [selectedBranch, setSelectedBranch] = useState("ALL");
+  const [selectedSemester, setSelectedSemester] = useState<number | "ALL">("ALL");
+  const [branchOptions, setBranchOptions] = useState<string[]>([]);
+  const [isExporting, setIsExporting] = useState(false);
+  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const [exportError, setExportError] = useState<string | null>(null);
 
   // Selected Student & Ledger State (F8 - N12)
   const [selectedStudentUsn, setSelectedStudentUsn] = useState<string | null>(null);
@@ -60,6 +71,7 @@ export function StudentsView() {
       const res = await fetchStudents({
         limit: 100,
         branch: selectedBranch !== "ALL" ? selectedBranch : undefined,
+        semester: selectedSemester !== "ALL" ? selectedSemester : undefined,
         search: debouncedQuery || undefined,
       });
       setStudents(res.items || []);
@@ -73,7 +85,66 @@ export function StudentsView() {
     } finally {
       setIsLoading(false);
     }
-  }, [selectedBranch, debouncedQuery]);
+  }, [selectedBranch, selectedSemester, debouncedQuery]);
+
+  // Branch options come from the backend (authorised roster), never hardcoded.
+  useEffect(() => {
+    let isMounted = true;
+    fetchStudentRosterFilters()
+      .then((filters) => {
+        if (!isMounted) return;
+        setBranchOptions(filters.branches || []);
+      })
+      .catch(() => {
+        if (isMounted) setBranchOptions([]);
+      });
+    return () => {
+      isMounted = false;
+    };
+  }, []);
+
+  const handleExportPdf = async () => {
+    setIsExporting(true);
+    setExportNotice(null);
+    setExportError(null);
+    try {
+      const blob = await downloadStudentRosterPdf({
+        branch: selectedBranch !== "ALL" ? selectedBranch : undefined,
+        semester: selectedSemester !== "ALL" ? selectedSemester : undefined,
+        title: "RollCall AI Student Roster",
+      });
+      const url = window.URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      const suffix = [
+        selectedBranch !== "ALL" ? selectedBranch : "all-branches",
+        selectedSemester !== "ALL" ? `sem-${selectedSemester}` : "all-semesters",
+      ].join("_");
+      link.download = `student_roster_${suffix}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(link);
+      setExportNotice(
+        `The backend generated the PDF with the selected filters applied (${totalCount} student(s)).`
+      );
+    } catch (err: unknown) {
+      setExportError(
+        err instanceof Error
+          ? err.message
+          : "The student roster PDF could not be generated."
+      );
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const clearFilters = () => {
+    setSelectedBranch("ALL");
+    setSelectedSemester("ALL");
+    setSearchQuery("");
+    setDebouncedQuery("");
+  };
 
   useEffect(() => {
     let isMounted = true;
@@ -189,22 +260,77 @@ export function StudentsView() {
           />
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto">
+        <div className="flex flex-wrap items-center gap-2 w-full sm:w-auto">
           <span className="text-xs font-semibold text-[#77735F]">Branch:</span>
           <select
             value={selectedBranch}
             onChange={(e) => setSelectedBranch(e.target.value)}
-            className="flex-1 sm:flex-none bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl px-3 py-2 text-xs text-[#24251C] focus:outline-none focus:border-[#3F451F]"
+            className="flex-1 sm:flex-none bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl px-3 py-2 text-xs text-[#24251C] focus:outline-none focus:border-[#3F451F] cursor-pointer"
           >
             <option value="ALL">All Branches</option>
-            <option value="CSE">Computer Science (CSE)</option>
-            <option value="AIML">Artificial Intelligence (AIML)</option>
-            <option value="CYBER">Cyber Security (CYBER)</option>
-            <option value="ECE">Electronics (ECE)</option>
-            <option value="ISE">Information Science (ISE)</option>
+            {branchOptions.map((branch) => (
+              <option key={branch} value={branch}>
+                {branch}
+              </option>
+            ))}
           </select>
+
+          <span className="text-xs font-semibold text-[#77735F]">Semester:</span>
+          <select
+            value={String(selectedSemester)}
+            onChange={(e) =>
+              setSelectedSemester(
+                e.target.value === "ALL" ? "ALL" : Number(e.target.value)
+              )
+            }
+            className="flex-1 sm:flex-none bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl px-3 py-2 text-xs text-[#24251C] focus:outline-none focus:border-[#3F451F] cursor-pointer"
+          >
+            <option value="ALL">All Semesters</option>
+            {SEMESTERS.map((semester) => (
+              <option key={semester} value={semester}>
+                Semester {semester}
+              </option>
+            ))}
+          </select>
+
+          <button
+            type="button"
+            onClick={clearFilters}
+            className="px-3 py-2 rounded-xl border border-[#E4DDCA] bg-white text-xs font-semibold text-[#77735F] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
+          >
+            Clear filters
+          </button>
+
+          <button
+            type="button"
+            onClick={() => void handleExportPdf()}
+            disabled={isExporting}
+            className="inline-flex items-center gap-2 px-3.5 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] transition-colors disabled:opacity-50 cursor-pointer"
+          >
+            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M12 10v6m0 0l-3-3m3 3l3-3M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"
+              />
+            </svg>
+            {isExporting ? "Generating…" : "Export PDF"}
+          </button>
         </div>
       </div>
+
+      {/* Export feedback */}
+      {exportNotice && (
+        <div className="p-3.5 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-800">
+          {exportNotice}
+        </div>
+      )}
+      {exportError && (
+        <div className="p-3.5 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800">
+          {exportError}
+        </div>
+      )}
 
       {/* Main Student Directory Table */}
       <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl overflow-hidden shadow-sm">
@@ -272,7 +398,11 @@ export function StudentsView() {
                       </span>
                     </td>
                     <td className="py-3.5 px-4 text-xs text-[#77735F]">
-                      Semester {student.semester || 5} • {student.section || "A"} ({student.batch || "B1"})
+                      {student.semester
+                        ? `Semester ${student.semester}`
+                        : "Semester not assigned"}
+                      {student.section ? ` • ${student.section}` : ""}
+                      {student.batch ? ` (${student.batch})` : ""}
                     </td>
                     <td className="py-3.5 px-4 text-right">
                       <button
@@ -505,17 +635,27 @@ export function StudentsView() {
                 <label className="block font-semibold text-[#24251C] mb-1">
                   Department / Branch *
                 </label>
-                <select
-                  value={newBranch}
-                  onChange={(e) => setNewBranch(e.target.value)}
-                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus:outline-none focus:border-[#3F451F]"
-                >
-                  <option value="CSE">Computer Science & Engineering (CSE)</option>
-                  <option value="CYBER">Cyber Security (CYBER)</option>
-                  <option value="AIML">Artificial Intelligence & ML (AIML)</option>
-                  <option value="ECE">Electronics & Communication (ECE)</option>
-                  <option value="ISE">Information Science (ISE)</option>
-                </select>
+                {branchOptions.length > 0 ? (
+                  <select
+                    value={newBranch}
+                    onChange={(e) => setNewBranch(e.target.value)}
+                    className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus:outline-none focus:ring-2 focus:ring-[#3F451F] cursor-pointer"
+                  >
+                    {branchOptions.map((branch) => (
+                      <option key={branch} value={branch}>
+                        {branch}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <input
+                    type="text"
+                    value={newBranch}
+                    onChange={(e) => setNewBranch(e.target.value.toUpperCase())}
+                    placeholder="e.g. CSE"
+                    className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] uppercase focus:outline-none focus:ring-2 focus:ring-[#3F451F]"
+                  />
+                )}
               </div>
 
               <div className="pt-2 flex justify-end space-x-2">

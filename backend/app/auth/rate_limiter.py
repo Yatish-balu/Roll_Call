@@ -6,7 +6,10 @@ Provides resource protection and DoS defense across expensive endpoints:
 3. /api/v1/agent/confirm (Atomic database batch commits)
 4. /api/v1/reports/* (Excel and PDF document rendering)
 
-Configurable via environment variables without requiring an external Redis service.
+Configurable via environment variables. When ``REDIS_URL`` is set and reachable,
+counters live in Redis so every worker and every instance sees the same quota;
+without Redis the limiter degrades to the previous process-local sliding window
+and logs the degraded mode (never silently disabled).
 Isolates quotas by authenticated user ID (sub) with IP address fallback.
 """
 
@@ -16,12 +19,36 @@ import logging
 import os
 import threading
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+import uuid
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import jwt
 from fastapi import HTTPException, Request, status
 
+from app.security.rate_limit import get_redis_client
+
 logger = logging.getLogger("rollcall.auth.rate_limiter")
+
+#: Atomic sliding window: prune, count, then either reject with a Retry-After or
+#: add the request. Identical semantics to the in-memory implementation.
+_REDIS_SLIDING_WINDOW_SCRIPT = """
+local key = KEYS[1]
+local now = tonumber(ARGV[1])
+local window = tonumber(ARGV[2])
+local limit = tonumber(ARGV[3])
+local member = ARGV[4]
+redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+local count = redis.call('ZCARD', key)
+if count >= limit then
+  local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
+  local retry = math.ceil((tonumber(oldest[2]) + window) - now)
+  if retry < 1 then retry = 1 end
+  return {0, retry}
+end
+redis.call('ZADD', key, now, member)
+redis.call('PEXPIRE', key, math.ceil(window * 1000))
+return {1, 0}
+"""
 
 
 class InMemoryRateLimiter:
@@ -99,8 +126,83 @@ class InMemoryRateLimiter:
             self._requests.clear()
 
 
+class RedisSlidingWindowLimiter:
+    """Shared sliding-window limiter with an automatic in-memory fallback.
+
+    With ``REDIS_URL`` configured, the window is a sorted set per key and the
+    check/add decision is a single Lua script, so concurrent workers cannot
+    overshoot the quota. If Redis is unset or temporarily unreachable, the
+    limiter continues on the process-local window and reports it in the log.
+    """
+
+    KEY_PREFIX = "ratelimit:sliding:"
+
+    def __init__(self, memory: Optional[InMemoryRateLimiter] = None) -> None:
+        self._memory = memory or InMemoryRateLimiter()
+        self._warned = False
+
+    @property
+    def memory(self) -> InMemoryRateLimiter:
+        return self._memory
+
+    def is_enabled(self) -> bool:
+        return self._memory.is_enabled()
+
+    def get_limit_for_operation(self, operation: str) -> int:
+        return self._memory.get_limit_for_operation(operation)
+
+    def check(
+        self,
+        key: str,
+        limit: int,
+        window_seconds: float = 60.0,
+    ) -> Tuple[bool, int]:
+        if not self.is_enabled():
+            return True, 0
+
+        client = get_redis_client()
+        if client is not None:
+            now = time.time()
+            # A unique member per request: two requests in the same microsecond
+            # must still count as two entries.
+            member = f"{now:.6f}:{uuid.uuid4().hex}"
+            try:
+                result = client.eval(
+                    _REDIS_SLIDING_WINDOW_SCRIPT,
+                    1,
+                    f"{self.KEY_PREFIX}{key}",
+                    now,
+                    window_seconds,
+                    limit,
+                    member,
+                )
+                return bool(int(result[0])), int(result[1])
+            except Exception as exc:  # pragma: no cover - exercised with a fake
+                if not self._warned:
+                    self._warned = True
+                    logger.warning(
+                        "Redis rate limiting failed (%s); using the process-local "
+                        "sliding window until Redis recovers.",
+                        exc,
+                    )
+
+        return self._memory.check(key, limit=limit, window_seconds=window_seconds)
+
+    def reset(self) -> None:
+        """Clear in-memory state and this application's Redis keys (tests)."""
+        self._memory.reset()
+        client = get_redis_client()
+        if client is None:
+            return
+        try:
+            for redis_key in client.scan_iter(match=f"{self.KEY_PREFIX}*", count=500):
+                client.delete(redis_key)
+        except Exception as exc:  # pragma: no cover - Redis outage
+            logger.warning("Could not clear Redis rate-limit keys: %s", exc)
+
+
 # Global singleton instance
-rate_limiter = InMemoryRateLimiter()
+rate_limiter = RedisSlidingWindowLimiter()
 
 
 def reset_rate_limiter() -> None:

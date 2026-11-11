@@ -218,6 +218,7 @@ def assign_teacher_subject(
             entity_id=f"{payload.user_id}:{payload.subject_code}",
             new_value=payload.subject_code,
             timestamp=_utcnow_iso(),
+            actor_role=getattr(current_user.role, "value", str(current_user.role)),
         )
         db.commit()
         return mapping

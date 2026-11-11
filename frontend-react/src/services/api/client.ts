@@ -143,7 +143,21 @@ export class ApiClient {
   }
 
   public async post<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
-    const res = await this.axiosInstance.post<T>(url, data, config);
+    let finalConfig = config;
+
+    // Multipart uploads must not carry the instance default
+    // "Content-Type: application/json". Removing the header lets the browser
+    // generate the correct multipart/form-data header *including the boundary*,
+    // which is what the FastAPI endpoint expects.
+    if (typeof FormData !== "undefined" && data instanceof FormData) {
+      const headers = { ...(config?.headers ?? {}) } as Record<string, unknown>;
+      delete headers["Content-Type"];
+      delete headers["content-type"];
+      headers["Content-Type"] = undefined;
+      finalConfig = { ...config, headers: headers as AxiosRequestConfig["headers"] };
+    }
+
+    const res = await this.axiosInstance.post<T>(url, data, finalConfig);
     return res.data;
   }
 

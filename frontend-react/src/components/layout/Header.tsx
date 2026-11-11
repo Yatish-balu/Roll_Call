@@ -1,6 +1,12 @@
 import React, { useState, useRef, useEffect } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import {
+  fetchInitializationState,
+  fetchSessionAllocations,
+  type SessionAllocation,
+} from "@/services/api/sessions";
+import { todayIso } from "@/lib/schedule";
 
 interface HeaderProps {
   title?: string;
@@ -16,39 +22,13 @@ interface NotificationItem {
   type: "success" | "warning" | "info";
 }
 
-const INITIAL_NOTIFICATIONS: NotificationItem[] = [
-  {
-    id: "notif-1",
-    title: "Attendance Synchronized",
-    description: "Distributed Systems (SESS-20261024-01) roster synced to server.",
-    time: "10 mins ago",
-    read: false,
-    type: "success",
-  },
-  {
-    id: "notif-2",
-    title: "Upcoming 2-Hour Laboratory",
-    description: "Database Systems Lab scheduled at 14:00 PM in LAB-1.",
-    time: "Today",
-    read: false,
-    type: "info",
-  },
-  {
-    id: "notif-3",
-    title: "Institutional Attendance Policy",
-    description: "Defaulter threshold active at 75%. Automated reports ready.",
-    time: "1 hour ago",
-    read: true,
-    type: "warning",
-  },
-];
-
 export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
   const { session, logout, isAdmin } = useAuth();
   const navigate = useNavigate();
   const [showNotifications, setShowNotifications] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
-  const [notifications, setNotifications] = useState<NotificationItem[]>(INITIAL_NOTIFICATIONS);
+  const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [isLoadingNotifications, setIsLoadingNotifications] = useState(false);
 
   const notifRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
@@ -86,6 +66,70 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
   const handleClearNotifications = () => {
     setNotifications([]);
   };
+
+  /**
+   * Notifications are derived from the real backend state (today's class slots
+   * and the session initialisation status). Nothing is invented.
+   */
+  const loadNotifications = React.useCallback(async () => {
+    setIsLoadingNotifications(true);
+    const today = todayIso();
+    const items: NotificationItem[] = [];
+
+    try {
+      const allocations = await fetchSessionAllocations({ date: today });
+      const slots: SessionAllocation[] = allocations.items || [];
+      if (slots.length > 0) {
+        slots.forEach((slot) => {
+          items.push({
+            id: `slot-${slot.allocation_id}`,
+            title: `${slot.subject || slot.subject_code || "Class"} · ${slot.start_time}`,
+            description: `${slot.room_id || "Room not allocated"}${
+              slot.batch_id ? ` · Batch ${slot.batch_id}` : ""
+            }`,
+            time: "Today",
+            read: false,
+            type: "info",
+          });
+        });
+      }
+    } catch {
+      // The class list is unavailable - no notification is shown for it.
+    }
+
+    try {
+      const state = await fetchInitializationState(today);
+      items.push({
+        id: `init-${state.date}`,
+        title:
+          state.status === "INITIALIZED"
+            ? "Today's sessions are ready"
+            : state.status === "PENDING"
+            ? "Session initialisation pending"
+            : state.status === "FAILED"
+            ? "Session initialisation failed"
+            : "No classes scheduled today",
+        description: state.message,
+        time: "Today",
+        read: state.status === "NO_CLASSES",
+        type:
+          state.status === "FAILED"
+            ? "warning"
+            : state.status === "INITIALIZED"
+            ? "success"
+            : "info",
+      });
+    } catch {
+      // Initialisation state unavailable - no notification is shown for it.
+    }
+
+    setNotifications(items);
+    setIsLoadingNotifications(false);
+  }, []);
+
+  useEffect(() => {
+    void loadNotifications();
+  }, [loadNotifications]);
 
   const handleSignOut = async () => {
     setShowProfile(false);
@@ -191,9 +235,13 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
               </div>
 
               <div className="max-h-80 overflow-y-auto divide-y divide-[#E4DDCA]/60">
-                {notifications.length === 0 ? (
+                {isLoadingNotifications ? (
                   <div className="p-6 text-center text-xs text-[#77735F]">
-                    No new notifications. You are all caught up!
+                    Loading today's schedule...
+                  </div>
+                ) : notifications.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-[#77735F]">
+                    Nothing scheduled for today.
                   </div>
                 ) : (
                   notifications.map((item) => (
@@ -291,7 +339,18 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
                   </svg>
-                  <span>My Profile & Settings</span>
+                  <span>Settings</span>
+                </Link>
+
+                <Link
+                  to="/profile"
+                  onClick={() => setShowProfile(false)}
+                  className="w-full flex items-center space-x-2.5 px-3 py-2 rounded-xl text-xs font-semibold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors"
+                >
+                  <svg className="w-4 h-4 text-[#77735F]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM15 11a3 3 0 11-6 0 3 3 0 016 0z" />
+                  </svg>
+                  <span>My Profile</span>
                 </Link>
 
                 <Link

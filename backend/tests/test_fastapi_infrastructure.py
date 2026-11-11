@@ -45,12 +45,12 @@ def test_read_root_endpoint(client):
 
 
 def test_health_check_endpoint(client):
-    """Verify that GET /health returns status healthy and environment."""
+    """Verify that GET /health is healthy without leaking deployment details."""
     response = client.get("/health")
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "healthy"
-    assert "environment" in data
+    assert "environment" not in data
     assert "version" in data
 
 

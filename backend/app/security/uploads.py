@@ -139,6 +139,10 @@ class MalwareScanner:
         raise NotImplementedError
 
 
+def _is_production() -> bool:
+    return os.getenv("APP_ENV", "development").strip().lower() == "production"
+
+
 class NullMalwareScanner(MalwareScanner):
     """Scanner used when no scanning service is configured."""
 
@@ -152,6 +156,22 @@ class NullMalwareScanner(MalwareScanner):
         return True, "No malware scanner configured; the file was not scanned."
 
 
+class UnavailableMalwareScanner(MalwareScanner):
+    """Production scanner that fails closed when no scanner is configured."""
+
+    name = "unavailable"
+    available = False
+
+    def scan(self, path: str) -> Tuple[bool, str]:
+        logger.error(
+            "PRODUCTION: upload rejected because MALWARE_SCAN_COMMAND is not configured."
+        )
+        return (
+            False,
+            "No malware scanner is configured; uploads are disabled in production.",
+        )
+
+
 def get_malware_scanner() -> MalwareScanner:
     """Return the configured scanner, or the null scanner when none is set.
 
@@ -161,6 +181,11 @@ def get_malware_scanner() -> MalwareScanner:
     """
     command = os.getenv("MALWARE_SCAN_COMMAND", "").strip()
     if not command:
+        # In production an unscanned upload is not accepted: the deployment has
+        # to configure a scanner (for example ClamAV) rather than silently
+        # accepting files that were never checked.
+        if _is_production():
+            return UnavailableMalwareScanner()
         return NullMalwareScanner()
 
     import shlex
@@ -180,7 +205,9 @@ def get_malware_scanner() -> MalwareScanner:
                 )
             except Exception as exc:
                 logger.error("Malware scan failed: %s", exc)
-                return True, f"Scan could not be executed: {exc}"
+                # Fail closed in production: a scanner that cannot run must not
+                # be reported as a clean scan.
+                return (not _is_production()), f"Scan could not be executed: {exc}"
             clean = completed.returncode == 0
             return clean, (completed.stdout or completed.stderr or "").strip()[:500]
 

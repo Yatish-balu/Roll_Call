@@ -102,29 +102,6 @@ def _totp(secret: bytes, time_step: int = 30) -> str:
     code_int = unpack(">I", hmac_val[offset : offset + 4])[0] & 0x7fffffff
     return str(code_int % 1000000).zfill(6)
 
-def validate_jwt_secret_configuration(
-    secret: Optional[str] = None,
-    env: Optional[str] = None,
-) -> str:
-    """
-    Validate that JWT_SECRET is configured and meets security requirements (>= 32 chars).
-    Raises ValueError on missing or short secrets.
-    """
-    candidate = secret if secret is not None else (os.getenv("JWT_SECRET") or os.getenv("JWT_SECRET_KEY"))
-    current_env = (env or os.getenv("APP_ENV", "development")).lower()
-
-    if not candidate or len(candidate.strip()) == 0:
-        raise ValueError("JWT secret key is missing or empty. Please set JWT_SECRET.")
-
-    clean = candidate.strip()
-    if len(clean) < 32:
-        raise ValueError(
-            f"JWT secret key is too short ({len(clean)} characters). "
-            "It must be at least 32 characters long."
-        )
-    return clean
-
-
 def get_local_jwt_secret() -> str:
     """
     Retrieve configured secret key specifically for signing local RollCall AI JWT tokens.
@@ -412,6 +389,13 @@ def create_access_token(
     # same second (e.g. login immediately followed by refresh), preventing
     # byte-identical access tokens for distinct authentication events.
     to_encode.setdefault("jti", uuid.uuid4().hex)
+
+    issuer = get_jwt_issuer()
+    if issuer:
+        to_encode.setdefault("iss", issuer)
+    audience = get_jwt_audience()
+    if audience:
+        to_encode.setdefault("aud", audience)
 
     signing_secret = secret or get_local_jwt_secret()
     alg = algorithm or get_jwt_algorithms()[0]

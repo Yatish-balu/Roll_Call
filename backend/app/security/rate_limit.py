@@ -31,6 +31,7 @@ from enum import Enum
 from typing import Any, Dict, Optional, Tuple
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger("rollcall.security.rate_limit")
@@ -42,6 +43,7 @@ class LimitScope(str, Enum):
     LOGIN = "login"
     REFRESH = "refresh"
     PASSWORD_RESET = "password_reset"
+    PASSWORD_CHANGE = "password_change"
     MFA_VERIFY = "mfa_verify"
     UPLOAD = "upload"
     API = "api"
@@ -66,6 +68,9 @@ DEFAULT_POLICIES: Dict[LimitScope, LimitPolicy] = {
     LimitScope.LOGIN: LimitPolicy(limit=5, window_seconds=600, lockout_seconds=0, base_delay_seconds=0.2),
     LimitScope.REFRESH: LimitPolicy(limit=30, window_seconds=600, lockout_seconds=300, base_delay_seconds=0.0),
     LimitScope.PASSWORD_RESET: LimitPolicy(limit=3, window_seconds=3600, lockout_seconds=1800, base_delay_seconds=0.0),
+    # Verified-password actions (change password, MFA enable/disable) must not
+    # become an unlimited password oracle for a stolen access token.
+    LimitScope.PASSWORD_CHANGE: LimitPolicy(limit=5, window_seconds=600, lockout_seconds=900, base_delay_seconds=0.0),
     LimitScope.MFA_VERIFY: LimitPolicy(limit=5, window_seconds=300, lockout_seconds=900, base_delay_seconds=0.0),
     LimitScope.UPLOAD: LimitPolicy(limit=20, window_seconds=600, lockout_seconds=300, base_delay_seconds=0.0),
     LimitScope.API: LimitPolicy(limit=120, window_seconds=60, lockout_seconds=0, base_delay_seconds=0.0),
@@ -115,8 +120,26 @@ class LimitDecision:
         return max(0, self.limit - self.attempts)
 
 
-_redis_client = None
-_redis_state: Dict[str, Any] = {"client": None, "checked": False, "error": ""}
+#: How long a failed Redis connection is remembered before retrying. A blip
+#: must not permanently downgrade a worker to the database backend.
+_REDIS_RETRY_SECONDS = 30.0
+
+#: INCR + EXPIRE in one round trip. The TTL is set only when the counter is
+#: created, so a fixed counting window does not slide on every request.
+_REDIS_INCREMENT_SCRIPT = """
+local current = redis.call('INCR', KEYS[1])
+if current == 1 then
+  redis.call('EXPIRE', KEYS[1], ARGV[1])
+end
+return current
+"""
+
+_redis_state: Dict[str, Any] = {
+    "client": None,
+    "checked": False,
+    "error": "",
+    "next_retry": 0.0,
+}
 _redis_lock = threading.Lock()
 
 #: State of the degraded, process-local fallback (used only when the shared
@@ -151,9 +174,12 @@ def get_redis_client():
     if not url:
         return None
     with _redis_lock:
-        if _redis_state["checked"] and _redis_state["client"] is not None:
+        if _redis_state["client"] is not None:
             return _redis_state["client"]
-        if _redis_state["checked"] and _redis_state["error"]:
+        import time
+
+        now = time.monotonic()
+        if _redis_state["error"] and now < float(_redis_state["next_retry"] or 0):
             return None
         _redis_state["checked"] = True
         try:
@@ -166,10 +192,13 @@ def get_redis_client():
             return client
         except Exception as exc:
             _redis_state["error"] = str(exc)
+            _redis_state["next_retry"] = now + _REDIS_RETRY_SECONDS
             logger.warning(
                 "REDIS_URL is configured but Redis is unreachable (%s); "
-                "falling back to the shared database rate-limit counters.",
+                "falling back to the shared database rate-limit counters for "
+                "at most %.0fs before retrying.",
                 exc,
+                _REDIS_RETRY_SECONDS,
             )
             return None
 
@@ -180,13 +209,9 @@ def backend_mode() -> str:
 
 
 def _redis_increment(client, scope: str, key: str, window_seconds: int) -> int:
-    """Atomically increment a Redis counter and (re)set its expiry."""
+    """Atomically increment a Redis counter, setting its TTL on creation."""
     redis_key = f"ratelimit:{scope}:{key}"
-    pipe = client.pipeline()
-    pipe.incr(redis_key)
-    pipe.expire(redis_key, window_seconds)
-    results = pipe.execute()
-    return int(results[0])
+    return int(client.eval(_REDIS_INCREMENT_SCRIPT, 1, redis_key, window_seconds))
 
 
 def _redis_blocked_until(client, scope: str, key: str) -> int:
@@ -303,7 +328,9 @@ def check_limit(
                 if record_failure
                 else int(client.get(f"ratelimit:{scope.value}:{clean_key}") or 0)
             )
-            if attempts >= policy.limit:
+            # Mirrors the database backend: the quota-th failure still gets the
+            # credential check, the next one is refused before it.
+            if attempts > policy.limit:
                 lockout = max(1, policy.lockout_seconds or policy.window_seconds)
                 client.setex(
                     f"ratelimit:block:{scope.value}:{clean_key}",
@@ -357,16 +384,46 @@ def check_limit(
         return _fallback_check(scope, clean_key, policy, record_failure)
 
     if row is None:
-        row = SecurityRateLimit(
-            scope=scope.value,
-            key=clean_key,
-            attempts=0,
-            window_started_at=_iso(now),
-            blocked_until=None,
-            updated_at=_iso(now),
-        )
-        db.add(row)
-        db.flush()
+        if not record_failure:
+            return LimitDecision(
+                allowed=True,
+                scope=scope.value,
+                key=clean_key,
+                attempts=0,
+                limit=policy.limit,
+                delay_seconds=0.0,
+                backend="database",
+                degraded=bool(os.getenv("REDIS_URL", "").strip()),
+            )
+        try:
+            with db.begin_nested():
+                row = SecurityRateLimit(
+                    scope=scope.value,
+                    key=clean_key,
+                    attempts=0,
+                    window_started_at=_iso(now),
+                    blocked_until=None,
+                    updated_at=_iso(now),
+                )
+                db.add(row)
+                db.flush()
+        except IntegrityError:
+            row = db.execute(
+                select(SecurityRateLimit).where(
+                    SecurityRateLimit.scope == scope.value,
+                    SecurityRateLimit.key == clean_key,
+                )
+            ).scalars().first()
+            if row is None and commit:
+                db.rollback()
+                row = db.execute(
+                    select(SecurityRateLimit).where(
+                        SecurityRateLimit.scope == scope.value,
+                        SecurityRateLimit.key == clean_key,
+                    )
+                ).scalars().first()
+            if row is None:
+                raise
 
     blocked_until = _parse(row.blocked_until)
     if blocked_until is not None and blocked_until > now:

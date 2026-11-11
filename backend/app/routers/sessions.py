@@ -6,6 +6,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+# The module is aliased so it does not shadow the ``datetime`` class above.
+import datetime as dt
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -15,6 +18,10 @@ from app.auth.session_scope import resolve_session_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
+from app.services.session_initialization import (
+    initialize_sessions_for_date,
+    initialization_status,
+)
 from app.schemas.session import (
     SessionBulkCreate,
     SessionCreate,
@@ -41,6 +48,8 @@ router = APIRouter(prefix="/sessions", tags=["Sessions"])
 )
 def list_sessions(
     date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Filter sessions by date (YYYY-MM-DD)"),
+    from_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Start of an inclusive date range"),
+    to_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="End of an inclusive date range"),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of records to return"),
     offset: int = Query(0, ge=0, description="Number of records to skip before returning"),
     search: Optional[str] = Query(None, description="Search term matching session_id or subject"),
@@ -48,6 +57,50 @@ def list_sessions(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     scope = resolve_session_scope(db, current_user)
+
+    if (from_date or to_date) and not date:
+        # Range queries are executed against the ORM so the calendar can load a
+        # whole month in a single request. The visibility scope is still
+        # applied server side before the count and the pagination.
+        from sqlalchemy import select
+
+        from app.db.models import Session as DbSession
+
+        stmt = select(DbSession)
+        if from_date:
+            stmt = stmt.where(DbSession.date >= from_date)
+        if to_date:
+            stmt = stmt.where(DbSession.date <= to_date)
+        rows = db.execute(stmt).scalars().all()
+
+        visible = []
+        for row in rows:
+            payload = {
+                "session_id": row.session_id,
+                "date": row.date,
+                "subject": row.subject,
+                "subject_code": row.subject_code,
+                "teacher_id": row.teacher_id,
+                "created_at": row.created_at,
+            }
+            if not scope.allows(payload):
+                continue
+            if search and search.strip():
+                term = search.strip().lower()
+                if term not in (row.session_id or "").lower() and term not in (row.subject or "").lower():
+                    continue
+            visible.append(payload)
+
+        visible.sort(key=lambda item: (item.get("date") or "", item.get("session_id") or ""), reverse=True)
+        total = len(visible)
+        window = visible[offset : offset + limit]
+        return {
+            "items": window,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }
+
     items, total = crud.get_sessions_paginated_scoped(
         db,
         date=date,
@@ -64,6 +117,81 @@ def list_sessions(
         "limit": limit,
         "offset": offset,
     }
+
+
+# ==============================================================================
+# Session allocations (class slots: room, batch, time)
+#
+# NOTE: this route must stay declared *before* "/{session_id}" so the literal
+# path is not captured by the path parameter.
+# ==============================================================================
+
+@router.get(
+    "/allocations",
+    summary="List scheduled class allocations",
+    description=(
+        "Returns the real class slots (room, batch, faculty and time window) of the "
+        "sessions the caller may see. The session visibility scope is applied on the "
+        "server, so the response never exposes another teacher's classes."
+    ),
+)
+def list_session_allocations(
+    date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Exact allocation date"),
+    from_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="Start of a date range"),
+    to_date: Optional[str] = Query(None, pattern=r"^\d{4}-\d{2}-\d{2}$", description="End of a date range"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from sqlalchemy import select
+
+    from app.db.models import Session as DbSession, SessionAllocation
+
+    stmt = select(SessionAllocation, DbSession).join(
+        DbSession, SessionAllocation.session_id == DbSession.session_id
+    )
+
+    if date:
+        stmt = stmt.where(SessionAllocation.allocation_date == date)
+    else:
+        if from_date:
+            stmt = stmt.where(SessionAllocation.allocation_date >= from_date)
+        if to_date:
+            stmt = stmt.where(SessionAllocation.allocation_date <= to_date)
+
+    rows = db.execute(stmt).all()
+
+    scope = resolve_session_scope(db, current_user)
+    items = []
+    for allocation, db_session in rows:
+        session_payload = {
+            "session_id": db_session.session_id,
+            "date": db_session.date,
+            "subject": db_session.subject,
+            "subject_code": db_session.subject_code,
+            "teacher_id": db_session.teacher_id,
+            "created_at": db_session.created_at,
+        }
+        if not scope.allows(session_payload):
+            continue
+        items.append(
+            {
+                "allocation_id": allocation.allocation_id,
+                "session_id": allocation.session_id,
+                "date": allocation.allocation_date,
+                "subject": db_session.subject,
+                "subject_code": db_session.subject_code,
+                "teacher_id": db_session.teacher_id,
+                "faculty_id": allocation.faculty_id,
+                "room_id": allocation.room_id,
+                "batch_id": allocation.batch_id,
+                "start_time": allocation.start_time,
+                "end_time": allocation.end_time,
+                "lifecycle_status": allocation.lifecycle_status,
+            }
+        )
+
+    items.sort(key=lambda item: (item.get("date") or "", item.get("start_time") or ""))
+    return {"items": items, "total": len(items)}
 
 
 @router.get(
@@ -186,6 +314,7 @@ def create_session(
             entity_id=payload.session_id,
             new_value=subject_code,
             timestamp=now_iso,
+            actor_role=getattr(current_user.role, "value", str(current_user.role)),
         )
         db.commit()
         return created
@@ -202,6 +331,106 @@ def create_session(
         db.rollback()
         logger.error("Failed to create session %s: %s", payload.session_id, exc)
         raise
+
+
+# ==============================================================================
+# Session initialisation from the configured timetable
+# ==============================================================================
+
+def _parse_target_date(raw: Optional[str]) -> dt.date:
+    if not raw:
+        return dt.date.today()
+    try:
+        return dt.date.fromisoformat(raw.strip())
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Invalid date '{raw}'. Expected a valid calendar date in YYYY-MM-DD format.",
+        )
+
+
+@router.get(
+    "/initialization/today",
+    summary="Initialisation state of the academic day",
+    description=(
+        "Reports whether the sessions of the requested academic day (today by default) "
+        "have been initialised from the configured timetable. The endpoint never writes "
+        "and never initialises historical dates."
+    ),
+)
+def get_initialization_status(
+    date: Optional[str] = Query(
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="Academic day to report on (defaults to today)",
+    ),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    target = _parse_target_date(date)
+    return initialization_status(db, target)
+
+
+@router.post(
+    "/initialize",
+    summary="Initialise the academic day's sessions from the timetable",
+    description=(
+        "Creates the sessions and session allocations for the requested academic day from "
+        "the configured timetable. The operation is idempotent (deterministic identifiers), "
+        "safe under concurrent execution (primary key uniqueness), restricted to working "
+        "academic days and to the 09:00 - 17:00 academic window. Historical dates are "
+        "rejected."
+    ),
+    responses={
+        409: {"description": "Concurrent initialisation conflict"},
+        422: {"description": "Invalid date"},
+    },
+)
+def initialize_sessions(
+    date: Optional[str] = Query(
+        None,
+        pattern=r"^\d{4}-\d{2}-\d{2}$",
+        description="Academic day to initialise (defaults to today)",
+    ),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    target = _parse_target_date(date)
+    today = dt.date.today()
+    if target < today:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "Historical sessions are never initialised automatically. "
+                "Only today (or a future academic day) can be initialised."
+            ),
+        )
+
+    result = initialize_sessions_for_date(
+        db,
+        target,
+        actor_user_id=current_user.user_id,
+        actor_role=getattr(current_user.role, "value", str(current_user.role)),
+    )
+
+    if result["created_sessions"]:
+        for created in result["created_sessions"]:
+            try:
+                crud.create_audit_entry(
+                    db,
+                    actor_id=current_user.user_id,
+                    action="SESSION_AUTO_INIT",
+                    entity_type="session",
+                    entity_id=created["session_id"],
+                    new_value=created.get("subject_code"),
+                    timestamp=_utcnow_iso(),
+                    actor_role=getattr(current_user.role, "value", str(current_user.role)),
+                )
+            except Exception:  # pragma: no cover - auditing must not block init
+                logger.warning("Failed to audit auto-initialised session %s", created.get("session_id"))
+        db.commit()
+
+    return result
 
 
 @router.post(

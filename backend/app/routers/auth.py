@@ -9,10 +9,10 @@ import logging
 import os
 import secrets
 import threading
-import time
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone, timedelta
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import bcrypt
 from fastapi import APIRouter, Body, Depends, HTTPException, Request, Response, status
@@ -50,8 +50,73 @@ logger = logging.getLogger("rollcall.auth.router")
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-# Concurrency lock to serialize the check-and-record window in SQLite
-_login_rate_lock = threading.Lock()
+# Per-account locks serialise the check-and-record window for one account on
+# SQLite. A global lock serialised every login in the process, so one slow
+# attempt delayed every other user; per-account locks keep that correctness
+# without the cross-user bottleneck.
+_login_locks: Dict[str, threading.Lock] = {}
+_login_locks_guard = threading.Lock()
+
+# A real bcrypt hash that is never a valid credential. Verifying against it for
+# unknown accounts keeps the response time of a failed login constant, so the
+# endpoint cannot be used to enumerate valid user ids.
+_DUMMY_PASSWORD_HASH = "$2b$12$j3mmKiApoKgogYvb1ieK/uyarwjvMorVikA.7sCpG5sSwWibDyMum"
+
+
+def _login_user_lock(user_key: str):
+    """Return the lock dedicated to one account (created on first use)."""
+    with _login_locks_guard:
+        lock = _login_locks.get(user_key)
+        if lock is None:
+            lock = threading.Lock()
+            _login_locks[user_key] = lock
+    return lock
+
+
+def _client_ip(request: Request) -> str:
+    """Resolve the client address, honouring a trusted reverse proxy.
+
+    ``X-Forwarded-For`` is only trusted when ``TRUST_PROXY_HEADERS`` is enabled,
+    because otherwise any client could spoof the header and dodge the per-IP
+    quota.
+    """
+    peer = request.client.host if request.client else "127.0.0.1"
+    trust_proxy = os.getenv("TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if trust_proxy:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first[:45]
+    return peer[:45]
+
+
+def _too_many_requests(retry_after: int, message: str) -> JSONResponse:
+    """Uniform 429 response with a Retry-After header."""
+    return JSONResponse(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        content={"error": {"code": "RATE_LIMITED", "message": message}},
+        headers={"Retry-After": str(max(1, int(retry_after)))},
+    )
+
+
+def _failures_since_last_success(
+    db: Session,
+    *failure_conditions,
+    success_conditions,
+    cutoff_iso: str,
+) -> int:
+    """Count failures newer than the last success for the same dimension.
+
+    A successful login resets the effective window instead of deleting the
+    historical rows, so the attempt log stays intact for auditing while a
+    shared NAT/proxy recovers as soon as one of its users authenticates.
+    """
+    last_success = db.execute(
+        select(func.max(LoginAttempt.timestamp)).where(*success_conditions)
+    ).scalar()
+    effective_cutoff = max(cutoff_iso, last_success or "")
+    return _failed_attempts_since(db, *failure_conditions, cutoff_iso=effective_cutoff)
 
 REFRESH_COOKIE_NAME = "rollcall_refresh_token"
 COOKIE_PATH = "/api"
@@ -166,7 +231,7 @@ def _check_rate_limit(
     now_dt: datetime,
     ip_address: Optional[str] = None,
     max_failures: int = 5,
-    max_ip_failures: int = 20,
+    max_ip_failures: Optional[int] = None,
     window_seconds: int = 600,
 ) -> bool:
     """
@@ -181,17 +246,31 @@ def _check_rate_limit(
     brute force against accounts that do not exist (those attempts are stored
     with ``user_id = NULL`` and are only visible through the IP quota).
     """
+    if max_ip_failures is None:
+        # A shared NAT/proxy must not be locked out by unrelated users, so the
+        # IP quota is deliberately generous and can be tuned per deployment.
+        try:
+            max_ip_failures = max(20, int(os.getenv("LOGIN_IP_FAILURE_LIMIT", "50")))
+        except ValueError:
+            max_ip_failures = 50
+
     cutoff_iso = _format_utc_iso(now_dt - timedelta(seconds=window_seconds))
 
-    user_failures = _failed_attempts_since(
-        db, LoginAttempt.user_id == user_id, cutoff_iso=cutoff_iso
+    user_failures = _failures_since_last_success(
+        db,
+        LoginAttempt.user_id == user_id,
+        success_conditions=(LoginAttempt.user_id == user_id, LoginAttempt.success == 1),
+        cutoff_iso=cutoff_iso,
     )
     if user_failures >= max_failures:
         return False
 
     if ip_address:
-        ip_failures = _failed_attempts_since(
-            db, LoginAttempt.ip_address == ip_address, cutoff_iso=cutoff_iso
+        ip_failures = _failures_since_last_success(
+            db,
+            LoginAttempt.ip_address == ip_address,
+            success_conditions=(LoginAttempt.ip_address == ip_address, LoginAttempt.success == 1),
+            cutoff_iso=cutoff_iso,
         )
         if ip_failures >= max_ip_failures:
             return False
@@ -211,7 +290,7 @@ def login(request: Request, payload: LoginRequest):
     """
     clean_uid = payload.user_id.strip()
     clean_pw = payload.password
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    client_ip = _client_ip(request)
     now_dt = _get_utc_now()
     now_iso = _format_utc_iso(now_dt)
 
@@ -228,58 +307,40 @@ def login(request: Request, payload: LoginRequest):
 
     SessionLocal = get_sync_session_factory()
     with SessionLocal() as db:
-        with _login_rate_lock:
+        with _login_user_lock(clean_uid):
             user = db.get(User, clean_uid)
             record_uid = user.user_id if user is not None else None
 
-            # 1. Rate limit check (rolling 10-minute window, per user and per IP)
+            # 1. Quota check (rolling 10-minute window, per user and per IP).
+            # The outcome never short-circuits the credential check: a correct
+            # password must never be refused, otherwise an attacker could keep a
+            # known account locked out with a handful of bad attempts.
             allowed = _check_rate_limit(db, clean_uid, now_dt, ip_address=client_ip)
             # Shared (cross-worker) quotas with progressive back-off and a
             # temporary lockout. The database backend is used when Redis is not
             # configured; it is still shared between workers.
             user_decision = check_limit(db, LimitScope.LOGIN, f"user:{clean_uid}", record_failure=False, commit=True)
             ip_decision = check_limit(db, LimitScope.LOGIN, f"ip:{client_ip}", record_failure=False, commit=True)
-            if not (allowed and user_decision.allowed and ip_decision.allowed):
-                _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
-                retry_after = max(
-                    user_decision.retry_after_seconds,
-                    ip_decision.retry_after_seconds,
-                    600,
-                )
-                log_security_event(
-                    "rate_limit_triggered",
-                    severity="warning",
-                    outcome="blocked",
-                    actor_id=record_uid,
-                    ip_address=client_ip,
-                    request_id=get_request_id(),
-                    details={
-                        "scope": "login",
-                        "retry_after_seconds": retry_after,
-                        "backend": user_decision.backend,
-                    },
-                )
-                return JSONResponse(
-                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                    content={
-                        "error": {
-                            "code": "RATE_LIMITED",
-                            "message": "Too many failed login attempts. Please try again later.",
-                        }
-                    },
-                    headers={"Retry-After": str(retry_after)},
-                )
+            quota_blocked = not (allowed and user_decision.allowed and ip_decision.allowed)
+            quota_retry_after = max(
+                user_decision.retry_after_seconds,
+                ip_decision.retry_after_seconds,
+                600,
+            )
 
             def _reject_login() -> JSONResponse:
-                """Record the failure, apply the progressive delay and answer generically."""
+                """Count the failure and answer generically (429 only when exhausted)."""
                 _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                 failure = check_limit(db, LimitScope.LOGIN, f"user:{clean_uid}", record_failure=True, commit=True)
-                check_limit(db, LimitScope.LOGIN, f"ip:{client_ip}", record_failure=True, commit=True)
-                if failure.delay_seconds:
-                    time.sleep(failure.delay_seconds)
-                if not failure.allowed:
+                ip_failure = check_limit(db, LimitScope.LOGIN, f"ip:{client_ip}", record_failure=True, commit=True)
+                if quota_blocked or not failure.allowed or not ip_failure.allowed:
+                    retry_after = max(
+                        quota_retry_after,
+                        failure.retry_after_seconds,
+                        ip_failure.retry_after_seconds,
+                    )
                     log_security_event(
-                        "account_locked",
+                        "rate_limit_triggered",
                         severity="warning",
                         outcome="blocked",
                         actor_id=record_uid,
@@ -288,22 +349,30 @@ def login(request: Request, payload: LoginRequest):
                         details={
                             "scope": "login",
                             "attempts": failure.attempts,
-                            "retry_after_seconds": failure.retry_after_seconds,
+                            "retry_after_seconds": retry_after,
+                            "backend": failure.backend,
                         },
+                    )
+                    return _too_many_requests(
+                        retry_after,
+                        "Too many failed login attempts. Please try again later.",
                     )
                 return generic_401
 
-            # 2. Validation: user must exist, be active, and possess a valid password hash
-            if user is None or not user.is_active or not user.hashed_password:
-                return _reject_login()
-
-            # 3. Verify password with bcrypt
+            # 2+3. Always run a bcrypt comparison - even for an unknown or
+            # inactive account - against a real dummy hash, so response timing
+            # cannot be used to distinguish existing user ids.
+            candidate_hash = (
+                user.hashed_password
+                if user is not None and user.hashed_password
+                else _DUMMY_PASSWORD_HASH
+            )
             try:
-                pw_matches = bcrypt.checkpw(clean_pw.encode("utf-8"), user.hashed_password.encode("utf-8"))
+                pw_matches = bcrypt.checkpw(clean_pw.encode("utf-8"), candidate_hash.encode("utf-8"))
             except Exception:
                 pw_matches = False
 
-            if not pw_matches:
+            if user is None or not user.is_active or not user.hashed_password or not pw_matches:
                 return _reject_login()
 
             # 4. ADMIN role extra authentication check
@@ -321,6 +390,72 @@ def login(request: Request, payload: LoginRequest):
                 if not hmac.compare_digest(payload.admin_key.strip(), configured_admin_key.strip()):
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                     return generic_401
+
+            # 4b. Second factor. When MFA is enabled a correct password alone is
+            # never sufficient: the TOTP code (or a single-use recovery code)
+            # must verify before any session is created. A missing/invalid code
+            # yields the same generic answer as a bad password.
+            if user.mfa_enabled:
+                mfa_code = (payload.mfa_code or "").strip()
+                mfa_verified = False
+                used_recovery = False
+                totp_counter: Optional[int] = None
+                try:
+                    mfa_secret = decrypt_secret(user.mfa_secret or "")
+                except (MFAConfigurationError, MFADecryptionError) as exc:
+                    # Fail closed: an undecryptable secret must never be skipped.
+                    logger.error("MFA login refused: secret unavailable (%s)", exc)
+                    _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
+                    return generic_401
+
+                if mfa_code.isdigit() and len(mfa_code) == 6:
+                    mfa_verified, totp_counter = verify_totp(
+                        mfa_secret, mfa_code, last_counter=user.mfa_last_counter
+                    )
+                elif mfa_code:
+                    stored_codes = json.loads(user.mfa_recovery_codes or "[]")
+                    matched = verify_recovery_code(mfa_code, stored_codes)
+                    if matched is not None:
+                        user.mfa_recovery_codes = json.dumps(
+                            [item for item in stored_codes if item != matched]
+                        )
+                        mfa_verified = True
+                        used_recovery = True
+
+                if not mfa_verified:
+                    _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
+                    mfa_failure = check_limit(
+                        db, LimitScope.MFA_VERIFY, f"user:{clean_uid}", record_failure=True, commit=True
+                    )
+                    log_security_event(
+                        "mfa_verification_failed",
+                        severity="info",
+                        outcome="failure",
+                        actor_id=record_uid,
+                        ip_address=client_ip,
+                        request_id=get_request_id(),
+                        details={"stage": "login", "used_recovery_code": used_recovery},
+                    )
+                    if not mfa_failure.allowed:
+                        return _too_many_requests(
+                            mfa_failure.retry_after_seconds or 900,
+                            "Too many MFA attempts. Please try again later.",
+                        )
+                    return generic_401
+
+                if totp_counter is not None:
+                    user.mfa_last_counter = totp_counter
+                db.commit()
+                clear_limit(db, LimitScope.MFA_VERIFY, f"user:{clean_uid}")
+                log_security_event(
+                    "mfa_challenge_satisfied",
+                    severity="info",
+                    outcome="success",
+                    actor_id=record_uid,
+                    ip_address=client_ip,
+                    request_id=get_request_id(),
+                    details={"used_recovery_code": used_recovery},
+                )
 
             # 5. Record successful login attempt
             _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=1, timestamp=now_iso)
@@ -365,7 +500,33 @@ def login(request: Request, payload: LoginRequest):
             )
             db.add(refresh_record)
 
-            # 8. Commit session and refresh token together atomically, with error handling
+            # 8. Issue signed JWT token with 15-minute expiry before committing the session
+            # so a token creation error rolls back cleanly without leaving an orphaned session.
+            try:
+                exp_dt = now_dt + timedelta(minutes=15)
+                exp_iso = _format_utc_iso(exp_dt)
+                token_claims = {
+                    "sub": user.user_id,
+                    "role": user.role,
+                    "sid": session_id,
+                    "iat": int(now_dt.timestamp()),
+                    "exp": int(exp_dt.timestamp()),
+                }
+                token = create_access_token(token_claims, expires_delta=timedelta(minutes=15))
+            except Exception as e:
+                logger.error("Failed to create JWT token on login: %s", e)
+                db.rollback()
+                return JSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    content={
+                        "error": {
+                            "code": "TOKEN_CREATION_FAILED",
+                            "message": "An error occurred while generating your authentication token. Please try again.",
+                        }
+                    },
+                )
+
+            # 9. Commit session and refresh token together atomically, with error handling
             try:
                 db.commit()
             except Exception as e:
@@ -381,33 +542,9 @@ def login(request: Request, payload: LoginRequest):
                     },
                 )
 
-        # 8. Fetch assigned subject codes
+        # 10. Fetch assigned subject codes
         stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
         subject_codes = [r[0] for r in db.execute(stmt).all()]
-
-        # 9. Issue signed JWT token with 15-minute expiry, with error handling
-        try:
-            exp_dt = now_dt + timedelta(minutes=15)
-            exp_iso = _format_utc_iso(exp_dt)
-            token_claims = {
-                "sub": user.user_id,
-                "role": user.role,
-                "iat": int(now_dt.timestamp()),
-                "exp": int(exp_dt.timestamp()),
-            }
-            token = create_access_token(token_claims, expires_delta=timedelta(minutes=15))
-        except Exception as e:
-            logger.error("Failed to create JWT token on login: %s", e)
-            db.rollback()
-            return JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={
-                    "error": {
-                        "code": "TOKEN_CREATION_FAILED",
-                        "message": "An error occurred while generating your authentication token. Please try again.",
-                    }
-                },
-            )
 
         out_response = JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -457,15 +594,26 @@ def refresh(request: Request):
     candidate_hash = hashlib.sha256(raw_token.strip().encode("utf-8")).hexdigest()
     now_dt = _get_utc_now()
     now_iso = _format_utc_iso(now_dt)
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    client_ip = _client_ip(request)
 
     SessionLocal = get_sync_session_factory()
     with SessionLocal() as db:
+        # Shared refresh quota: bounds token-guessing and refresh flooding.
+        refresh_decision = check_limit(
+            db, LimitScope.REFRESH, f"ip:{client_ip}", record_failure=False, commit=True
+        )
+        if not refresh_decision.allowed:
+            return _too_many_requests(
+                refresh_decision.retry_after_seconds or 300,
+                "Too many refresh attempts. Please try again later.",
+            )
+
         token_record = db.execute(
             select(AuthRefreshToken).where(AuthRefreshToken.token_hash == candidate_hash)
         ).scalar_one_or_none()
 
         if token_record is None:
+            check_limit(db, LimitScope.REFRESH, f"ip:{client_ip}", record_failure=True, commit=True)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"error": {"code": "UNAUTHORIZED", "message": "Invalid refresh token."}},
@@ -487,6 +635,7 @@ def refresh(request: Request):
                 session_family.session_id,
             )
             # Security event (operational log, separate from the audit trail).
+            check_limit(db, LimitScope.REFRESH, f"ip:{client_ip}", record_failure=True, commit=True)
             detector.record_refresh_token_reuse(
                 user_id=session_family.user_id,
                 session_family=session_family.session_id,
@@ -616,6 +765,7 @@ def refresh(request: Request):
         token_claims = {
             "sub": user.user_id,
             "role": user.role,
+            "sid": session_family.session_id,
             "iat": int(now_dt.timestamp()),
             "exp": int(exp_dt.timestamp()),
         }
@@ -662,6 +812,15 @@ def logout(request: Request):
 
     raw_token = request.cookies.get(REFRESH_COOKIE_NAME)
     now_iso = _format_utc_iso(_get_utc_now())
+
+    if not raw_token or not raw_token.strip():
+        # Logout is a state-changing endpoint: without the session cookie there
+        # is nothing to revoke, and the call must not report success.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail={"error": {"code": "UNAUTHORIZED", "message": "No active session to log out."}},
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
     if raw_token and raw_token.strip():
         candidate_hash = hashlib.sha256(raw_token.strip().encode("utf-8")).hexdigest()
@@ -802,15 +961,28 @@ def change_password(
     that meets complexity requirements. All active sessions are invalidated
     since a password change should revoke active sessions.
     """
-    if current_user.role == Role.VIEWER:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": {"code": "FORBIDDEN", "message": "Password changes are not available for viewer roles."}},
-        )
-
     SessionLocal = get_sync_session_factory()
     from sqlalchemy import update as sa_update
     with SessionLocal() as db:
+        # A valid access token must not turn into an unlimited password oracle.
+        limiter_key = f"user:{current_user.user_id}"
+        change_decision = check_limit(
+            db, LimitScope.PASSWORD_CHANGE, limiter_key, record_failure=False, commit=True
+        )
+        if not change_decision.allowed:
+            log_security_event(
+                "rate_limit_triggered",
+                severity="warning",
+                outcome="blocked",
+                actor_id=current_user.user_id,
+                request_id=get_request_id(),
+                details={"scope": "password_change"},
+            )
+            return _too_many_requests(
+                change_decision.retry_after_seconds or 900,
+                "Too many password verification attempts. Please try again later.",
+            )
+
         # Get the user from the database
         db_user = db.get(User, current_user.user_id)
         if db_user is None:
@@ -826,6 +998,14 @@ def change_password(
             pw_matches = False
 
         if not pw_matches:
+            failed = check_limit(
+                db, LimitScope.PASSWORD_CHANGE, limiter_key, record_failure=True, commit=True
+            )
+            if not failed.allowed:
+                return _too_many_requests(
+                    failed.retry_after_seconds or 900,
+                    "Too many password verification attempts. Please try again later.",
+                )
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail={"error": {"code": "INCORRECT_PASSWORD", "message": "Old password is incorrect."}},
@@ -834,13 +1014,9 @@ def change_password(
         # Validate new password strength
         _validate_password_strength(new_password)
 
-        # Hash and update password
+        # Hash, update password, and invalidate all existing sessions/refresh tokens atomically
         hashed_pw = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
         db_user.hashed_password = hashed_pw
-        db.commit()
-
-        # Invalidate all existing sessions/refresh tokens for this user
-        # since a password change should revoke active sessions
         now_iso = _format_utc_iso(_get_utc_now())
         db.execute(
             sa_update(AuthSession).where(AuthSession.user_id == current_user.user_id).values(revoked_at=now_iso)
@@ -851,11 +1027,42 @@ def change_password(
             )).values(revoked_at=now_iso)
         )
         db.commit()
+        clear_limit(db, LimitScope.PASSWORD_CHANGE, limiter_key)
 
         return {"message": "Password changed successfully. All active sessions have been invalidated."}
 
 
 # -- Multi-Factor Authentication Endpoints --
+
+@router.get(
+    "/mfa/status",
+    summary="Report whether MFA is enabled for the authenticated user.",
+    description=(
+        "Read-only status endpoint used by the account settings screen. It never returns "
+        "the TOTP secret or any recovery material."
+    ),
+    responses={
+        200: {"description": "MFA enrollment status"},
+        401: {"description": "User not authenticated"},
+    },
+)
+def mfa_status(current_user: AuthenticatedUser = Depends(get_current_user)):
+    """Return the MFA enrollment state of the current account."""
+    SessionLocal = get_sync_session_factory()
+    with SessionLocal() as db:
+        db_user = db.get(User, current_user.user_id)
+        enabled = bool(db_user.mfa_enabled) if db_user is not None else False
+        available = True
+        try:
+            get_encryption_key()
+        except MFAConfigurationError:
+            available = False
+        return {
+            "user_id": current_user.user_id,
+            "mfa_enabled": enabled,
+            "mfa_available": available,
+        }
+
 
 @router.post(
     "/mfa/enable",
@@ -873,6 +1080,7 @@ def change_password(
 def enable_mfa(
     request: Request,
     current_password: str = Body(..., embed=True),
+    code: Optional[str] = Body(None, embed=True),
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Begin MFA enrollment (secret + recovery codes)."""
@@ -893,6 +1101,16 @@ def enable_mfa(
 
     SessionLocal = get_sync_session_factory()
     with SessionLocal() as db:
+        limiter_key = f"user:{current_user.user_id}"
+        pw_decision = check_limit(
+            db, LimitScope.PASSWORD_CHANGE, limiter_key, record_failure=False, commit=True
+        )
+        if not pw_decision.allowed:
+            return _too_many_requests(
+                pw_decision.retry_after_seconds or 900,
+                "Too many password verification attempts. Please try again later.",
+            )
+
         db_user = db.get(User, current_user.user_id)
         if db_user is None:
             raise HTTPException(
@@ -906,6 +1124,9 @@ def enable_mfa(
         except Exception:
             pw_ok = False
         if not pw_ok:
+            failed = check_limit(
+                db, LimitScope.PASSWORD_CHANGE, limiter_key, record_failure=True, commit=True
+            )
             log_security_event(
                 "mfa_enrollment_failed",
                 severity="info",
@@ -914,10 +1135,67 @@ def enable_mfa(
                 request_id=get_request_id(),
                 details={"reason": "incorrect_password"},
             )
+            if not failed.allowed:
+                return _too_many_requests(
+                    failed.retry_after_seconds or 900,
+                    "Too many password verification attempts. Please try again later.",
+                )
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
                 detail={"error": {"code": "INCORRECT_PASSWORD", "message": "Current password is incorrect."}},
             )
+
+        # Re-enrollment replaces the second factor. A stolen password alone must
+        # not be enough, so an already-enrolled account has to present a current
+        # TOTP or recovery code first.
+        if db_user.mfa_enabled:
+            try:
+                existing_secret = decrypt_secret(db_user.mfa_secret or "")
+            except (MFAConfigurationError, MFADecryptionError) as exc:
+                logger.error("MFA re-enrollment refused: secret unavailable (%s)", exc)
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={"error": {"code": "MFA_UNAVAILABLE", "message": "MFA is not available on this server."}},
+                )
+            supplied = (code or "").strip()
+            reauth_ok = False
+            if supplied.isdigit() and len(supplied) == 6:
+                reauth_ok, _ = verify_totp(
+                    existing_secret,
+                    supplied,
+                    last_counter=db_user.mfa_last_counter,
+                    allow_same_step=True,
+                )
+            elif supplied:
+                stored_existing = json.loads(db_user.mfa_recovery_codes or "[]")
+                matched = verify_recovery_code(supplied, stored_existing)
+                if matched is not None:
+                    db_user.mfa_recovery_codes = json.dumps(
+                        [item for item in stored_existing if item != matched]
+                    )
+                    reauth_ok = True
+            if not reauth_ok:
+                mfa_failed = check_limit(
+                    db, LimitScope.MFA_VERIFY, limiter_key, record_failure=True, commit=True
+                )
+                log_security_event(
+                    "mfa_reenrollment_failed",
+                    severity="warning",
+                    outcome="failure",
+                    actor_id=current_user.user_id,
+                    request_id=get_request_id(),
+                    details={"reason": "second_factor_required"},
+                )
+                if not mfa_failed.allowed:
+                    return _too_many_requests(
+                        mfa_failed.retry_after_seconds or 900,
+                        "Too many MFA attempts. Please try again later.",
+                    )
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail={"error": {"code": "INVALID_MFA_CODE", "message": "A current MFA code is required to re-enroll."}},
+                )
+            clear_limit(db, LimitScope.MFA_VERIFY, limiter_key)
 
         secret = generate_mfa_secret()
         recovery_codes = generate_recovery_codes()
@@ -926,6 +1204,7 @@ def enable_mfa(
         db_user.mfa_enabled = 0  # not active until the first successful verification
         db_user.mfa_last_counter = None
         db.commit()
+        clear_limit(db, LimitScope.PASSWORD_CHANGE, limiter_key)
 
         log_security_event(
             "mfa_enrollment_started",
@@ -961,7 +1240,7 @@ def verify_mfa(
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Verify the enrollment code (or a recovery code) and activate MFA."""
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    client_ip = _client_ip(request)
     SessionLocal = get_sync_session_factory()
     with SessionLocal() as db:
         decision = check_limit(
@@ -1066,6 +1345,16 @@ def disable_mfa(
     """Disable MFA (password + code required when MFA is active)."""
     SessionLocal = get_sync_session_factory()
     with SessionLocal() as db:
+        limiter_key = f"user:{current_user.user_id}"
+        pw_decision = check_limit(
+            db, LimitScope.PASSWORD_CHANGE, limiter_key, record_failure=False, commit=True
+        )
+        if not pw_decision.allowed:
+            return _too_many_requests(
+                pw_decision.retry_after_seconds or 900,
+                "Too many password verification attempts. Please try again later.",
+            )
+
         db_user = db.get(User, current_user.user_id)
         if db_user is None:
             raise HTTPException(
@@ -1079,6 +1368,14 @@ def disable_mfa(
         except Exception:
             pw_ok = False
         if not pw_ok:
+            failed = check_limit(
+                db, LimitScope.PASSWORD_CHANGE, limiter_key, record_failure=True, commit=True
+            )
+            if not failed.allowed:
+                return _too_many_requests(
+                    failed.retry_after_seconds or 900,
+                    "Too many password verification attempts. Please try again later.",
+                )
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail={"error": {"code": "INCORRECT_PASSWORD", "message": "Current password is incorrect."}},
@@ -1089,6 +1386,14 @@ def disable_mfa(
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail={"error": {"code": "MFA_NOT_ENROLLED", "message": "MFA is not enrolled for this account."}},
+                )
+            mfa_decision = check_limit(
+                db, LimitScope.MFA_VERIFY, limiter_key, record_failure=False, commit=True
+            )
+            if not mfa_decision.allowed:
+                return _too_many_requests(
+                    mfa_decision.retry_after_seconds or 900,
+                    "Too many MFA attempts. Please try again later.",
                 )
             try:
                 secret = decrypt_secret(db_user.mfa_secret)
@@ -1104,14 +1409,23 @@ def disable_mfa(
                 allow_same_step=True,
             )
             if not valid:
+                mfa_failed = check_limit(
+                    db, LimitScope.MFA_VERIFY, limiter_key, record_failure=True, commit=True
+                )
                 log_security_event(
                     "mfa_verification_failed",
                     severity="info",
                     outcome="failure",
                     actor_id=current_user.user_id,
+                    ip_address=_client_ip(request),
                     request_id=get_request_id(),
                     details={"reason": "disable_requires_valid_code"},
                 )
+                if not mfa_failed.allowed:
+                    return _too_many_requests(
+                        mfa_failed.retry_after_seconds or 900,
+                        "Too many MFA attempts. Please try again later.",
+                    )
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail={"error": {"code": "INVALID_MFA_CODE", "message": "The verification code is invalid."}},
@@ -1122,6 +1436,8 @@ def disable_mfa(
         db_user.mfa_enabled = 0
         db_user.mfa_last_counter = None
         db.commit()
+        clear_limit(db, LimitScope.PASSWORD_CHANGE, limiter_key)
+        clear_limit(db, LimitScope.MFA_VERIFY, limiter_key)
         log_security_event(
             "mfa_disabled",
             severity="info",
@@ -1147,7 +1463,6 @@ def disable_mfa(
 def initiate_password_reset(
     request: Request,
     user_id: str = Body(..., embed=True),
-    current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Initiate a password reset flow.
 
@@ -1157,54 +1472,43 @@ def initiate_password_reset(
     whether or not the account exists, so the endpoint cannot be used to probe
     for valid accounts.
     """
-    if current_user.role not in (Role.ADMIN, Role.FACULTY):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail={"error": {"code": "FORBIDDEN", "message": "Password reset initiation restricted to administrators and faculty."}},
-        )
-
     generic_response = {
         "message": "If the account exists, a password reset link has been sent to its registered email address.",
         "reset_initiated": True,
     }
 
     SessionLocal = get_sync_session_factory()
-    from sqlalchemy import update as sa_update, select as sa_select
+    clean_uid = user_id.strip()
     with SessionLocal() as db:
-        client_ip = request.client.host if request.client else "127.0.0.1"
+        client_ip = _client_ip(request)
         decision = check_limit(
-            db, LimitScope.PASSWORD_RESET, f"reset:{user_id.strip().lower()}", record_failure=False, commit=True
+            db, LimitScope.PASSWORD_RESET, f"reset:{clean_uid.lower()}", record_failure=False, commit=True
         )
-        if not decision.allowed:
+        ip_decision = check_limit(
+            db, LimitScope.PASSWORD_RESET, f"ip:{client_ip}", record_failure=False, commit=True
+        )
+        if not decision.allowed or not ip_decision.allowed:
+            retry_after = max(decision.retry_after_seconds, ip_decision.retry_after_seconds, 300)
             log_security_event(
                 "rate_limit_triggered",
                 severity="warning",
                 outcome="blocked",
-                actor_id=current_user.user_id,
                 ip_address=client_ip,
                 request_id=get_request_id(),
-                details={"scope": "password_reset", "retry_after_seconds": decision.retry_after_seconds},
+                details={"scope": "password_reset", "retry_after_seconds": retry_after},
             )
-            return JSONResponse(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                content={
-                    "error": {
-                        "code": "RATE_LIMITED",
-                        "message": "Too many password reset requests. Please try again later.",
-                    }
-                },
-                headers={"Retry-After": str(decision.retry_after_seconds)},
+            return _too_many_requests(
+                retry_after, "Too many password reset requests. Please try again later."
             )
 
         # Find the user
-        db_user = db.get(User, user_id)
+        db_user = db.get(User, clean_uid)
         if db_user is None or not db_user.is_active:
             # Generic answer: do not confirm whether the account exists.
             log_security_event(
                 "password_reset_requested",
                 severity="info",
                 outcome="failure",
-                actor_id=current_user.user_id,
                 ip_address=client_ip,
                 request_id=get_request_id(),
                 details={"reason": "unknown_or_inactive_account"},
@@ -1212,8 +1516,6 @@ def initiate_password_reset(
             return generic_response
 
         # Generate a secure random token; only its SHA-256 hash is stored.
-        import secrets
-        import hashlib
         reset_token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(reset_token.encode("utf-8")).hexdigest()
         token_expires = _format_utc_iso(_get_utc_now() + timedelta(hours=2))  # 2-hour expiry
@@ -1252,7 +1554,7 @@ def initiate_password_reset(
             "password_reset_requested",
             severity="info",
             outcome="success",
-            actor_id=current_user.user_id,
+            actor_id=db_user.user_id,
             ip_address=client_ip,
             request_id=get_request_id(),
             details={"delivered": delivery.delivered, "provider_configured": delivery.configured},
@@ -1296,7 +1598,7 @@ def complete_password_reset(
     )
 
     # Rate limit the reset completion (brute force on the token space).
-    client_ip = request.client.host if request.client else "127.0.0.1"
+    client_ip = _client_ip(request)
     SessionLocal = get_sync_session_factory()
     with SessionLocal() as db:
         decision = check_limit(db, LimitScope.PASSWORD_RESET, f"ip:{client_ip}", record_failure=False, commit=True)
@@ -1324,60 +1626,72 @@ def complete_password_reset(
         now_dt = _get_utc_now()
         now_iso = _format_utc_iso(now_dt)
 
-        db_user = db.execute(
-            select(User).where(User.password_reset_token == token_hash)
-        ).scalars().first()
-
-        if db_user is None:
-            check_limit(db, LimitScope.PASSWORD_RESET, f"ip:{client_ip}", record_failure=True, commit=True)
-            log_security_event(
-                "password_reset_failed",
-                severity="info",
-                outcome="failure",
-                ip_address=client_ip,
-                request_id=get_request_id(),
-                details={"reason": "invalid_token"},
-            )
-            return generic_error
-
-        expires = db_user.password_reset_token_expires or ""
-        if expires <= now_iso:
-            check_limit(db, LimitScope.PASSWORD_RESET, f"ip:{client_ip}", record_failure=True, commit=True)
-            log_security_event(
-                "password_reset_failed",
-                severity="info",
-                outcome="failure",
-                actor_id=db_user.user_id,
-                ip_address=client_ip,
-                request_id=get_request_id(),
-                details={"reason": "expired_token"},
-            )
-            return generic_error
-
         # Validate the new password before consuming the token.
         try:
             _validate_password_strength(new_password)
         except HTTPException:
             return generic_error
 
-        hashed_pw = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-        db_user.hashed_password = hashed_pw
-        # Atomic single-use consumption: the token is cleared in the same
-        # transaction as the password change.
-        db_user.password_reset_token = None
-        db_user.password_reset_token_expires = None
-        db.commit()
-
-        # Revoke every session and refresh token of the account.
         from sqlalchemy import update as sa_update
 
+        target_user_id = db.execute(
+            select(User.user_id).where(User.password_reset_token == token_hash)
+        ).scalar_one_or_none()
+
+        if target_user_id is None:
+            check_limit(db, LimitScope.PASSWORD_RESET, f"ip:{client_ip}", record_failure=True, commit=True)
+            log_security_event(
+                "password_reset_failed",
+                severity="info",
+                outcome="failure",
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"reason": "invalid_or_expired_token"},
+            )
+            return generic_error
+
+        hashed_pw = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        # Atomic single-use consumption: the reset only applies while the stored
+        # token matches AND is still valid. Two concurrent requests therefore
+        # cannot both change the password (rowcount is 1 for exactly one).
+        consumed = db.execute(
+            sa_update(User)
+            .where(
+                User.user_id == target_user_id,
+                User.password_reset_token == token_hash,
+                User.password_reset_token_expires.is_not(None),
+                User.password_reset_token_expires > now_iso,
+                User.is_active == 1,
+            )
+            .values(
+                hashed_password=hashed_pw,
+                password_reset_token=None,
+                password_reset_token_expires=None,
+            )
+        )
+        if consumed.rowcount != 1:
+            db.rollback()
+            check_limit(db, LimitScope.PASSWORD_RESET, f"ip:{client_ip}", record_failure=True, commit=True)
+            log_security_event(
+                "password_reset_failed",
+                severity="info",
+                outcome="failure",
+                actor_id=target_user_id,
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"reason": "invalid_or_expired_token"},
+            )
+            return generic_error
+
+        # Revoke every session and refresh token of the account in the same
+        # transaction as the password change.
         db.execute(
-            sa_update(AuthSession).where(AuthSession.user_id == db_user.user_id).values(revoked_at=now_iso)
+            sa_update(AuthSession).where(AuthSession.user_id == target_user_id).values(revoked_at=now_iso)
         )
         db.execute(
             sa_update(AuthRefreshToken).where(
                 AuthRefreshToken.session_id.in_(
-                    sa_select(AuthSession.session_id).where(AuthSession.user_id == db_user.user_id)
+                    sa_select(AuthSession.session_id).where(AuthSession.user_id == target_user_id)
                 )
             ).values(revoked_at=now_iso)
         )
@@ -1388,7 +1702,7 @@ def complete_password_reset(
             "password_reset_completed",
             severity="info",
             outcome="success",
-            actor_id=db_user.user_id,
+            actor_id=target_user_id,
             ip_address=client_ip,
             request_id=get_request_id(),
             details={"sessions_revoked": True},
@@ -1476,19 +1790,13 @@ def revoke_user_session(
     with SessionLocal() as db:
         session = db.get(AuthSession, session_id)
 
-        if session is None:
+        # Object-level authorization. A session belonging to another account is
+        # reported exactly like a missing one, so ids cannot be probed and one
+        # user can never revoke another user's session.
+        if session is None or session.user_id != current_user.user_id:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail={"error": {"code": "SESSION_NOT_FOUND", "message": "Session not found."}},
-            )
-
-        # Prevent revoking the currently active session
-        if session.session_id == current_user.session_id if hasattr(current_user, 'session_id') else False:
-            # Actually, we need to check against the current request session
-            # For now, just allow revocation of any other session
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail={"error": {"code": "CANNOT_REVOKE_CURRENT", "message": "Cannot revoke the currently active session. Use logout instead."}},
             )
 
         now_iso = _format_utc_iso(_get_utc_now())
@@ -1528,7 +1836,15 @@ def revoke_all_other_sessions(
             update(AuthSession).where(AuthSession.user_id == current_user.user_id).values(revoked_at=now_iso)
         )
         db.execute(
-            update(AuthRefreshToken).where(AuthRefreshToken.user_id == current_user.user_id).values(revoked_at=now_iso)
+            update(AuthRefreshToken)
+            .where(
+                AuthRefreshToken.session_id.in_(
+                    sa_select(AuthSession.session_id).where(
+                        AuthSession.user_id == current_user.user_id
+                    )
+                )
+            )
+            .values(revoked_at=now_iso)
         )
         db.commit()
 

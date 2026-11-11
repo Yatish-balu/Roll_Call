@@ -1,39 +1,58 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { fetchSessions, createSession, type SessionItem } from "@/services/api/sessions";
+import {
+  createSession,
+  fetchInitializationState,
+  fetchSessionAllocations,
+  fetchSessions,
+  initializeSessions,
+  type InitializationState,
+  type SessionAllocation,
+  type SessionItem,
+} from "@/services/api/sessions";
 import { fetchMySubjects } from "@/services/api/faculty";
 import { useAuth } from "@/hooks/useAuth";
+import { formatIsoDate, todayIso } from "@/lib/schedule";
 
 export function SessionsView() {
   const navigate = useNavigate();
   const { session, isAdmin, isFaculty, isViewer, canScheduleSessions } = useAuth();
+  const today = todayIso();
+
   const [sessions, setSessions] = useState<SessionItem[]>([]);
+  const [allocations, setAllocations] = useState<SessionAllocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Session initialisation (server side)
+  const [initialization, setInitialization] = useState<InitializationState | null>(null);
+  const [initializationError, setInitializationError] = useState<string | null>(null);
+  const [isInitializing, setIsInitializing] = useState(false);
 
   // Assigned subjects for faculty (authoritative from backend)
   const [assignedSubjects, setAssignedSubjects] = useState<string[]>([]);
   const [isLoadingSubjects, setIsLoadingSubjects] = useState(false);
 
-  // Search & Filter
+  // Search & filter
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedSubject, setSelectedSubject] = useState("ALL");
 
-  // Create Modal
+  // Create modal
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [sessionId, setSessionId] = useState("");
-  const [sessionDate, setSessionDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [sessionDate, setSessionDate] = useState(today);
   const [subject, setSubject] = useState("");
-  const [subjectCode, setSubjectCode] = useState(() => (!isAdmin && isFaculty && session.subjectCodes?.[0]) || "");
+  const [subjectCode, setSubjectCode] = useState(
+    () => (!isAdmin && isFaculty && session.subjectCodes?.[0]) || ""
+  );
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
-  // Detail Modal
+  // Detail modal
   const [viewSession, setViewSession] = useState<SessionItem | null>(null);
 
-  // Load faculty assigned subjects authoritatively from backend /api/v1/me/subjects
   useEffect(() => {
     let isMounted = true;
     if (isFaculty && !isAdmin) {
@@ -43,7 +62,9 @@ export function SessionsView() {
           if (!isMounted) return;
           const codes = res.subject_codes || [];
           setAssignedSubjects(codes);
-          setSubjectCode((prev) => (codes.length === 1 ? codes[0] : (prev || (codes.length > 1 ? codes[0] : ""))));
+          setSubjectCode((prev) =>
+            codes.length === 1 ? codes[0] : prev || (codes.length > 1 ? codes[0] : "")
+          );
         })
         .catch(() => {
           if (!isMounted) return;
@@ -64,49 +85,71 @@ export function SessionsView() {
     setIsLoading(true);
     setError(null);
     try {
-      const res = await fetchSessions({ limit: 50 });
-      const allItems = res.items || [];
-      // Backend automatically applies session visibility rules for faculty.
-      // We display all items returned by the backend authority.
-      setSessions(allItems);
+      const [sessionsRes, allocationsRes] = await Promise.all([
+        fetchSessions({ limit: 100 }),
+        fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 })),
+      ]);
+      setSessions(sessionsRes.items || []);
+      setAllocations(allocationsRes.items || []);
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Unable to load academic sessions.");
-      }
+      setError(err instanceof Error ? err.message : "Unable to load academic sessions.");
     } finally {
       setIsLoading(false);
     }
   }, []);
 
+  const loadInitialization = useCallback(async () => {
+    setInitializationError(null);
+    try {
+      const state = await fetchInitializationState(today);
+      setInitialization(state);
+    } catch (err: unknown) {
+      setInitializationError(
+        err instanceof Error ? err.message : "The initialization state could not be read."
+      );
+    }
+  }, [today]);
+
   useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadSessions();
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadSessions]);
+    void loadSessions();
+    void loadInitialization();
+  }, [loadSessions, loadInitialization]);
 
-  // Derived filter
-  const filteredSessions = useMemo(() => {
-    return sessions.filter((s) => {
-      const matchesSearch =
-        s.session_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        (s.subject ? s.subject.toLowerCase().includes(searchQuery.toLowerCase()) : false) ||
-        (s.subject_code ? s.subject_code.toLowerCase().includes(searchQuery.toLowerCase()) : false);
-      const matchesSubject =
-        selectedSubject === "ALL" || s.subject === selectedSubject;
-      return matchesSearch && matchesSubject;
-    });
-  }, [sessions, searchQuery, selectedSubject]);
+  const allocationsBySession = useMemo(() => {
+    const map = new Map<string, SessionAllocation[]>();
+    for (const allocation of allocations) {
+      const list = map.get(allocation.session_id) || [];
+      list.push(allocation);
+      map.set(allocation.session_id, list);
+    }
+    for (const list of map.values()) {
+      list.sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+    }
+    return map;
+  }, [allocations]);
 
-  // Unique subjects
+  const filteredSessions = useMemo(
+    () =>
+      sessions.filter((s) => {
+        const matchesSearch =
+          s.session_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
+          (s.subject ? s.subject.toLowerCase().includes(searchQuery.toLowerCase()) : false) ||
+          (s.subject_code ? s.subject_code.toLowerCase().includes(searchQuery.toLowerCase()) : false);
+        const matchesSubject =
+          selectedSubject === "ALL" ||
+          (s.subject_code || s.subject || "").toUpperCase() === selectedSubject.toUpperCase();
+        return matchesSearch && matchesSubject;
+      }),
+    [sessions, searchQuery, selectedSubject]
+  );
+
   const subjectOptions = useMemo(() => {
-    const set = new Set(sessions.map((s) => s.subject));
-    return Array.from(set);
+    const set = new Set<string>();
+    sessions.forEach((s) => {
+      const value = s.subject_code || s.subject;
+      if (value) set.add(value);
+    });
+    return Array.from(set).sort();
   }, [sessions]);
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
@@ -116,7 +159,7 @@ export function SessionsView() {
       return;
     }
     if (!isAdmin && isFaculty && assignedSubjects.length === 0) {
-      setFormError("Cannot schedule session: No assigned subjects found for your account.");
+      setFormError("Cannot schedule a session: no subjects are assigned to your account.");
       return;
     }
     if (!isAdmin && isFaculty && !subjectCode.trim()) {
@@ -127,9 +170,9 @@ export function SessionsView() {
       setFormError("Please fill out all required fields.");
       return;
     }
+
     setIsSubmitting(true);
     setFormError(null);
-
     try {
       const created = await createSession({
         session_id: sessionId.trim().toUpperCase(),
@@ -141,33 +184,42 @@ export function SessionsView() {
       setIsCreateOpen(false);
       setSessionId("");
       setSubject("");
-      if (assignedSubjects.length === 1) {
-        setSubjectCode(assignedSubjects[0]);
-      } else {
-        setSubjectCode("");
-      }
+      setSubjectCode(assignedSubjects.length === 1 ? assignedSubjects[0] : "");
+      window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setFormError(err.message);
-      } else {
-        setFormError("Failed to schedule session.");
-      }
+      setFormError(err instanceof Error ? err.message : "Failed to schedule the session.");
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  const formatDate = (isoStr?: string | null) => {
-    if (!isoStr) return "—";
+  const handleInitialize = async () => {
+    setIsInitializing(true);
+    setInitializationError(null);
     try {
-      const d = new Date(isoStr);
-      return new Intl.DateTimeFormat("en-GB", {
-        day: "2-digit",
-        month: "short",
-        year: "numeric",
-      }).format(d);
-    } catch {
-      return isoStr;
+      await initializeSessions(today);
+      await loadInitialization();
+      await loadSessions();
+      window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
+    } catch (err: unknown) {
+      setInitializationError(
+        err instanceof Error ? err.message : "The sessions could not be initialised."
+      );
+    } finally {
+      setIsInitializing(false);
+    }
+  };
+
+  const statusTone = (status?: string) => {
+    switch (status) {
+      case "INITIALIZED":
+        return "bg-emerald-50 text-emerald-800 border-emerald-200";
+      case "PENDING":
+        return "bg-amber-50 text-amber-800 border-amber-200";
+      case "FAILED":
+        return "bg-rose-50 text-rose-800 border-rose-200";
+      default:
+        return "bg-[#EDE8D8]/50 text-[#77735F] border-[#E4DDCA]";
     }
   };
 
@@ -181,72 +233,113 @@ export function SessionsView() {
               Academic Sessions
             </h1>
             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
-              {isLoading ? "..." : `${sessions.length} Recorded`}
+              {isLoading ? "..." : `${sessions.length} recorded`}
             </span>
             {isViewer && (
               <span className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold flex items-center space-x-1.5 shadow-2xs">
-                <svg className="w-3.5 h-3.5 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
-                </svg>
-                <span>Read-Only Viewer</span>
-              </span>
-            )}
-            {!isAdmin && isFaculty && session.subjectCodes && session.subjectCodes.length > 0 && (
-              <span className="px-2.5 py-0.5 rounded-lg bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA] text-xs font-semibold">
-                Scope: {session.subjectCodes.join(", ")}
+                Read-Only Viewer
               </span>
             )}
           </div>
           <p className="text-xs sm:text-sm text-[#77735F] mt-1">
-            Schedule records, multi-room batch allocations, and roster snapshots.
+            Session records, class slots and the daily automatic initialisation state.
           </p>
         </div>
 
         {canScheduleSessions && !isViewer ? (
           <button
+            type="button"
             onClick={() => setIsCreateOpen(true)}
             disabled={!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0}
             className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto disabled:opacity-50 disabled:cursor-not-allowed"
-            title={!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0 ? "No subjects assigned. Session creation disabled." : "Schedule Session"}
           >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M12 4v16m8-8H4" />
-            </svg>
-            <span>Schedule Session</span>
+            Schedule Session
           </button>
         ) : (
           <span className="px-3.5 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] text-xs font-semibold border border-[#E4DDCA] flex items-center space-x-1.5 self-start sm:self-auto">
-            <svg className="w-3.5 h-3.5 text-[#77735F]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
-            </svg>
-            <span>Read-Only Session Registry</span>
+            Read-Only Session Registry
           </span>
         )}
       </div>
 
-      {/* No Assigned Subjects Warning Banner for Faculty */}
+      {/* Initialisation panel */}
+      <section className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <div>
+            <h2 className="text-base font-bold text-[#24251C]">Today's academic sessions</h2>
+            <p className="text-xs text-[#77735F] mt-0.5">
+              {initialization?.message ||
+                "Reading the initialisation state from the RollCall AI backend…"}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span
+              className={`px-2.5 py-1 rounded-lg text-[10px] font-black uppercase tracking-wider border ${
+                statusTone(initialization?.status)
+              }`}
+            >
+              {initialization?.status?.replace("_", " ") ?? "Loading"}
+            </span>
+            <button
+              type="button"
+              onClick={() => void handleInitialize()}
+              disabled={isInitializing}
+              className="px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors disabled:opacity-50 cursor-pointer"
+              title="Ask the backend to prepare today's sessions from the timetable (idempotent)"
+            >
+              {isInitializing ? "Initialising…" : "Initialise today"}
+            </button>
+          </div>
+        </div>
+
+        {initialization && (
+          <div className="grid grid-cols-3 gap-3 text-center">
+            <div className="p-2.5 rounded-xl bg-white border border-[#E4DDCA]">
+              <p className="text-[10px] font-black uppercase tracking-wider text-[#77735F]">
+                Scheduled
+              </p>
+              <p className="text-lg font-black text-[#24251C]">{initialization.scheduled_slots}</p>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white border border-[#E4DDCA]">
+              <p className="text-[10px] font-black uppercase tracking-wider text-[#77735F]">
+                Initialised
+              </p>
+              <p className="text-lg font-black text-emerald-700">
+                {initialization.initialized_sessions}
+              </p>
+            </div>
+            <div className="p-2.5 rounded-xl bg-white border border-[#E4DDCA]">
+              <p className="text-[10px] font-black uppercase tracking-wider text-[#77735F]">
+                Pending
+              </p>
+              <p className="text-lg font-black text-amber-700">{initialization.pending_sessions}</p>
+            </div>
+          </div>
+        )}
+
+        {initializationError && (
+          <p className="text-xs font-semibold text-rose-700">{initializationError}</p>
+        )}
+
+        <p className="text-[11px] text-[#77735F]">
+          Session preparation runs on the server (idempotent, working days only, inside the
+          09:00 - 17:00 academic day). The button above is a manual recovery action - it never
+          creates duplicates.
+        </p>
+      </section>
+
       {!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0 && (
-        <div className="bg-[#FFF8E1] border border-[#FFE082] rounded-xl p-3.5 text-xs text-[#6C5119] flex items-center space-x-2.5">
-          <svg className="w-5 h-5 text-[#F57F17] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-          </svg>
-          <span>
-            You have no assigned subjects. Session creation is disabled until an administrator assigns a subject code to your faculty account.
-          </span>
+        <div className="bg-[#FFF8E1] border border-[#FFE082] rounded-xl p-3.5 text-xs text-[#6C5119]">
+          You have no assigned subjects. Session creation is disabled until an administrator
+          assigns a subject code to your faculty account.
         </div>
       )}
 
-      {/* Error Banner */}
       {error && (
         <div className="bg-[#FFF8E1] border border-[#FFE082] rounded-xl p-4 flex items-center justify-between text-xs text-[#6C5119]">
-          <div className="flex items-center space-x-2.5">
-            <svg className="w-5 h-5 text-[#F57F17] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-            </svg>
-            <span>{error}</span>
-          </div>
+          <span>{error}</span>
           <button
+            type="button"
             onClick={() => void loadSessions()}
             className="font-bold underline hover:text-[#24251C] transition-colors ml-4 cursor-pointer"
           >
@@ -255,22 +348,18 @@ export function SessionsView() {
         </div>
       )}
 
-      {/* Search and Filters Bar */}
+      {/* Filters */}
       <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3">
-        <div className="relative w-full sm:w-80">
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by session ID, course or code..."
-            className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
-          />
-        </div>
+        <input
+          type="text"
+          value={searchQuery}
+          onChange={(e) => setSearchQuery(e.target.value)}
+          placeholder="Search by session ID, course or code..."
+          className="w-full sm:w-80 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+        />
 
         <div className="flex items-center space-x-2.5 w-full sm:w-auto">
-          <label className="text-xs font-semibold text-[#77735F] whitespace-nowrap">
-            Subject:
-          </label>
+          <label className="text-xs font-semibold text-[#77735F] whitespace-nowrap">Subject:</label>
           <select
             value={selectedSubject}
             onChange={(e) => setSelectedSubject(e.target.value)}
@@ -286,77 +375,108 @@ export function SessionsView() {
         </div>
       </div>
 
-      {/* Sessions Grid Cards */}
+      {/* Sessions */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6">
         {isLoading && (
           <div className="col-span-full py-16 text-center text-[#77735F]">
             <div className="w-6 h-6 border-2 border-[#6C5119] border-t-transparent rounded-full animate-spin mx-auto mb-2" />
-            <span>Loading session records...</span>
+            <span>Loading session records…</span>
           </div>
         )}
 
         {!isLoading && filteredSessions.length === 0 && (
-          <div className="col-span-full py-16 text-center">
-            <p className="font-bold text-[#24251C]">No Academic Sessions Found</p>
-            <p className="text-xs text-[#77735F] mt-1">Schedule a session or change your filter parameters.</p>
+          <div className="col-span-full py-16 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl">
+            <p className="font-bold text-[#24251C]">No academic sessions found</p>
+            <p className="text-xs text-[#77735F] mt-1">
+              Schedule a session or change your filter parameters.
+            </p>
           </div>
         )}
 
         {!isLoading &&
-          filteredSessions.map((sess, idx) => {
+          filteredSessions.map((sess) => {
             const code = sess.subject_code || sess.session_id;
-            const dateFormatted = formatDate(sess.date);
+            const slot = allocationsBySession.get(sess.session_id) ?? [];
+            const first = slot[0];
+            const isToday = sess.date === today;
 
             return (
               <div
                 key={sess.session_id}
-                className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs hover:border-[#6C5119]/40 hover:shadow-xs transition-all flex flex-col justify-between space-y-4"
+                className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs hover:border-[#6C5119]/40 transition-all flex flex-col justify-between space-y-4"
               >
                 <div className="space-y-3">
-                  <div className="flex items-start justify-between">
+                  <div className="flex items-start justify-between gap-2">
                     <span className="px-2.5 py-1 rounded-md text-xs font-black bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
                       {code}
                     </span>
                     <span className="text-xs font-semibold text-[#77735F]">
-                      {dateFormatted}
+                      {formatIsoDate(sess.date)}
                     </span>
                   </div>
 
                   <div>
                     <h3
-                      onClick={() => navigate(`/attendance?session=${encodeURIComponent(sess.session_id)}`)}
+                      onClick={() =>
+                        navigate(`/attendance?session=${encodeURIComponent(sess.session_id)}`)
+                      }
                       className="font-extrabold text-base text-[#24251C] line-clamp-1 cursor-pointer hover:text-[#6C5119] transition-colors"
-                      title="Click to open attendance ledger"
+                      title="Open the attendance ledger"
                     >
                       {sess.subject}
                     </h3>
                     <div className="flex items-center space-x-2 text-xs text-[#77735F] mt-0.5 flex-wrap">
-                      <span>ID: <span className="font-mono text-[#24251C]">{sess.session_id}</span></span>
-                      <span>•</span>
-                      <span>Faculty: <span className="font-semibold text-[#24251C]">{sess.teacher_id || "Institutional Faculty"}</span></span>
+                      <span>
+                        ID: <span className="font-mono text-[#24251C]">{sess.session_id}</span>
+                      </span>
+                      {sess.teacher_id && (
+                        <>
+                          <span>•</span>
+                          <span>
+                            Faculty:{" "}
+                            <span className="font-semibold text-[#24251C]">{sess.teacher_id}</span>
+                          </span>
+                        </>
+                      )}
                     </div>
                   </div>
 
-                  {/* Multi-room and Multi-slot allocation preview */}
+                  {/* Real class slot information */}
                   <div className="pt-1 flex flex-wrap gap-1.5 text-[11px]">
-                    <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/70 text-[#24251C] font-medium border border-[#E4DDCA]">
-                      Room: A-20{1 + (idx % 3)}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/70 text-[#24251C] font-medium border border-[#E4DDCA]">
-                      Batch: B{1 + (idx % 2)}
-                    </span>
-                    <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/70 text-[#77735F] font-medium border border-[#E4DDCA]">
-                      Time: 09:00 - 10:00 AM
-                    </span>
+                    {first ? (
+                      <>
+                        <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/70 text-[#24251C] font-medium border border-[#E4DDCA]">
+                          Room: {first.room_id}
+                        </span>
+                        {first.batch_id && (
+                          <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/70 text-[#24251C] font-medium border border-[#E4DDCA]">
+                            Batch: {first.batch_id}
+                          </span>
+                        )}
+                        <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/70 text-[#77735F] font-medium border border-[#E4DDCA]">
+                          Time: {first.start_time} - {first.end_time}
+                        </span>
+                      </>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/40 text-[#77735F] font-medium border border-dashed border-[#E4DDCA]">
+                        No class slot allocated
+                      </span>
+                    )}
+                    {isToday && (
+                      <span className="px-2 py-0.5 rounded-md bg-[#3F451F] text-[#EDE8D8] font-bold">
+                        Today
+                      </span>
+                    )}
                   </div>
                 </div>
 
                 <div className="pt-3 border-t border-[#E4DDCA]/60 flex items-center justify-between">
                   <button
+                    type="button"
                     onClick={() => setViewSession(sess)}
-                    className="text-xs font-bold text-[#77735F] hover:text-[#24251C] transition-colors"
+                    className="text-xs font-bold text-[#77735F] hover:text-[#24251C] transition-colors cursor-pointer"
                   >
-                    Allocation Details
+                    Session details
                   </button>
 
                   <Link
@@ -372,15 +492,17 @@ export function SessionsView() {
           })}
       </div>
 
-      {/* Session Details Modal */}
+      {/* Detail modal */}
       {viewSession && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
-          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-6 max-w-md w-full shadow-xl space-y-4 animate-fadeIn">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-[2px]">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-6 max-w-md w-full shadow-xl space-y-4">
             <div className="flex items-center justify-between pb-2 border-b border-[#E4DDCA]">
-              <h3 className="text-base font-bold text-[#24251C]">Session Allocation Breakdown</h3>
+              <h3 className="text-base font-bold text-[#24251C]">Session details</h3>
               <button
+                type="button"
                 onClick={() => setViewSession(null)}
-                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold"
+                aria-label="Close"
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
               >
                 ✕
               </button>
@@ -396,25 +518,50 @@ export function SessionsView() {
                 <span className="font-semibold text-[#24251C]">{viewSession.subject}</span>
               </div>
               <div className="flex justify-between py-1.5 border-b border-[#E4DDCA]/50">
-                <span className="text-[#77735F]">Subject Code</span>
+                <span className="text-[#77735F]">Subject code</span>
                 <span className="font-bold text-[#24251C]">{viewSession.subject_code || "—"}</span>
               </div>
               <div className="flex justify-between py-1.5 border-b border-[#E4DDCA]/50">
-                <span className="text-[#77735F]">Scheduled Date</span>
-                <span className="text-[#24251C]">{formatDate(viewSession.date)}</span>
+                <span className="text-[#77735F]">Scheduled date</span>
+                <span className="text-[#24251C]">{formatIsoDate(viewSession.date)}</span>
               </div>
               <div className="flex justify-between py-1.5 border-b border-[#E4DDCA]/50">
-                <span className="text-[#77735F]">Multi-Room Allocations</span>
-                <span className="text-[#24251C]">Main Hall (LH-201) + Lab (CS-L2)</span>
+                <span className="text-[#77735F]">Assigned faculty</span>
+                <span className="text-[#24251C]">{viewSession.teacher_id || "Unassigned"}</span>
               </div>
               <div className="flex justify-between py-1.5">
-                <span className="text-[#77735F]">Assigned Instructor</span>
-                <span className="text-[#24251C]">{viewSession.teacher_id || "Unassigned"}</span>
+                <span className="text-[#77735F]">Class slots</span>
+                <span className="text-[#24251C]">
+                  {(allocationsBySession.get(viewSession.session_id) ?? []).length}
+                </span>
               </div>
             </div>
 
+            {(allocationsBySession.get(viewSession.session_id) ?? []).length > 0 && (
+              <ul className="space-y-2">
+                {(allocationsBySession.get(viewSession.session_id) ?? []).map((slot) => (
+                  <li
+                    key={slot.allocation_id}
+                    className="p-3 rounded-xl bg-white border border-[#E4DDCA] text-xs space-y-1"
+                  >
+                    <p className="font-bold text-[#24251C]">
+                      {slot.start_time} - {slot.end_time}
+                    </p>
+                    <p className="text-[#77735F]">
+                      Room {slot.room_id}
+                      {slot.batch_id ? ` · Batch ${slot.batch_id}` : ""}
+                    </p>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-[#77735F]">
+                      {slot.lifecycle_status || "SCHEDULED"}
+                    </p>
+                  </li>
+                ))}
+              </ul>
+            )}
+
             <div className="pt-2 flex justify-end">
               <button
+                type="button"
                 onClick={() => setViewSession(null)}
                 className="px-4 py-2 rounded-xl bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] font-bold text-xs transition-colors cursor-pointer"
               >
@@ -425,15 +572,17 @@ export function SessionsView() {
         </div>
       )}
 
-      {/* Schedule Session Modal */}
+      {/* Schedule modal */}
       {isCreateOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
-          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-6 max-w-md w-full shadow-xl space-y-4 animate-fadeIn">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-[2px] overflow-y-auto">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-6 max-w-md w-full shadow-xl space-y-4 my-8">
             <div className="flex items-center justify-between pb-2 border-b border-[#E4DDCA]">
               <h3 className="text-base font-bold text-[#24251C]">Schedule New Session</h3>
               <button
+                type="button"
                 onClick={() => setIsCreateOpen(false)}
-                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold"
+                aria-label="Close"
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
               >
                 ✕
               </button>
@@ -474,7 +623,6 @@ export function SessionsView() {
                 />
               </div>
 
-              {/* Subject Code Selector / Input */}
               {!isAdmin && isFaculty ? (
                 <div>
                   <label className="block font-semibold text-[#24251C] mb-1">
@@ -482,12 +630,15 @@ export function SessionsView() {
                   </label>
                   {assignedSubjects.length === 0 ? (
                     <div className="p-3 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs">
-                      No subjects are assigned to your faculty account. You cannot create a session.
+                      No subjects are assigned to your faculty account. You cannot create a
+                      session.
                     </div>
                   ) : assignedSubjects.length === 1 ? (
                     <div className="px-3.5 py-2.5 rounded-xl bg-[#EDE8D8]/70 border border-[#E4DDCA] text-xs font-mono font-bold text-[#6C5119] flex items-center justify-between">
                       <span>{assignedSubjects[0]}</span>
-                      <span className="text-[11px] font-sans font-normal text-[#77735F]">Auto-selected</span>
+                      <span className="text-[11px] font-sans font-normal text-[#77735F]">
+                        Auto-selected
+                      </span>
                     </div>
                   ) : (
                     <select
@@ -507,9 +658,7 @@ export function SessionsView() {
                 </div>
               ) : (
                 <div>
-                  <label className="block font-semibold text-[#24251C] mb-1">
-                    Subject Code
-                  </label>
+                  <label className="block font-semibold text-[#24251C] mb-1">Subject Code</label>
                   <input
                     type="text"
                     value={subjectCode}
@@ -531,6 +680,10 @@ export function SessionsView() {
                   required
                   className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
                 />
+                <p className="mt-1 text-[11px] text-[#77735F]">
+                  Class times come from the timetable (09:00 - 17:00). A manually created
+                  session has no time slot until the timetable allocates one.
+                </p>
               </div>
 
               <div className="pt-2 flex justify-end space-x-2">
@@ -546,7 +699,7 @@ export function SessionsView() {
                   disabled={isSubmitting}
                   className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
-                  {isSubmitting ? "Creating..." : "Save Session"}
+                  {isSubmitting ? "Creating…" : "Save Session"}
                 </button>
               </div>
             </form>

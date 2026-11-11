@@ -24,3 +24,33 @@ export async function downloadPdfReport(params: {
     responseType: "blob",
   });
 }
+
+// ---------------------------------------------------------------------------
+// Student roster PDF (branch + semester filters are applied by the backend)
+// ---------------------------------------------------------------------------
+
+export interface StudentRosterFilters {
+  branches: string[];
+  departments: Array<{ dept_id: string; name: string }>;
+  semesters: number[];
+  configured_semesters: number[];
+}
+
+export async function fetchStudentRosterFilters(): Promise<StudentRosterFilters> {
+  return apiClient.get<StudentRosterFilters>("/api/v1/reports/students/filters");
+}
+
+export interface StudentRosterExportResponse extends Blob {
+  studentCount?: number;
+  appliedFilters?: string;
+}
+
+export async function downloadStudentRosterPdf(params: {
+  branch?: string;
+  semester?: number;
+  title?: string;
+}): Promise<Blob> {
+  return apiClient.post<Blob>("/api/v1/reports/students/pdf", params, {
+    responseType: "blob",
+  });
+}

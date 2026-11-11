@@ -43,6 +43,10 @@ class LoginRequest(BaseModel):
     """User login credential payload."""
     user_id: str = Field(..., description="Unique user identifier", min_length=1)
     password: str = Field("", description="User plaintext password")
+    mfa_code: Optional[str] = Field(
+        None,
+        description="TOTP code or single-use recovery code, required when MFA is enabled on the account",
+    )
     admin_key: Optional[str] = Field(None, description="Administrative authorization key required for ADMIN accounts")
     remember_me: bool = Field(default=False, description="Whether to establish a persistent 7-day session")
 

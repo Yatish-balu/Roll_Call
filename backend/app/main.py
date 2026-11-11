@@ -40,6 +40,7 @@ from app.routers import (
     rooms_router,
     sessions_router,
     students_router,
+    timetable_router,
 )
 
 
@@ -70,22 +71,88 @@ async def lifespan(app: FastAPI):
     from app.db.connection import verify_database_connectivity
     verify_database_connectivity()
 
+    # Password reset only works if a reset link can be delivered. Report the
+    # missing provider at startup instead of discovering it on the first reset.
+    if env == "production":
+        from app.security.email import get_email_provider
+
+        if not get_email_provider().configured:
+            logger.error(
+                "DEPLOYMENT BLOCKER: no email provider is configured; password "
+                "reset links cannot be delivered. Set SMTP_HOST (or the "
+                "configured provider) before relying on self-service resets."
+            )
+
+    # ------------------------------------------------------------------
+    # Backend-driven academic day initialisation.
+    #
+    # The server prepares today's sessions from the configured timetable. The
+    # browser never creates session records. The job is idempotent, so it is
+    # safe to run repeatedly and under concurrency.
+    # ------------------------------------------------------------------
+    import asyncio
+
+    from app.services.session_initialization import run_daily_initialization
+
+    auto_init_enabled = os.getenv("SESSION_AUTO_INIT", "1").strip().lower() not in (
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+    async def _session_initialisation_worker() -> None:
+        try:
+            await asyncio.to_thread(run_daily_initialization)
+        except Exception:  # pragma: no cover - defensive guard
+            logger.exception("Session initialisation worker failed")
+
+    async def _session_initialisation_loop() -> None:
+        while True:
+            try:
+                await _session_initialisation_worker()
+            except asyncio.CancelledError:  # pragma: no cover - shutdown path
+                raise
+            except Exception:  # pragma: no cover - defensive guard
+                logger.exception("Session initialisation loop error")
+            await asyncio.sleep(1800)  # re-check every 30 minutes
+
+    if auto_init_enabled:
+        initialisation_task = asyncio.create_task(_session_initialisation_loop())
+        app.state.session_initialisation_task = initialisation_task
+        logger.info("Automatic session initialisation is enabled (SESSION_AUTO_INIT).")
+    else:
+        initialisation_task = None
+        logger.info(
+            "Automatic session initialisation is disabled (SESSION_AUTO_INIT=0); "
+            "sessions can still be prepared through POST /api/v1/sessions/initialize."
+        )
+
     yield
     logger.info("RollCall AI FastAPI application shutting down...")
-
+    if initialisation_task is not None:
+        initialisation_task.cancel()
+        try:
+            await initialisation_task
+        except (asyncio.CancelledError, Exception):  # pragma: no cover - shutdown path
+            pass
 
 
 # ==============================================================================
 # 1. FastAPI Application Setup & Metadata
 # ==============================================================================
 
+# Interactive docs and the OpenAPI schema describe the entire attack surface.
+# They stay available in development but are not exposed in production.
+_IS_PRODUCTION = os.getenv("APP_ENV", "development").strip().lower() == "production"
+
 app = FastAPI(
     title="RollCall AI",
     description="Automated roll call processing, analytics, and intelligent reporting API",
     version="0.2.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
+    docs_url=None if _IS_PRODUCTION else "/docs",
+    redoc_url=None if _IS_PRODUCTION else "/redoc",
+    openapi_url=None if _IS_PRODUCTION else "/openapi.json",
     lifespan=lifespan,
 )
 
@@ -122,14 +189,33 @@ def get_allowed_origins() -> List[str]:
     return origins
 
 
+# Only the verbs and headers the frontend actually uses. A wildcard here would
+# let any allowed origin send arbitrary methods/headers with the user's cookies.
+ALLOWED_CORS_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"]
+ALLOWED_CORS_HEADERS = [
+    "Authorization",
+    "Content-Type",
+    "Accept",
+    "Origin",
+    "X-Requested-With",
+    "X-RollCall-CSRF",
+    "X-Request-ID",
+]
+
 allowed_origins = get_allowed_origins()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=ALLOWED_CORS_METHODS,
+    allow_headers=ALLOWED_CORS_HEADERS,
 )
+
+# Added after CORS so the headers are the outermost layer: error and preflight
+# responses produced by CORS still carry the browser hardening headers.
+from app.security.headers import SecurityHeadersMiddleware  # noqa: E402
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 
 # ==============================================================================
@@ -295,9 +381,9 @@ def read_root():
 
 @app.get("/health", tags=["General"])
 def health_check():
+    # No environment/debug detail: the endpoint is unauthenticated.
     return {
         "status": "healthy",
-        "environment": os.getenv("APP_ENV", "development"),
         "version": app.version,
     }
 
@@ -314,6 +400,7 @@ app.include_router(admin_router, prefix="/api/v1")
 app.include_router(students_router, prefix="/api/v1")
 app.include_router(rooms_router, prefix="/api/v1")
 app.include_router(sessions_router, prefix="/api/v1")
+app.include_router(timetable_router, prefix="/api/v1")
 app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
@@ -327,6 +414,7 @@ app.include_router(admin_router, prefix="/api")
 app.include_router(students_router, prefix="/api")
 app.include_router(rooms_router, prefix="/api")
 app.include_router(sessions_router, prefix="/api")
+app.include_router(timetable_router, prefix="/api")
 app.include_router(attendance_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")

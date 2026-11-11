@@ -78,7 +78,7 @@ def _read_rows(db_path: str, chain_id: str) -> List[Dict[str, Any]]:
         else:
             select_columns = ", ".join(AUDIT_COLUMNS)
         rows = conn.execute(
-            f"SELECT {select_columns} FROM audit_log "
+            f"SELECT {select_columns} FROM audit_log "  # nosec B608 - select_columns is a constant string
             "WHERE chain_id IS NULL OR chain_id = ? ORDER BY log_id ASC",
             (chain_id,),
         ).fetchall()

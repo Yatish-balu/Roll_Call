@@ -55,3 +55,28 @@ class ExportReportRequest(BaseModel):
     title: Optional[str] = Field("RollCall AI Attendance Report", description="Title for PDF report")
     include_branch_summary: bool = Field(True, description="Whether to include branch summary")
 
+
+class DefaulterStudent(BaseModel):
+    """A student whose confirmed attendance is below the institutional threshold."""
+
+    usn: str = Field(..., description="Unique student number")
+    student_name: str = Field(..., description="Student full name")
+    branch: str = Field(..., description="Branch code")
+    attended_classes: int = Field(0, ge=0, description="Confirmed PRESENT classes")
+    conducted_classes: int = Field(0, ge=0, description="Confirmed classes (PRESENT + ABSENT)")
+    attendance_percentage: float = Field(0.0, ge=0.0, le=100.0, description="Confirmed attendance percentage")
+    classes_needed_to_recover: int = Field(0, ge=0, description="Extra classes required to reach the required percentage")
+    subject_code: Optional[str] = Field(None, description="Subject code the record was evaluated for")
+    semester: Optional[int] = Field(None, description="Semester number of the student")
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class DefaultersResponse(BaseModel):
+    """Defaulter registry computed from the verified attendance records."""
+
+    threshold_percent: float = Field(..., description="Percentage strictly below which a student is a defaulter")
+    required_percent: float = Field(..., description="Percentage required to leave the defaulter list")
+    total_defaulters: int = Field(0, ge=0, description="Number of students below the threshold")
+    items: List[DefaulterStudent] = Field(default_factory=list, description="Defaulter records")
+    evaluated_students: int = Field(0, ge=0, description="Number of students with confirmed attendance records")

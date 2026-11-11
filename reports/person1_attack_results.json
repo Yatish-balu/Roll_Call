@@ -1,0 +1,462 @@
+{
+  "total": 57,
+  "failed": [],
+  "results": [
+    {
+      "probe": "JWT alg=none rejected",
+      "category": "auth",
+      "severity": "critical",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "Forged signature rejected",
+      "category": "auth",
+      "severity": "critical",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "Expired token rejected",
+      "category": "auth",
+      "severity": "critical",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "Token without exp rejected",
+      "category": "auth",
+      "severity": "high",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "Disallowed algorithm rejected",
+      "category": "auth",
+      "severity": "high",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "Token role claim cannot escalate",
+      "category": "authz",
+      "severity": "critical",
+      "expected": "403",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "user_metadata role ignored",
+      "category": "authz",
+      "severity": "critical",
+      "expected": "403",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "Token for deleted/unknown user rejected",
+      "category": "auth",
+      "severity": "high",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "Username enumeration timing delta",
+      "category": "auth",
+      "severity": "medium",
+      "expected": "|delta| < 50 ms",
+      "actual": "3.3 ms",
+      "held": true
+    },
+    {
+      "probe": "Correct password is not locked out (DoS)",
+      "category": "auth",
+      "severity": "high",
+      "expected": "200",
+      "actual": "200",
+      "held": true
+    },
+    {
+      "probe": "Wrong-password guessing is throttled",
+      "category": "rate-limit",
+      "severity": "medium",
+      "expected": "429 observed",
+      "actual": "[401, 429]",
+      "held": true
+    },
+    {
+      "probe": "ADMIN login without admin_key fails closed",
+      "category": "auth",
+      "severity": "critical",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "ADMIN login with wrong admin_key rejected",
+      "category": "auth",
+      "severity": "critical",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "ADMIN login with correct admin_key succeeds",
+      "category": "auth",
+      "severity": "info",
+      "expected": "200",
+      "actual": "200",
+      "held": true
+    },
+    {
+      "probe": "MFA account: password alone rejected",
+      "category": "mfa",
+      "severity": "critical",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "MFA account: wrong TOTP rejected",
+      "category": "mfa",
+      "severity": "critical",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "MFA account: valid TOTP accepted",
+      "category": "mfa",
+      "severity": "info",
+      "expected": "200",
+      "actual": "200",
+      "held": true
+    },
+    {
+      "probe": "MFA re-enrollment needs a current code (password only)",
+      "category": "mfa",
+      "severity": "high",
+      "expected": "400",
+      "actual": "400",
+      "held": true
+    },
+    {
+      "probe": "Cross-user session revocation (IDOR)",
+      "category": "authz",
+      "severity": "critical",
+      "expected": "404 and session intact",
+      "actual": "404, intact=True",
+      "held": true
+    },
+    {
+      "probe": "Revoke-all sessions endpoint",
+      "category": "auth",
+      "severity": "medium",
+      "expected": "200",
+      "actual": "200",
+      "held": true
+    },
+    {
+      "probe": "Refresh token replay revokes the family",
+      "category": "auth",
+      "severity": "critical",
+      "expected": "first=200 second=401, got 200/401",
+      "actual": "200/401",
+      "held": true
+    },
+    {
+      "probe": "Refresh without CSRF header blocked",
+      "category": "csrf",
+      "severity": "high",
+      "expected": "403",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "Refresh from foreign Origin blocked",
+      "category": "csrf",
+      "severity": "high",
+      "expected": "403",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "Logout without a session rejected",
+      "category": "auth",
+      "severity": "low",
+      "expected": "401",
+      "actual": "401",
+      "held": true
+    },
+    {
+      "probe": "Password change guessing is rate limited",
+      "category": "rate-limit",
+      "severity": "high",
+      "expected": "429 observed",
+      "actual": "[401, 429]",
+      "held": true
+    },
+    {
+      "probe": "Reset initiation is self-service and non-enumerating",
+      "category": "auth",
+      "severity": "medium",
+      "expected": "same 200 body",
+      "actual": "200/200 equal=True",
+      "held": true
+    },
+    {
+      "probe": "Reset token is single use",
+      "category": "auth",
+      "severity": "critical",
+      "expected": "first=200 replay=400, got 200/400",
+      "actual": "200/400",
+      "held": true
+    },
+    {
+      "probe": "VIEWER cannot create master data",
+      "category": "authz",
+      "severity": "high",
+      "expected": "403",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "FACULTY cannot create master data",
+      "category": "authz",
+      "severity": "high",
+      "expected": "403",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "Cross-faculty session read blocked",
+      "category": "scope",
+      "severity": "critical",
+      "expected": "403/404",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "FACULTY cannot read audit trail",
+      "category": "authz",
+      "severity": "high",
+      "expected": "403",
+      "actual": "403",
+      "held": true
+    },
+    {
+      "probe": "Mass assignment fields ignored",
+      "category": "authz",
+      "severity": "medium",
+      "expected": "201 and no privilege change",
+      "actual": "201",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: quoted table",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Quoted table identifiers are not permitted: '\"attendance\"'. ",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: bracket-quoted table",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Quoted table identifiers are not permitted: '[attendance]'. ",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: backtick table",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Quoted table identifiers are not permitted: '`attendance`'. ",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: schema-qualified table",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Schema-qualified table names are not permitted: 'main.attend",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: subquery to users",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Access to table 'users' is not permitted.",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: sqlite_master",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Access to table 'sqlite_master' is not permitted.",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: PRAGMA",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Disallowed keyword: 'PRAGMA'. Only SELECT or WITH queries ar",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: stacked statement",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "Multiple SQL statements are not permitted.",
+      "held": true
+    },
+    {
+      "probe": "Raw SQL rejected: comment-separated table",
+      "category": "sql",
+      "severity": "critical",
+      "expected": "ValueError",
+      "actual": "SQL comments are not permitted.",
+      "held": true
+    },
+    {
+      "probe": "Scoped attendance query cannot see other faculty data",
+      "category": "scope",
+      "severity": "critical",
+      "expected": "only SESS-A",
+      "actual": "['SESS-A']",
+      "held": true
+    },
+    {
+      "probe": "Prompt-injection chat request rejected",
+      "category": "ai",
+      "severity": "high",
+      "expected": "400",
+      "actual": "400",
+      "held": true
+    },
+    {
+      "probe": "Upload rejected: NUL byte after 64 KB",
+      "category": "upload",
+      "severity": "high",
+      "expected": "400",
+      "actual": "400",
+      "held": true
+    },
+    {
+      "probe": "Upload rejected: Executable signature after 64 KB",
+      "category": "upload",
+      "severity": "high",
+      "expected": "400",
+      "actual": "400",
+      "held": true
+    },
+    {
+      "probe": "Upload rejected: Oversized upload",
+      "category": "upload",
+      "severity": "high",
+      "expected": "413",
+      "actual": "413",
+      "held": true
+    },
+    {
+      "probe": "Upload rejected: Spoofed content type",
+      "category": "upload",
+      "severity": "high",
+      "expected": "400",
+      "actual": "400",
+      "held": true
+    },
+    {
+      "probe": "Upload rejected: Malformed image",
+      "category": "upload",
+      "severity": "high",
+      "expected": "400",
+      "actual": "400",
+      "held": true
+    },
+    {
+      "probe": "Path traversal filename sanitized",
+      "category": "upload",
+      "severity": "high",
+      "expected": "no traversal path",
+      "actual": "200",
+      "held": true
+    },
+    {
+      "probe": "Upload rate limit enforced",
+      "category": "rate-limit",
+      "severity": "medium",
+      "expected": "429 observed",
+      "actual": "[200, 429]",
+      "held": true
+    },
+    {
+      "probe": "CORS rejects foreign origin",
+      "category": "web",
+      "severity": "critical",
+      "expected": "no ACAO",
+      "actual": "None",
+      "held": true
+    },
+    {
+      "probe": "CORS simple request from foreign origin",
+      "category": "web",
+      "severity": "high",
+      "expected": "no ACAO",
+      "actual": "None",
+      "held": true
+    },
+    {
+      "probe": "Security headers present",
+      "category": "web",
+      "severity": "high",
+      "expected": "all present",
+      "actual": "missing=[]",
+      "held": true
+    },
+    {
+      "probe": "Health endpoint hides environment",
+      "category": "web",
+      "severity": "low",
+      "expected": "no environment key",
+      "actual": "['status', 'version']",
+      "held": true
+    },
+    {
+      "probe": "API docs not public in production",
+      "category": "web",
+      "severity": "medium",
+      "expected": "None None",
+      "actual": "None None",
+      "held": true
+    },
+    {
+      "probe": "CORS does not allow arbitrary methods/headers",
+      "category": "web",
+      "severity": "medium",
+      "expected": "restricted",
+      "actual": "status=400 methods='GET, POST, PUT, PATCH, DELETE, OPTIONS' headers='Accept, Accept-Language, Authorization, Content-Language, Content-Type, Origin, X-Request-ID, X-Requested-With, X-RollCall-CSRF'",
+      "held": true
+    },
+    {
+      "probe": "Reported Person 2 artifacts exist in the repository",
+      "category": "process",
+      "severity": "high",
+      "expected": "all present",
+      "actual": "missing=[]",
+      "held": true
+    }
+  ]
+}

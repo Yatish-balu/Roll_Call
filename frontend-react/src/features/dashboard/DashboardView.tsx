@@ -9,8 +9,11 @@ import { RecentSessionsTable } from "./components/RecentSessionsTable";
 import { TodaysSummary } from "./components/TodaysSummary";
 import { InstitutionalBreakdownTables } from "./components/InstitutionalBreakdownTables";
 import { FacultyUploadActivityTable } from "./components/FacultyUploadActivityTable";
+import { useAuth } from "@/hooks/useAuth";
+import { todayIso } from "@/lib/schedule";
 
 export function DashboardView() {
+  const { isAdmin } = useAuth();
   const [data, setData] = useState<DashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -19,8 +22,7 @@ export function DashboardView() {
     setIsLoading(true);
     setError(null);
     try {
-      const todayIso = new Date().toISOString().split("T")[0];
-      const result = await fetchDashboardData(todayIso);
+      const result = await fetchDashboardData(todayIso(), { includeTeacherMappings: isAdmin });
       setData(result);
     } catch (err: unknown) {
       if (err instanceof Error) {
@@ -31,13 +33,11 @@ export function DashboardView() {
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     let isMounted = true;
-    const todayIso = new Date().toISOString().split("T")[0];
-
-    fetchDashboardData(todayIso)
+    fetchDashboardData(todayIso(), { includeTeacherMappings: isAdmin })
       .then((result) => {
         if (isMounted) {
           setData(result);
@@ -58,7 +58,7 @@ export function DashboardView() {
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [isAdmin]);
 
   return (
     <div className="space-y-6 max-w-7xl mx-auto">

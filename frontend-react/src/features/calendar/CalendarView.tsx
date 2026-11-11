@@ -1,214 +1,349 @@
-"use client";
-
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   loadMonthCalendarData,
-  fetchDailyAttendanceSummary,
-  exportCalendarIcs,
   type CalendarDaySummary,
   type CalendarMonthData,
 } from "@/services/api/calendar";
+import {
+  fetchSessionAllocations,
+  fetchSessions,
+  type SessionAllocation,
+  type SessionItem,
+} from "@/services/api/sessions";
 import { useAuth } from "@/hooks/useAuth";
-import type { VerifiedSummaryReport } from "@/types/dashboard";
+import { usePreference } from "@/lib/preferences";
+import {
+  addDaysIso,
+  formatIsoDate,
+  startOfWeekIso,
+  todayIso,
+  weekdayOfIsoDate,
+} from "@/lib/schedule";
+
+type CalendarViewMode = "month" | "week" | "day";
+
+const WEEKDAY_LABELS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const WEEKDAY_LABELS_MONDAY = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 
 export function CalendarView() {
-  const { isAdmin, session } = useAuth();
+  const { session } = useAuth();
+  const [showHeatmap, setShowHeatmap] = usePreference("calendarShowHeatmap");
+  const [weekStartsMonday, setWeekStartsMonday] = usePreference("calendarWeekStartsMonday");
+  const [defaultView, setDefaultView] = usePreference("calendarDefaultView");
 
-  // Current calendar view date: default to 2026-10 (matching academic sessions in DB)
-  const [currentYear, setCurrentYear] = useState(2026);
-  const [currentMonth, setCurrentMonth] = useState(9); // October = index 9
+  const today = todayIso();
+  const [viewMode, setViewMode] = useState<CalendarViewMode>(defaultView);
+  const [anchorDate, setAnchorDate] = useState<string>(today);
+  const [selectedDate, setSelectedDate] = useState<string>(today);
 
-  const [calendarData, setCalendarData] = useState<CalendarMonthData | null>(null);
+  const [monthData, setMonthData] = useState<CalendarMonthData | null>(null);
+  const [weekSessions, setWeekSessions] = useState<SessionItem[]>([]);
+  const [weekAllocations, setWeekAllocations] = useState<SessionAllocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
-  // Subject Filter
   const [selectedSubject, setSelectedSubject] = useState("ALL");
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
-  // Selected Day & Daily Detail Panel
-  const [selectedDay, setSelectedDay] = useState<CalendarDaySummary | null>(null);
-  const [, setDailySummary] = useState<VerifiedSummaryReport | null>(null);
-  const [isDailyLoading, setIsDailyLoading] = useState(false);
+  const subjectOptions = useMemo(() => {
+    const codes = new Set<string>();
+    (session?.subjectCodes || []).forEach((code) => codes.add(code));
+    return ["ALL", ...Array.from(codes)];
+  }, [session?.subjectCodes]);
 
-  // Export State (Admin only)
-  const [isExporting, setIsExporting] = useState(false);
-  const [exportNotice, setExportNotice] = useState<string | null>(null);
+  const { year, month } = useMemo(() => {
+    const parts = anchorDate.split("-");
+    return { year: Number(parts[0]), month: Number(parts[1]) - 1 };
+  }, [anchorDate]);
 
-  // Authorized subjects for filter dropdown
-  const allowedSubjectOptions = useMemo(() => {
-    if (isAdmin) {
-      return ["ALL", "DIST-SYS", "DB-SYS", "ML", "CN", "NET-SEC", "ES"];
-    }
-    const facultyCodes = session?.subjectCodes || [];
-    return facultyCodes.length > 0 ? ["ALL", ...facultyCodes] : ["ALL", "DIST-SYS", "ML"];
-  }, [isAdmin, session]);
+  /* ------------------------------------------------------------------ */
+  /* Loading                                                             */
+  /* ------------------------------------------------------------------ */
 
   const loadMonth = useCallback(async () => {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await loadMonthCalendarData(currentYear, currentMonth, selectedSubject);
-      setCalendarData(data);
-
-      // Auto-select first day with sessions if nothing selected
-      const firstActive = data.days.find((d) => d.sessionCount > 0);
-      if (firstActive) {
-        setSelectedDay(firstActive);
-      } else {
-        setSelectedDay(data.days[0] || null);
-      }
+      const data = await loadMonthCalendarData(year, month, selectedSubject, today);
+      setMonthData(data);
+      setLastUpdated(new Date());
     } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Failed to load monthly attendance calendar.");
-      }
+      setError(err instanceof Error ? err.message : "The calendar could not be loaded.");
     } finally {
       setIsLoading(false);
     }
-  }, [currentYear, currentMonth, selectedSubject]);
+  }, [year, month, selectedSubject, today]);
+
+  const loadWeek = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const weekStart = startOfWeekIso(anchorDate);
+      const weekEnd = addDaysIso(weekStart, 6);
+      const [sessionsRes, allocationsRes] = await Promise.all([
+        fetchSessions({ limit: 200, from_date: weekStart, to_date: weekEnd }),
+        fetchSessionAllocations({ from_date: weekStart, to_date: weekEnd }),
+      ]);
+      setWeekSessions(sessionsRes.items || []);
+      setWeekAllocations(allocationsRes.items || []);
+      setLastUpdated(new Date());
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "The week could not be loaded.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [anchorDate]);
+
+  const loadDay = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const [sessionsRes, allocationsRes] = await Promise.all([
+        fetchSessions({ limit: 50, date: anchorDate }),
+        fetchSessionAllocations({ date: anchorDate }),
+      ]);
+      setWeekSessions(sessionsRes.items || []);
+      setWeekAllocations(allocationsRes.items || []);
+      setLastUpdated(new Date());
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "The day could not be loaded.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [anchorDate]);
+
+  const reload = useCallback(() => {
+    if (viewMode === "month") {
+      void loadMonth();
+    } else if (viewMode === "week") {
+      void loadWeek();
+    } else {
+      void loadDay();
+    }
+  }, [viewMode, loadMonth, loadWeek, loadDay]);
 
   useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadMonth();
-    });
+    void reload();
+  }, [reload]);
+
+  // Refresh after attendance changes and after session initialisation.
+  useEffect(() => {
+    const handler = () => reload();
+    window.addEventListener("rollcall:attendance-changed", handler);
+    window.addEventListener("rollcall:sessions-changed", handler);
     return () => {
-      isMounted = false;
+      window.removeEventListener("rollcall:attendance-changed", handler);
+      window.removeEventListener("rollcall:sessions-changed", handler);
     };
-  }, [loadMonth]);
+  }, [reload]);
 
-  // When a day is clicked, load daily summary details from server
-  const handleSelectDay = async (day: CalendarDaySummary) => {
-    setSelectedDay(day);
-    if (day.sessionCount === 0) {
-      setDailySummary(null);
-      return;
+  /* ------------------------------------------------------------------ */
+  /* Derived data                                                        */
+  /* ------------------------------------------------------------------ */
+
+  const selectedDay: CalendarDaySummary | null = useMemo(() => {
+    if (!monthData) return null;
+    return monthData.days.find((day) => day.date === selectedDate) ?? null;
+  }, [monthData, selectedDate]);
+
+  const daySummary = useMemo(() => {
+    if (!selectedDay || selectedDay.sessionCount === 0) return null;
+    return {
+      present: selectedDay.presentCount,
+      absent: selectedDay.absentCount,
+      pending: selectedDay.pendingCount,
+      total: selectedDay.totalStudents,
+    };
+  }, [selectedDay]);
+
+  const weekDays = useMemo(() => {
+    const start = startOfWeekIso(anchorDate);
+    return Array.from({ length: 7 }, (_, index) => addDaysIso(start, index));
+  }, [anchorDate]);
+
+  const sessionsByDate = useMemo(() => {
+    const map = new Map<string, SessionItem[]>();
+    for (const item of weekSessions) {
+      const list = map.get(item.date) || [];
+      list.push(item);
+      map.set(item.date, list);
     }
+    return map;
+  }, [weekSessions]);
 
-    setIsDailyLoading(true);
-    try {
-      const summary = await fetchDailyAttendanceSummary(day.date);
-      setDailySummary(summary);
-    } catch {
-      setDailySummary(null);
-    } finally {
-      setIsDailyLoading(false);
+  const allocationsByDate = useMemo(() => {
+    const map = new Map<string, SessionAllocation[]>();
+    for (const item of weekAllocations) {
+      const list = map.get(item.date) || [];
+      list.push(item);
+      map.set(item.date, list);
     }
-  };
+    for (const list of map.values()) {
+      list.sort((a, b) => (a.start_time || "").localeCompare(b.start_time || ""));
+    }
+    return map;
+  }, [weekAllocations]);
 
-  const handlePrevMonth = () => {
-    if (currentMonth === 0) {
-      setCurrentMonth(11);
-      setCurrentYear((y) => y - 1);
+  const filterSubject = (code?: string | null) =>
+    selectedSubject === "ALL" || (code || "").toUpperCase() === selectedSubject.toUpperCase();
+
+  /* ------------------------------------------------------------------ */
+  /* Navigation                                                          */
+  /* ------------------------------------------------------------------ */
+
+  const shift = (direction: number) => {
+    if (viewMode === "month") {
+      const next = new Date(year, month + direction, 1);
+      setAnchorDate(
+        `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}-01`
+      );
+    } else if (viewMode === "week") {
+      setAnchorDate(addDaysIso(anchorDate, direction * 7));
     } else {
-      setCurrentMonth((m) => m - 1);
+      setAnchorDate(addDaysIso(anchorDate, direction));
     }
   };
 
-  const handleNextMonth = () => {
-    if (currentMonth === 11) {
-      setCurrentMonth(0);
-      setCurrentYear((y) => y + 1);
-    } else {
-      setCurrentMonth((m) => m + 1);
-    }
+  const goToday = () => {
+    setAnchorDate(today);
+    setSelectedDate(today);
   };
 
-  const handleExportIcs = async () => {
-    if (!isAdmin) return;
-    setIsExporting(true);
-    setExportNotice(null);
+  const paddedBlanks = useMemo(() => {
+    if (!monthData) return [];
+    const first = new Date(year, month, 1).getDay();
+    const offset = weekStartsMonday ? (first + 6) % 7 : first;
+    return Array.from({ length: offset });
+  }, [monthData, year, month, weekStartsMonday]);
 
-    const monthStr = `${currentYear}-${String(currentMonth + 1).padStart(2, "0")}`;
-    const result = await exportCalendarIcs({
-      month: monthStr,
-      subject: selectedSubject !== "ALL" ? selectedSubject : undefined,
-    });
+  const labels = weekStartsMonday ? WEEKDAY_LABELS_MONDAY : WEEKDAY_LABELS;
 
-    if (result.blob) {
-      const url = window.URL.createObjectURL(result.blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `RollCall_Attendance_${monthStr}.ics`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-      setExportNotice("Academic schedule exported to iCalendar (.ics).");
-    } else if (result.isPending && result.message) {
-      setExportNotice(result.message);
+  const periodLabel =
+    viewMode === "month"
+      ? `${monthData?.monthName ?? ""} ${year}`
+      : viewMode === "week"
+      ? `Week of ${formatIsoDate(weekDays[0])}`
+      : formatIsoDate(anchorDate);
+
+  /* ------------------------------------------------------------------ */
+  /* Render                                                              */
+  /* ------------------------------------------------------------------ */
+
+  const dayPanel = (date: string, sessions: SessionItem[], allocations: SessionAllocation[]) => {
+    if (sessions.length === 0) {
+      return (
+        <p className="text-[11px] text-[#A8A28E] py-3 text-center">
+          No sessions on this date.
+        </p>
+      );
     }
-    setIsExporting(false);
+    return (
+      <ul className="space-y-2">
+        {sessions.map((item) => {
+          const allocation = allocations.find((a) => a.session_id === item.session_id);
+          return (
+            <li
+              key={item.session_id}
+              className="p-2.5 rounded-xl bg-white border border-[#E4DDCA] space-y-1"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-[11px] font-bold text-[#6C5119]">
+                  {item.subject_code || item.subject || item.session_id}
+                </span>
+                <span className="text-[10px] font-semibold text-[#3F451F]">
+                  {allocation ? `${allocation.start_time} - ${allocation.end_time}` : "Time not scheduled"}
+                </span>
+              </div>
+              <p className="text-xs font-semibold text-[#24251C] truncate">{item.subject}</p>
+              <div className="flex items-center justify-between gap-2 text-[10px] text-[#77735F]">
+                <span className="truncate">
+                  {allocation?.room_id ? `Room ${allocation.room_id}` : "Room not allocated"}
+                </span>
+                <Link
+                  to={`/attendance?session=${encodeURIComponent(item.session_id)}`}
+                  className="font-bold text-[#3F451F] hover:underline"
+                >
+                  Attendance
+                </Link>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+    );
   };
-
-  // Day of week padding for the first day of the month
-  const firstDayOfWeek = new Date(currentYear, currentMonth, 1).getDay(); // 0 = Sun, 1 = Mon ...
-  const paddedBlanks = Array.from({ length: firstDayOfWeek });
 
   return (
     <div className="space-y-6">
-      {/* Header Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      {/* Header */}
+      <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-[#24251C] tracking-tight">
-            Attendance Calendar & Class Health Heatmap
+          <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
+            Academic Calendar
           </h1>
-          <p className="text-sm text-[#77735F] mt-0.5">
-            Aggregated institutional calendar view with health band colour coding and session drill-downs.
+          <p className="text-xs sm:text-sm text-[#77735F] mt-1">
+            Real sessions, class slots and attendance straight from the RollCall AI backend.
           </p>
         </div>
 
-        {/* ADMIN only Export .ics Button */}
-        {isAdmin && (
+        <div className="flex flex-wrap items-center gap-2">
+          <div className="inline-flex rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] p-1 shadow-2xs">
+            {(["month", "week", "day"] as CalendarViewMode[]).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                onClick={() => {
+                  setViewMode(mode);
+                  setDefaultView(mode);
+                }}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold capitalize transition-all cursor-pointer ${
+                  viewMode === mode
+                    ? "bg-[#3F451F] text-[#EDE8D8]"
+                    : "text-[#77735F] hover:text-[#24251C]"
+                }`}
+              >
+                {mode}
+              </button>
+            ))}
+          </div>
           <button
-            onClick={() => void handleExportIcs()}
-            disabled={isExporting}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#3F451F] text-[#FBF8F0] text-sm font-semibold rounded-xl hover:bg-[#323719] transition-all shadow-sm disabled:opacity-50 cursor-pointer"
+            type="button"
+            onClick={reload}
+            className="px-3.5 py-2 rounded-xl bg-[#FBF8F0] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
           >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-            <span>{isExporting ? "Exporting..." : "Export .ics"}</span>
+            Refresh
           </button>
-        )}
-      </div>
-
-      {/* Export Notice / Dependency Banner */}
-      {exportNotice && (
-        <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 flex items-center justify-between">
-          <span>{exportNotice}</span>
           <button
-            onClick={() => setExportNotice(null)}
-            className="text-xs hover:underline cursor-pointer"
+            type="button"
+            onClick={goToday}
+            className="px-3.5 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] transition-colors cursor-pointer"
           >
-            Dismiss
+            Today
           </button>
         </div>
-      )}
+      </div>
 
-      {/* Calendar Controls & Navigation */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-sm flex flex-col sm:flex-row items-center justify-between gap-3">
-        {/* Month & Year Navigation */}
-        <div className="flex items-center gap-3">
+      {/* Controls */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+        <div className="flex items-center gap-2">
           <button
-            onClick={handlePrevMonth}
+            type="button"
+            onClick={() => shift(-1)}
+            aria-label="Previous period"
             className="p-2 rounded-xl bg-[#F2EDE0] hover:bg-[#E4DDCA] text-[#24251C] transition-colors cursor-pointer"
-            title="Previous Month"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
           </button>
-
-          <h2 className="text-base sm:text-lg font-bold text-[#24251C] min-w-[160px] text-center">
-            {calendarData?.monthName || "October"} {currentYear}
+          <h2 className="text-base sm:text-lg font-bold text-[#24251C] min-w-[170px] text-center">
+            {periodLabel}
           </h2>
-
           <button
-            onClick={handleNextMonth}
+            type="button"
+            onClick={() => shift(1)}
+            aria-label="Next period"
             className="p-2 rounded-xl bg-[#F2EDE0] hover:bg-[#E4DDCA] text-[#24251C] transition-colors cursor-pointer"
-            title="Next Month"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
@@ -216,254 +351,365 @@ export function CalendarView() {
           </button>
         </div>
 
-        {/* Subject Filter & Reset */}
-        <div className="flex items-center gap-2 w-full sm:w-auto">
-          <span className="text-xs font-semibold text-[#77735F]">Subject:</span>
-          <select
-            value={selectedSubject}
-            onChange={(e) => setSelectedSubject(e.target.value)}
-            className="bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl px-3 py-1.5 text-xs text-[#24251C] focus:outline-none focus:border-[#3F451F]"
-          >
-            {allowedSubjectOptions.map((sub) => (
-              <option key={sub} value={sub}>
-                {sub === "ALL" ? "All Authorized Subjects" : sub}
-              </option>
-            ))}
-          </select>
+        <div className="flex flex-wrap items-center gap-3">
+          {subjectOptions.length > 1 && (
+            <label className="flex items-center gap-2 text-xs font-semibold text-[#77735F]">
+              Subject
+              <select
+                value={selectedSubject}
+                onChange={(e) => setSelectedSubject(e.target.value)}
+                className="bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl px-3 py-1.5 text-xs text-[#24251C] focus:outline-none focus:border-[#3F451F] cursor-pointer"
+              >
+                {subjectOptions.map((code) => (
+                  <option key={code} value={code}>
+                    {code === "ALL" ? "All my subjects" : code}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <label className="flex items-center gap-2 text-xs font-semibold text-[#77735F] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={weekStartsMonday}
+              onChange={(e) => setWeekStartsMonday(e.target.checked)}
+              className="accent-[#6C5119] w-4 h-4"
+            />
+            Week starts Monday
+          </label>
+          <label className="flex items-center gap-2 text-xs font-semibold text-[#77735F] cursor-pointer">
+            <input
+              type="checkbox"
+              checked={showHeatmap}
+              onChange={(e) => setShowHeatmap(e.target.checked)}
+              className="accent-[#6C5119] w-4 h-4"
+            />
+            Heatmap
+          </label>
         </div>
       </div>
 
-      {/* Main Grid & Daily Detail Container */}
+      {error && (
+        <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 flex items-center justify-between gap-3">
+          <span>{error}</span>
+          <button
+            type="button"
+            onClick={reload}
+            className="font-bold underline cursor-pointer"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Calendar Heatmap Grid (2 Cols on Large, 1 Col on Mobile 375px) */}
-        <div className="lg:col-span-2 bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-sm space-y-4">
+        {/* Main calendar */}
+        <div className="lg:col-span-2 bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs space-y-4">
           {isLoading ? (
-            <div className="p-16 text-center text-[#77735F]">
+            <div className="py-16 text-center text-[#77735F]">
               <div className="inline-block animate-spin w-6 h-6 border-2 border-[#3F451F] border-t-transparent rounded-full mb-2" />
-              <p className="text-sm font-medium">Loading calendar schedule...</p>
+              <p className="text-sm font-medium">Loading the academic calendar…</p>
             </div>
-          ) : error ? (
-            <div className="p-10 text-center">
-              <p className="text-sm text-rose-600 mb-3">{error}</p>
-              <button
-                onClick={() => void loadMonth()}
-                className="px-4 py-1.5 bg-[#3F451F] text-[#FBF8F0] text-xs font-semibold rounded-lg hover:bg-[#323719] cursor-pointer"
-              >
-                Retry
-              </button>
-            </div>
-          ) : (
-            <>
-              {/* Day of Week Headers */}
-              <div className="grid grid-cols-7 gap-1 sm:gap-2 text-center text-[10px] sm:text-xs font-bold text-[#77735F] uppercase tracking-wider pb-1">
-                <div>Sun</div>
-                <div>Mon</div>
-                <div>Tue</div>
-                <div>Wed</div>
-                <div>Thu</div>
-                <div>Fri</div>
-                <div>Sat</div>
-              </div>
-
-              {/* Month Days Grid - Highly Responsive (min-w-0 for 375px mobile) */}
-              <div className="grid grid-cols-7 gap-1 sm:gap-2">
-                {/* Blanks for offset */}
-                {paddedBlanks.map((_, idx) => (
-                  <div key={`blank-${idx}`} className="h-14 sm:h-20 rounded-xl bg-transparent" />
-                ))}
-
-                {/* Days */}
-                {calendarData?.days.map((day) => {
-                  const isSelected = selectedDay?.date === day.date;
-                  const hasSessions = day.sessionCount > 0;
-
-                  // Health band styling: Green >85%, Yellow 70-85%, Red <70%
-                  let bandBg = "bg-white hover:bg-[#F2EDE0]";
-                  let bandBorder = "border-[#E4DDCA]";
-                  let bandText = "text-[#77735F]";
-
-                  if (hasSessions) {
-                    if (day.healthBand === "GREEN") {
-                      bandBg = isSelected ? "bg-emerald-100" : "bg-emerald-50 hover:bg-emerald-100";
-                      bandBorder = "border-emerald-300";
-                      bandText = "text-emerald-900";
-                    } else if (day.healthBand === "YELLOW") {
-                      bandBg = isSelected ? "bg-amber-100" : "bg-amber-50 hover:bg-amber-100";
-                      bandBorder = "border-amber-300";
-                      bandText = "text-amber-900";
-                    } else {
-                      bandBg = isSelected ? "bg-rose-100" : "bg-rose-50 hover:bg-rose-100";
-                      bandBorder = "border-rose-300";
-                      bandText = "text-rose-900";
-                    }
-                  } else {
-                    // Days without sessions: NOT zero attendance, neutral tone
-                    bandBg = isSelected ? "bg-[#EDE8D8]" : "bg-[#FBF8F0]/70 hover:bg-[#F2EDE0]";
-                    bandBorder = "border-[#E4DDCA]/60";
-                    bandText = "text-[#A8A28E]";
-                  }
-
-                  return (
-                    <button
-                      key={day.date}
-                      onClick={() => void handleSelectDay(day)}
-                      className={`h-14 sm:h-20 rounded-xl border p-1 sm:p-2 text-left flex flex-col justify-between transition-all cursor-pointer min-w-0 ${bandBg} ${bandBorder} ${
-                        isSelected ? "ring-2 ring-[#3F451F] shadow-sm" : ""
-                      }`}
-                    >
-                      <div className="flex items-center justify-between w-full">
-                        <span className="text-xs sm:text-sm font-bold text-[#24251C]">
-                          {day.dayNumber}
-                        </span>
-                        {hasSessions && (
-                          <span className="hidden sm:inline-block text-[9px] font-bold px-1.5 py-0.2 rounded bg-white/80 text-[#3F451F]">
-                            {day.sessionCount} {day.sessionCount === 1 ? "class" : "classes"}
-                          </span>
-                        )}
-                      </div>
-
-                      {hasSessions ? (
-                        <div className="truncate">
-                          <span className={`text-[10px] sm:text-xs font-bold block ${bandText}`}>
-                            {day.attendanceRate !== null ? `${day.attendanceRate.toFixed(0)}%` : "—"}
-                          </span>
-                          <span className="text-[8px] sm:text-[9px] text-[#77735F] hidden sm:block truncate">
-                            {day.healthBandLabel}
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-[9px] text-[#A8A28E] hidden sm:block truncate">
-                          No sessions
-                        </span>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-
-              {/* Legend with Required Caption */}
-              <div className="pt-3 border-t border-[#E4DDCA] flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <span className="font-semibold text-[#77735F]">Health Bands:</span>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-3 h-3 rounded-full bg-emerald-500" />
-                    <span className="text-[#24251C]">Green (&gt;85%)</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-3 h-3 rounded-full bg-amber-500" />
-                    <span className="text-[#24251C]">Yellow (70–85%)</span>
-                  </div>
-                  <div className="flex items-center gap-1.5">
-                    <span className="w-3 h-3 rounded-full bg-rose-500" />
-                    <span className="text-[#24251C]">Red (&lt;70%)</span>
-                  </div>
+          ) : viewMode === "month" ? (
+            monthData && (
+              <>
+                <div className="grid grid-cols-7 gap-1 sm:gap-2 text-center text-[10px] sm:text-xs font-bold text-[#77735F] uppercase tracking-wider pb-1">
+                  {labels.map((label) => (
+                    <div key={label}>{label}</div>
+                  ))}
                 </div>
 
-                {/* Mandatory Prompt Explanation */}
-                <span className="text-xs italic font-medium text-[#77735F] bg-[#F2EDE0] px-2.5 py-1 rounded-lg border border-[#E4DDCA]">
-                  &ldquo;Colours show class health, not eligibility.&rdquo;
-                </span>
-              </div>
-            </>
+                <div className="grid grid-cols-7 gap-1 sm:gap-2">
+                  {paddedBlanks.map((_, index) => (
+                    <div key={`blank-${index}`} className="h-16 sm:h-20 rounded-xl bg-transparent" />
+                  ))}
+
+                  {monthData.days.map((day) => {
+                    const isSelected = selectedDate === day.date;
+                    const hasSessions = day.sessionCount > 0;
+                    let bandBg = "bg-white hover:bg-[#F2EDE0]";
+                    let bandBorder = "border-[#E4DDCA]";
+                    let bandText = "text-[#77735F]";
+
+                    if (hasSessions && showHeatmap) {
+                      if (day.healthBand === "GREEN") {
+                        bandBg = isSelected ? "bg-emerald-100" : "bg-emerald-50 hover:bg-emerald-100";
+                        bandBorder = "border-emerald-300";
+                        bandText = "text-emerald-900";
+                      } else if (day.healthBand === "YELLOW") {
+                        bandBg = isSelected ? "bg-amber-100" : "bg-amber-50 hover:bg-amber-100";
+                        bandBorder = "border-amber-300";
+                        bandText = "text-amber-900";
+                      } else if (day.healthBand === "RED") {
+                        bandBg = isSelected ? "bg-rose-100" : "bg-rose-50 hover:bg-rose-100";
+                        bandBorder = "border-rose-300";
+                        bandText = "text-rose-900";
+                      }
+                    }
+
+                    return (
+                      <button
+                        key={day.date}
+                        type="button"
+                        onClick={() => setSelectedDate(day.date)}
+                        className={`h-16 sm:h-20 rounded-xl border p-1.5 sm:p-2 text-left flex flex-col justify-between transition-all cursor-pointer min-w-0 ${bandBg} ${bandBorder} ${
+                          isSelected ? "ring-2 ring-[#3F451F]" : ""
+                        } ${day.isToday ? "border-[#A77A13]" : ""}`}
+                        aria-label={`${formatIsoDate(day.date)}, ${day.sessionCount} sessions`}
+                      >
+                        <div className="flex items-center justify-between w-full">
+                          <span className="text-xs sm:text-sm font-bold text-[#24251C]">
+                            {day.dayNumber}
+                          </span>
+                          {hasSessions && (
+                            <span className="text-[9px] font-bold px-1.5 py-0.2 rounded bg-white/80 text-[#3F451F]">
+                              {day.sessionCount}
+                            </span>
+                          )}
+                        </div>
+                        {hasSessions ? (
+                          <div className="truncate">
+                            <span className={`text-[10px] sm:text-xs font-bold block ${bandText}`}>
+                              {day.attendanceRate !== null
+                                ? `${day.attendanceRate.toFixed(0)}%`
+                                : "—"}
+                            </span>
+                            <span className="text-[8px] sm:text-[9px] text-[#77735F] hidden sm:block truncate">
+                              {day.healthBandLabel}
+                            </span>
+                          </div>
+                        ) : (
+                          <span className="text-[9px] text-[#A8A28E] hidden sm:block">No sessions</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="pt-3 border-t border-[#E4DDCA] flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div className="flex items-center gap-3 flex-wrap">
+                    <span className="font-semibold text-[#77735F]">Health bands:</span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-3 h-3 rounded-full bg-emerald-500" />
+                      <span className="text-[#24251C]">Green</span>
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-3 h-3 rounded-full bg-amber-500" />
+                      <span className="text-[#24251C]">Yellow</span>
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <span className="w-3 h-3 rounded-full bg-rose-500" />
+                      <span className="text-[#24251C]">Red</span>
+                    </span>
+                  </div>
+                  <span className="text-xs italic font-medium text-[#77735F] bg-[#F2EDE0] px-2.5 py-1 rounded-lg border border-[#E4DDCA]">
+                    {monthData.totalSessions} session(s) this month
+                  </span>
+                </div>
+              </>
+            )
+          ) : viewMode === "week" ? (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-7 gap-3">
+              {weekDays.map((date) => {
+                const sessions = (sessionsByDate.get(date) || []).filter((s) =>
+                  filterSubject(s.subject_code || s.subject)
+                );
+                const allocations = allocationsByDate.get(date) || [];
+                const isToday = date === today;
+                return (
+                  <div
+                    key={date}
+                    className={`rounded-xl border p-2.5 min-h-[120px] ${
+                      isToday ? "border-[#A77A13] bg-[#EDE8D8]/30" : "border-[#E4DDCA] bg-white"
+                    }`}
+                  >
+                    <p className="text-[11px] font-black uppercase tracking-wider text-[#77735F]">
+                      {weekdayOfIsoDate(date).slice(0, 3)} {date.slice(8)}
+                    </p>
+                    <div className="mt-2 space-y-1.5">
+                      {sessions.length === 0 ? (
+                        <p className="text-[10px] text-[#A8A28E]">No sessions</p>
+                      ) : (
+                        sessions.map((item) => {
+                          const allocation = allocations.find(
+                            (a) => a.session_id === item.session_id
+                          );
+                          return (
+                            <button
+                              key={item.session_id}
+                              type="button"
+                              onClick={() => {
+                                setSelectedDate(date);
+                                setAnchorDate(date);
+                              }}
+                              className="w-full text-left p-2 rounded-lg bg-[#F2EDE0] border border-[#E4DDCA] hover:border-[#A77A13] transition-colors cursor-pointer"
+                            >
+                              <span className="block text-[10px] font-bold text-[#3F451F] truncate">
+                                {item.subject_code || item.subject}
+                              </span>
+                              <span className="block text-[9px] text-[#77735F]">
+                                {allocation
+                                  ? `${allocation.start_time}-${allocation.end_time}`
+                                  : "No time"}
+                              </span>
+                            </button>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {(() => {
+                const sessions = (sessionsByDate.get(anchorDate) || []).filter((s) =>
+                  filterSubject(s.subject_code || s.subject)
+                );
+                const allocations = allocationsByDate.get(anchorDate) || [];
+                if (sessions.length === 0) {
+                  return (
+                    <div className="py-12 text-center text-[#77735F] bg-[#F2EDE0]/50 rounded-xl border border-dashed border-[#E4DDCA]">
+                      <p className="text-sm font-bold text-[#24251C]">No sessions on this day</p>
+                      <p className="text-xs mt-1">
+                        The timetable has no classes scheduled for{" "}
+                        {formatIsoDate(anchorDate)}.
+                      </p>
+                    </div>
+                  );
+                }
+                return (
+                  <ul className="space-y-2.5">
+                    {sessions.map((item) => {
+                      const allocation = allocations.find((a) => a.session_id === item.session_id);
+                      return (
+                        <li
+                          key={item.session_id}
+                          className="p-4 rounded-xl bg-white border border-[#E4DDCA] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3"
+                        >
+                          <div>
+                            <p className="font-mono text-[11px] font-bold text-[#6C5119]">
+                              {item.subject_code || item.session_id}
+                            </p>
+                            <p className="text-sm font-bold text-[#24251C]">{item.subject}</p>
+                            <p className="text-[11px] text-[#77735F] mt-0.5">
+                              {allocation
+                                ? `Room ${allocation.room_id} · ${allocation.start_time} - ${allocation.end_time}`
+                                : "No room or time allocated yet"}
+                            </p>
+                          </div>
+                          <Link
+                            to={`/attendance?session=${encodeURIComponent(item.session_id)}`}
+                            className="self-start sm:self-auto px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors"
+                          >
+                            Open attendance
+                          </Link>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                );
+              })()}
+            </div>
+          )}
+
+          {lastUpdated && (
+            <p className="text-[11px] text-[#77735F] pt-2 border-t border-[#E4DDCA]/60">
+              Last updated {lastUpdated.toLocaleTimeString()} · data served by the RollCall AI
+              backend
+            </p>
           )}
         </div>
 
-        {/* Daily Detail Panel */}
-        <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-sm flex flex-col justify-between space-y-4">
-          <div>
-            <div className="pb-3 border-b border-[#E4DDCA] flex items-center justify-between">
-              <div>
-                <h3 className="text-base font-bold text-[#24251C]">
-                  Daily Session Details
-                </h3>
-                <p className="text-xs text-[#77735F]">
-                  {selectedDay ? selectedDay.date : "Select a date on the calendar"}
-                </p>
-              </div>
-              {selectedDay && selectedDay.sessionCount > 0 && (
-                <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-[#3F451F] text-[#FBF8F0]">
-                  {selectedDay.sessionCount} {selectedDay.sessionCount === 1 ? "Session" : "Sessions"}
-                </span>
-              )}
+        {/* Selected day panel */}
+        <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs flex flex-col space-y-4">
+          <div className="pb-3 border-b border-[#E4DDCA] flex items-center justify-between gap-2">
+            <div>
+              <h3 className="text-base font-bold text-[#24251C]">Selected day</h3>
+              <p className="text-xs text-[#77735F]">
+                {formatIsoDate(selectedDate)} · {weekdayOfIsoDate(selectedDate)}
+              </p>
             </div>
+            {selectedDay && selectedDay.sessionCount > 0 && (
+              <span className="px-2.5 py-1 rounded-lg text-xs font-bold bg-[#3F451F] text-[#FBF8F0]">
+                {selectedDay.sessionCount} session(s)
+              </span>
+            )}
+          </div>
 
-            {/* Daily Content */}
-            <div className="mt-4 space-y-3">
-              {isDailyLoading ? (
-                <div className="p-8 text-center text-[#77735F]">
-                  <div className="inline-block animate-spin w-5 h-5 border-2 border-[#3F451F] border-t-transparent rounded-full mb-1" />
-                  <p className="text-xs">Loading sessions for this date...</p>
-                </div>
-              ) : !selectedDay || selectedDay.sessionCount === 0 ? (
-                <div className="p-8 text-center text-[#77735F] bg-[#F2EDE0]/50 rounded-xl border border-dashed border-[#E4DDCA]">
-                  <svg className="w-8 h-8 mx-auto text-[#A8A28E] mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                  </svg>
+          {viewMode === "month" && selectedDay && selectedDay.sessionCount > 0 && (
+            <div className="grid grid-cols-3 gap-2 text-center">
+              <div className="p-2.5 rounded-xl bg-[#F2EDE0] border border-[#E4DDCA]">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[#77735F]">
+                  Present
+                </p>
+                <p className="text-lg font-black text-emerald-700">{selectedDay.presentCount}</p>
+              </div>
+              <div className="p-2.5 rounded-xl bg-[#F2EDE0] border border-[#E4DDCA]">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[#77735F]">
+                  Absent
+                </p>
+                <p className="text-lg font-black text-rose-700">{selectedDay.absentCount}</p>
+              </div>
+              <div className="p-2.5 rounded-xl bg-[#F2EDE0] border border-[#E4DDCA]">
+                <p className="text-[10px] font-bold uppercase tracking-wider text-[#77735F]">
+                  Pending
+                </p>
+                <p className="text-lg font-black text-amber-700">{selectedDay.pendingCount}</p>
+              </div>
+            </div>
+          )}
+
+          {daySummary && daySummary.total > 0 && (
+            <p className="text-xs text-[#77735F]">
+              {daySummary.present} of {daySummary.total} attendance marks are present on this day.
+            </p>
+          )}
+
+          <div className="flex-1">
+            {viewMode === "month" ? (
+              selectedDay && selectedDay.sessionCount > 0 ? (
+                dayPanel(selectedDay.date, selectedDay.sessions, selectedDay.allocations)
+              ) : (
+                <div className="py-10 text-center text-[#77735F] bg-[#F2EDE0]/50 rounded-xl border border-dashed border-[#E4DDCA]">
                   <p className="text-xs font-bold text-[#24251C]">No sessions conducted</p>
-                  <p className="text-[11px] text-[#77735F] mt-0.5">
-                    No academic classes or lab practicals are scheduled for this date.
+                  <p className="text-[11px] mt-0.5">
+                    The timetable has no classes on {formatIsoDate(selectedDate)}.
                   </p>
                 </div>
-              ) : (
-                <div className="space-y-3">
-                  {/* Daily Metric Overview */}
-                  {selectedDay.attendanceRate !== null && (
-                    <div className="p-3 bg-[#F2EDE0] border border-[#E4DDCA] rounded-xl flex items-center justify-between text-xs">
-                      <div>
-                        <span className="text-[#77735F] block">Day Attendance</span>
-                        <span className="text-sm font-bold text-[#24251C]">
-                          {selectedDay.attendanceRate.toFixed(1)}%
-                        </span>
-                      </div>
-                      <div className="text-right">
-                        <span className="text-[#77735F] block">Present / Total</span>
-                        <span className="text-xs font-mono font-bold text-[#3F451F]">
-                          {selectedDay.presentCount} / {selectedDay.totalStudents}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Session List for Day */}
-                  <div className="space-y-2.5 max-h-[340px] overflow-y-auto pr-1">
-                    {selectedDay.sessions.map((sess) => {
-                      const roomName = sess.allocations?.[0]?.room_id || "LH-101";
-                      const facultyId = sess.allocations?.[0]?.teacher_id || sess.teacher_id || "faculty_ml";
-                      const subjCode = sess.subject_code || sess.subject || "Academic Session";
-
-                      return (
-                        <div
-                          key={sess.session_id}
-                          className="p-3 bg-white border border-[#E4DDCA] rounded-xl shadow-2xs space-y-1.5"
-                        >
-                          <div className="flex items-center justify-between">
-                            <span className="font-mono text-xs font-bold text-[#6C5119]">
-                              {subjCode}
-                            </span>
-                            <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#3F451F]/10 text-[#3F451F]">
-                              {roomName}
-                            </span>
-                          </div>
-                          <p className="text-xs font-semibold text-[#24251C]">
-                            Session {sess.session_id}
-                          </p>
-                          <div className="flex items-center justify-between text-[11px] text-[#77735F] pt-1 border-t border-[#E4DDCA]/50">
-                            <span>Faculty: {facultyId}</span>
-                            <span className="font-semibold text-emerald-700">
-                              Status: CONFIRMED
-                            </span>
-                          </div>
-                        </div>
-                      );
-                    })}
+              )
+            ) : viewMode === "week" ? (
+              <div className="space-y-3 max-h-[420px] overflow-y-auto pr-1">
+                {weekDays.map((date) => (
+                  <div key={date}>
+                    <p className="text-[11px] font-black uppercase tracking-wider text-[#77735F] mb-1.5">
+                      {weekdayOfIsoDate(date)} · {date.slice(8)}
+                    </p>
+                    {dayPanel(
+                      date,
+                      (sessionsByDate.get(date) || []).filter((s) =>
+                        filterSubject(s.subject_code || s.subject)
+                      ),
+                      allocationsByDate.get(date) || []
+                    )}
                   </div>
-                </div>
-              )}
-            </div>
+                ))}
+              </div>
+            ) : (
+              dayPanel(
+                anchorDate,
+                (sessionsByDate.get(anchorDate) || []).filter((s) =>
+                  filterSubject(s.subject_code || s.subject)
+                ),
+                allocationsByDate.get(anchorDate) || []
+              )
+            )}
           </div>
 
           <div className="pt-3 border-t border-[#E4DDCA] text-[11px] text-[#77735F]">
-            Data synced with authoritative RollCall AI analytics engine.
+            Attendance figures are read from the server analytics endpoint. A day without
+            sessions is never shown as 0% attendance.
           </div>
         </div>
       </div>

@@ -22,3 +22,21 @@ PyJWT>=2.8.0
 cryptography>=42.0.0
 passlib[bcrypt]>=1.7.4
 bcrypt>=4.0.0
+# Optional shared counter store for multi-instance deployments. The limiter
+# falls back to the shared database counters when REDIS_URL is unset.
+redis>=5.0,<8
+
+# Image tooling
+# tools/read_photo_tool.py imports cv2/numpy at module import time and
+# app/security/uploads.py imports PIL, so these are runtime dependencies of the
+# backend (not just test dependencies). The headless OpenCV build is used
+# because CI and servers have no display/GL stack.
+numpy>=1.26.0
+opencv-python-headless>=4.8.0
+Pillow>=10.0.0
+
+# Test runner support
+# httpx is required by fastapi.testclient.TestClient; pytest-timeout provides
+# the --timeout flag used by the CI test command.
+httpx>=0.27.0
+pytest-timeout>=2.3.0

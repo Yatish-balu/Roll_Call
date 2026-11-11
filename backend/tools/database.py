@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -186,6 +187,9 @@ def _generate_synthetic_attendance() -> List[Dict[str, Any]]:
 
 SAMPLE_ATTENDANCE: List[Dict[str, Any]] = _generate_synthetic_attendance()
 
+# SQLite table names that may be interpolated into a COUNT query.
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 
 def inspect_database(db_path: str = DEFAULT_DB_PATH) -> Dict[str, Any]:
@@ -198,8 +202,13 @@ def inspect_database(db_path: str = DEFAULT_DB_PATH) -> Dict[str, Any]:
 
         counts: Dict[str, int] = {}
         for table in tables:
+            # Table names come from sqlite_master, i.e. from the database file
+            # itself. Only plain identifiers are counted so that a tampered
+            # database cannot inject SQL through an exotic table name.
+            if not _SAFE_IDENTIFIER.match(table):
+                continue
             c_cur = conn.cursor()
-            c_cur.execute(f"SELECT COUNT(*) FROM {table}")
+            c_cur.execute(f"SELECT COUNT(*) FROM {table}")  # nosec B608 - table name validated above
             counts[table] = c_cur.fetchone()[0]
 
         return {

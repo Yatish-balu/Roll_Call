@@ -7,11 +7,12 @@ from typing import Callable, Optional
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy.orm import Session
 
 from app.auth.jwt import AuthenticationError, decode_and_verify_token
 from app.auth.roles import Role, normalize_role, role_satisfies
-from app.db.connection import get_sync_session_factory
-from app.db.models import User
+from app.db.models import AuthSession, User
+from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
 
 
@@ -23,6 +24,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 def get_current_user(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(bearer_scheme),
+    db: Session = Depends(get_db),
 ) -> AuthenticatedUser:
     """
     Extract, decode, and cryptographically verify the Bearer JWT token from the Authorization header.
@@ -51,18 +53,42 @@ def get_current_user(
     # fail CLOSED: if the database cannot be reached we reject the request rather
     # than trusting the role baked into the token.
     try:
-        SessionLocal = get_sync_session_factory()
-        with SessionLocal() as db:
-            db_user = db.get(User, user.user_id)
-            if db_user is not None:
-                if not db_user.is_active:
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="User account is deactivated.",
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
-                # Database role is authoritative
-                user.role = normalize_role(db_user.role)
+        db_user = db.get(User, user.user_id)
+        if db_user is None:
+            # A locally-issued token must map to an existing account: once a
+            # user is deleted their tokens stop working immediately instead
+            # of falling back to the claims baked into the token. Federated
+            # (Supabase) identities are provisioned outside this database
+            # and are recognisable by their app_metadata claim.
+            is_federated = bool(user.claims.get("app_metadata"))
+            if not is_federated:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User account no longer exists.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        else:
+            if not db_user.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User account is deactivated.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            # Database role is authoritative
+            user.role = normalize_role(db_user.role)
+
+        # If the access token is bound to a server-side session family (sid),
+        # verify that the session has not been revoked (logout, password
+        # change/reset, or session revocation).
+        session_id = user.claims.get("sid")
+        if session_id:
+            auth_session = db.get(AuthSession, str(session_id))
+            if auth_session is None or auth_session.revoked_at is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Session has been revoked.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
     except HTTPException:
         raise
     except Exception as exc:

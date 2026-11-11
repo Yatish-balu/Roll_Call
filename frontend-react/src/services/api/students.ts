@@ -6,10 +6,15 @@ export interface Student {
   usn: string;
   name: string;
   branch: string;
-  semester?: number;
-  section?: string;
-  batch?: string;
-  department_id?: string;
+  semester?: number | null;
+  semester_id?: string | null;
+  section?: string | null;
+  section_id?: string | null;
+  batch?: string | null;
+  batch_id?: string | null;
+  roll_no?: string | null;
+  department_id?: string | null;
+  dept_id?: string | null;
 }
 
 export interface StudentPage {
@@ -62,12 +67,15 @@ export async function fetchStudents(params?: {
   limit?: number;
   offset?: number;
   branch?: string;
+  semester?: number;
   search?: string;
 }): Promise<StudentPage> {
   const queryParams: Record<string, string | number | boolean | undefined | null> = {};
   if (params?.limit) queryParams.limit = params.limit;
   if (params?.offset !== undefined) queryParams.offset = params.offset;
   if (params?.branch && params.branch !== "ALL") queryParams.branch = params.branch;
+  if (params?.semester !== undefined && params.semester !== null)
+    queryParams.semester = params.semester;
   if (params?.search && params.search.trim()) queryParams.search = params.search.trim();
 
   return apiClient.get<StudentPage>(
@@ -102,8 +110,8 @@ export async function fetchStudentAttendanceSummary(usn: string): Promise<Studen
   for (const s of sessionsRes.items || []) {
     sessionMap.set(s.session_id, {
       date: s.date,
-      subject: s.subject_code || s.subject || "Core Curriculum",
-      room: s.allocations?.[0]?.room_id || "LH-101",
+      subject: s.subject_code || s.subject || "Session",
+      room: s.allocations?.[0]?.room_id || "",
     });
   }
 
@@ -112,11 +120,11 @@ export async function fetchStudentAttendanceSummary(usn: string): Promise<Studen
     const sess = sessionMap.get(r.session_id);
     return {
       session_id: r.session_id,
-      date: sess?.date || "2026-10-24",
-      subject: sess?.subject || "Core Curriculum",
-      room: r.room_id || sess?.room || "LH-101",
+      date: sess?.date || "—",
+      subject: sess?.subject || "—",
+      room: r.room_id || sess?.room || "—",
       status: r.status,
-      source: r.source || "camera",
+      source: r.source || "—",
       confidence: r.confidence,
     };
   });

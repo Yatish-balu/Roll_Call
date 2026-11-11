@@ -2,7 +2,12 @@
 
 import React, { useEffect, useState, useCallback, useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
-import { fetchSessions, type SessionItem } from "@/services/api/sessions";
+import {
+  fetchSessionAllocations,
+  fetchSessions,
+  type SessionAllocation,
+  type SessionItem,
+} from "@/services/api/sessions";
 import { fetchStudents } from "@/services/api/students";
 import { useAuth } from "@/hooks/useAuth";
 import {
@@ -18,6 +23,8 @@ export function AttendanceView() {
   const querySession = searchParams.get("session") || searchParams.get("sessionId") || "";
   const { session, isAdmin, isFaculty, isViewer, canMarkAttendance } = useAuth();
   const [sessions, setSessions] = useState<SessionItem[]>([]);
+  // Real class slots (room / batch / time) of the sessions the caller may see.
+  const [allocations, setAllocations] = useState<SessionAllocation[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string>(querySession);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(true);
@@ -62,11 +69,15 @@ export function AttendanceView() {
     let isMounted = true;
     Promise.resolve().then(() => {
       if (!isMounted) return;
-      fetchSessions({ limit: 50 })
-        .then((res) => {
+      Promise.all([
+        fetchSessions({ limit: 50 }),
+        fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 })),
+      ])
+        .then(([res, allocationsRes]) => {
           if (!isMounted) return;
           const allItems = res.items || [];
           setSessions(allItems);
+          setAllocations(allocationsRes.items || []);
 
           if (querySession) {
             setSelectedSessionId(querySession);
@@ -124,6 +135,36 @@ export function AttendanceView() {
     return sessions.find((s) => s.session_id === selectedSessionId) || null;
   }, [sessions, selectedSessionId]);
 
+  // Real class slot of the selected session (room, batch and time window).
+  const sessionAllocations = useMemo(
+    () => allocations.filter((allocation) => allocation.session_id === selectedSessionId),
+    [allocations, selectedSessionId]
+  );
+  const sessionRooms = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          sessionAllocations
+            .map((allocation) => allocation.room_id)
+            .filter((room): room is string => Boolean(room))
+        )
+      ),
+    [sessionAllocations]
+  );
+  const sessionBatches = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          sessionAllocations
+            .map((allocation) => allocation.batch_id)
+            .filter((batch): batch is string => Boolean(batch))
+        )
+      ),
+    [sessionAllocations]
+  );
+  const sessionSlot = sessionAllocations[0] ?? null;
+  const sessionRoom = sessionRooms[0] ?? "";
+
   // Attendance counts
   const counts = useMemo(() => {
     let present = 0;
@@ -177,7 +218,7 @@ export function AttendanceView() {
         student_name: s.name,
         branch: s.branch,
         status: "UNREVIEWED",
-        room_id: "LH-101",
+        room_id: sessionRoom || "UNALLOCATED",
         source: "manual",
       }));
       setAttendanceRecords(newRecords);
@@ -216,7 +257,7 @@ export function AttendanceView() {
     try {
       const payload = attendanceRecords.map((r) => ({
         usn: r.usn,
-        room_id: r.room_id || "LH-101",
+        room_id: r.room_id || sessionRoom || "UNALLOCATED",
         status: r.status,
       }));
       const res = await updateSessionAttendance(selectedSessionId, payload);
@@ -226,6 +267,12 @@ export function AttendanceView() {
       });
       // Refresh roster directly from backend to ensure authoritative display
       await loadAttendance(selectedSessionId);
+      // Let other views (calendar, sessions) know that the attendance changed.
+      window.dispatchEvent(
+        new CustomEvent("rollcall:attendance-changed", {
+          detail: { session_id: selectedSessionId },
+        })
+      );
     } catch (err: unknown) {
       setStatusMessage({
         type: "error",
@@ -398,10 +445,14 @@ export function AttendanceView() {
                 Date: {activeSession.date}
               </span>
               <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
-                Room: Multi-Room Allocation (A-201 / B-105)
+                Room: {sessionRooms.length > 0 ? sessionRooms.join(", ") : "Not allocated"}
               </span>
               <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
-                Time: 09:00 - 10:00 AM (Batch B1/B2)
+                Time:{" "}
+                {sessionSlot
+                  ? `${sessionSlot.start_time} - ${sessionSlot.end_time}`
+                  : "Not scheduled"}
+                {sessionBatches.length > 0 ? ` (Batch ${sessionBatches.join(", ")})` : ""}
               </span>
             </div>
           )}

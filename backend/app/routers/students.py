@@ -54,6 +54,12 @@ def _client_ip(request: Optional[Request]) -> Optional[str]:
 )
 def list_students(
     branch: Optional[str] = Query(None, description="Optional branch code filter (e.g. CSE, ECE)"),
+    semester: Optional[int] = Query(
+        None,
+        ge=1,
+        le=8,
+        description="Optional semester number filter (1 - 8)",
+    ),
     limit: int = Query(50, ge=1, le=200, description="Maximum number of records to return"),
     offset: int = Query(0, ge=0, description="Number of records to skip before returning"),
     search: Optional[str] = Query(None, description="Search term matching USN, student name, or branch"),
@@ -61,16 +67,74 @@ def list_students(
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     scope = resolve_data_scope(db, current_user)
-    items, total = crud.get_students_paginated(
-        db,
-        branch=branch,
-        search=search,
-        limit=limit,
-        offset=offset,
-        scope_condition=scope.student_condition(),
+
+    # Branch and semester filters are applied by the database query, so the
+    # returned page, the reported total and the exported PDF always describe
+    # the same population.
+    from sqlalchemy import func, or_, select
+
+    from app.db.models import Section, Semester, Student
+
+    condition = scope.student_condition()
+    stmt = select(Student)
+    count_stmt = select(func.count(Student.usn))
+    if condition is not None:
+        stmt = stmt.where(condition)
+        count_stmt = count_stmt.where(condition)
+
+    if semester is not None:
+        semester_ids = select(Semester.semester_id).where(
+            Semester.semester_number == semester
+        )
+        stmt = stmt.where(Student.semester_id.in_(semester_ids))
+        count_stmt = count_stmt.where(Student.semester_id.in_(semester_ids))
+
+    if branch and branch.strip() and branch.strip().upper() != "ALL":
+        clean_branch = branch.strip().upper()
+        stmt = stmt.where(func.upper(Student.branch) == clean_branch)
+        count_stmt = count_stmt.where(func.upper(Student.branch) == clean_branch)
+
+    if search and search.strip():
+        term = f"%{search.strip().lower()}%"
+        search_clause = or_(
+            func.lower(Student.usn).like(term),
+            func.lower(Student.name).like(term),
+            func.lower(Student.branch).like(term),
+        )
+        stmt = stmt.where(search_clause)
+        count_stmt = count_stmt.where(search_clause)
+
+    total = db.execute(count_stmt).scalar() or 0
+    rows = (
+        db.execute(stmt.order_by(Student.branch, Student.usn).limit(limit).offset(offset))
+        .scalars()
+        .all()
     )
+
+    semester_numbers = {
+        row.semester_id: row.semester_number
+        for row in db.execute(select(Semester)).scalars().all()
+    }
+    section_labels = {
+        row.section_id: row.section_label for row in db.execute(select(Section)).scalars().all()
+    }
+
     return {
-        "items": items,
+        "items": [
+            {
+                "usn": row.usn,
+                "name": row.name,
+                "branch": row.branch,
+                "dept_id": row.dept_id,
+                "semester_id": row.semester_id,
+                "semester": semester_numbers.get(row.semester_id),
+                "section_id": row.section_id,
+                "section": section_labels.get(row.section_id),
+                "batch_id": row.batch_id,
+                "roll_no": row.roll_no,
+            }
+            for row in rows
+        ],
         "total": total,
         "limit": limit,
         "offset": offset,
