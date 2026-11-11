@@ -1,0 +1,201 @@
+name: security
+
+# Security engineering pipeline for RollCall AI.
+#
+# Every job is independent and read-only with respect to production: no
+# migration is applied to a live database, no credential is provisioned here and
+# no deployment configuration is touched.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.13"
+  PIP_AUDIT_VERSION: "2.9.0"
+  BANDIT_VERSION: "1.8.3"
+
+jobs:
+  # ---------------------------------------------------------------------
+  # 1. Secret scanning (gitleaks)
+  # ---------------------------------------------------------------------
+  secret-scan:
+    name: Secret scanning (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITLEAKS_ENABLE_UPLOAD_ARTIFACT: "false"
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+        with:
+          args: detect --source . --redact --no-banner
+
+  # ---------------------------------------------------------------------
+  # 2. Python dependency vulnerabilities (pip-audit)
+  # ---------------------------------------------------------------------
+  python-dependency-audit:
+    name: Python dependency audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install pip-audit
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "pip-audit==${PIP_AUDIT_VERSION}"
+
+      - name: Audit the backend requirements
+        working-directory: backend
+        run: |
+          python -m pip_audit -r requirements.txt --strict
+
+  # ---------------------------------------------------------------------
+  # 3. Static analysis (bandit)
+  # ---------------------------------------------------------------------
+  python-static-analysis:
+    name: Python static analysis (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install "bandit==${BANDIT_VERSION}"
+
+      - name: Run bandit
+        working-directory: backend
+        run: |
+          # Medium and high severity findings fail the job; low severity is reported.
+          python -m bandit -r app tools -ll
+
+  # ---------------------------------------------------------------------
+  # 4. Backend tests
+  # ---------------------------------------------------------------------
+  backend-tests:
+    name: Backend test suite
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Run the test suite
+        working-directory: backend
+        run: python -m pytest tests -q --timeout=600
+
+  # ---------------------------------------------------------------------
+  # 5. Frontend checks (TypeScript + ESLint) - source is never modified
+  # ---------------------------------------------------------------------
+  frontend-checks:
+    name: Frontend type-check and lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend-react
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: frontend-react/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: TypeScript compilation
+        run: npx tsc -b --pretty false
+
+      - name: ESLint
+        run: npm run lint
+
+      - name: npm audit
+        run: |
+          npm audit --audit-level=high || \
+            echo "::warning::npm audit reported findings (see the job log)"
+
+  # ---------------------------------------------------------------------
+  # 6. Dependency and migration integrity
+  # ---------------------------------------------------------------------
+  dependency-and-migration-checks:
+    name: Dependency and migration checks
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install the backend
+        working-directory: backend
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Check installed dependency consistency
+        working-directory: backend
+        run: python -m pip check
+
+      - name: Verify a single Alembic head and a clean migration path
+        working-directory: backend
+        run: |
+          python - <<'PY'
+          import os
+          import tempfile
+          from alembic import command
+          from alembic.config import Config
+
+          config = Config("alembic.ini")
+          heads = command.heads(config)
+          if len(heads) != 1:
+              raise SystemExit(f"Expected exactly one Alembic head, found: {heads}")
+
+          with tempfile.TemporaryDirectory() as tmp:
+              db_path = os.path.join(tmp, "ci_migration_check.db").replace("\\", "/")
+              config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path}")
+              command.upgrade(config, "head")
+              command.downgrade(config, "base")
+              command.upgrade(config, "head")
+          print("Migration path verified on a disposable database.")
+          PY
