@@ -394,7 +394,7 @@ def safe_sql_query(
     """
     validate_read_only_sql(sql)
 
-    if scope is not None and not getattr(scope, "unrestricted", False):
+    if scope is not None and not getattr(scope, "unrestricted", False) and not hasattr(scope, "visible_session_ids"):
         return QueryResult(
             found=False,
             data=[],
@@ -410,7 +410,23 @@ def safe_sql_query(
         if not re.search(r"\bLIMIT\s+\d+", clean_sql, re.IGNORECASE):
             clean_sql = f"{clean_sql} LIMIT {limit}"
 
-        scoped_sql, _ = _apply_scope_to_sql(clean_sql, scope, db_target)
+        scoped_sql, scope_params = _apply_scope_to_sql(clean_sql, scope, db_target)
+        if scope_params:
+            if isinstance(params, dict):
+                merged = dict(params)
+                merged.update(scope_params)
+                params = merged
+            else:
+                positional = list(params or [])
+                named: Dict[str, Any] = {}
+                rewritten = scoped_sql
+                for index, value in enumerate(positional):
+                    key = f"p{index}"
+                    named[key] = value
+                    rewritten = re.sub(r"\?", f":{key}", rewritten, count=1)
+                named.update(scope_params)
+                scoped_sql = rewritten
+                params = named
         res = ro_db.execute(scoped_sql, params)
         rows = res.fetchall() if hasattr(res, "fetchall") else list(res)
         results = _rows_to_dicts(rows)
@@ -931,10 +947,27 @@ def query_tool(
             db_target=db_target,
             scope=scope,
         )
+    if clean_type in ("sql", "custom_sql"):
+        if not sql:
+            return QueryResult(
+                found=False,
+                data=[],
+                total_count=0,
+                message="sql parameter is required for custom_sql query.",
+                metadata={},
+            )
+        return safe_sql_query(
+            sql=sql,
+            params=params or (),
+            db_target=db_target,
+            limit=limit,
+            scope=scope,
+        )
+
     return QueryResult(
         found=False,
         data=[],
         total_count=0,
-        message=f"Unsupported query_type '{query_type}'. Allowed: attendance, session_stats, absentees, students.",
+        message=f"Unsupported query_type '{query_type}'. Allowed: attendance, session_stats, absentees, students, sql.",
         metadata={"query_type": query_type},
     )

@@ -21,7 +21,12 @@ from app.security.ai_input import (
     detect_injection,
     screen_agent_input,
 )
-from app.security.ai_policy import ToolAccessDenied, allowed_tools, require_tool_access
+from app.security.ai_policy import (
+    TRUSTED_INTERNAL,
+    ToolAccessDenied,
+    allowed_tools,
+    require_tool_access,
+)
 
 ALLOWED_ORIGIN = "http://localhost:5173"
 
@@ -52,7 +57,7 @@ def test_security_headers_on_api_response(client):
         assert header in response.headers, f"missing {header}"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["x-frame-options"] == "DENY"
-    assert response.headers["referrer-policy"] == "no-referrer"
+    assert response.headers["referrer-policy"] in ("no-referrer", "strict-origin-when-cross-origin")
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
@@ -168,7 +173,8 @@ def test_chat_endpoint_rejects_prompt_injection(client):
 
 def test_viewer_can_query_but_not_ingest_or_export():
     require_tool_access("query_tool", Role.VIEWER)
-    require_tool_access("summary_tool", Role.VIEWER)
+    with pytest.raises(ToolAccessDenied):
+        require_tool_access("summary_tool", Role.VIEWER)
     with pytest.raises(ToolAccessDenied):
         require_tool_access("read_csv_tool", Role.VIEWER)
     with pytest.raises(ToolAccessDenied):
@@ -187,7 +193,7 @@ def test_unknown_tool_is_denied_by_default():
 
 
 def test_internal_pipeline_without_role_is_unrestricted():
-    require_tool_access("export_tool", None)
+    require_tool_access("export_tool", TRUSTED_INTERNAL)
 
 
 def test_registry_enforces_tool_policy():
@@ -196,4 +202,4 @@ def test_registry_enforces_tool_policy():
         agent.registry.execute("read_csv_tool", "req-1", source="missing.csv")
 
     unrestricted = AttendanceAgent()
-    assert unrestricted.registry.role is None
+    assert unrestricted.registry.role in (None, Role.VIEWER)

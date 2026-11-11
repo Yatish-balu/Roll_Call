@@ -27,6 +27,9 @@ from typing import Optional, Sequence
 #: Maximum characters of user-controlled text inspected at once.
 MAX_INSPECT_CHARS = 20_000
 
+#: Maximum characters of user-controlled chat input permitted.
+MAX_AGENT_INPUT_CHARS = 4000
+
 #: Maximum characters echoed in any log/summary (never log the whole payload).
 MAX_REPORT_CHARS = 200
 
@@ -49,7 +52,7 @@ _PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
     (
         "ignore_instructions",
         re.compile(
-            r"\b(?:ignore|ignoring|ignored|disregard|disregarding|forget|override)\s*[-_\s]+(?:all\s*[-_\s]+)?"
+            r"\b(?:ignore|ignoring|ignored|disregard|disregarding|forget|override)\s*[-_\s]+(?:(?:all|any)\s*[-_\s]+)?"
             r"(?:the\s*[-_\s]+)?(?:previous|prior|above|earlier|system)\s*[-_\s]+"
             r"(?:instructions?|prompts?|rules?|directions?|directives?)\b",
             re.IGNORECASE,
@@ -60,7 +63,8 @@ _PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
         re.compile(
             r"\b(?:reveal|show|print|repeat|dump|leak|output)\s+"
             r"(?:me\s+)?(?:your|the)\s+(?:system\s+prompt|hidden\s+prompt|"
-            r"instructions?|developer\s+message)\b",
+            r"instructions?|developer\s+message)\b|"
+            r"\b(?:system|developer|hidden|initial)\s+(?:prompt|message|instructions?)\b",
             re.IGNORECASE,
         ),
     ),
@@ -68,15 +72,16 @@ _PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
         "secret_exfiltration",
         re.compile(
             r"\b(?:reveal|show|print|dump|leak|give\s+me)\s+"
-            r"(?:the\s+)?(?:api\s*key|secret|password|credential|token|env(?:ironment)?\s+var)",
+            r"(?:the\s+)?(?:api\s*key|secret|password|credential|token|env(?:ironment)?\s+var|admin[_\s-]?key|jwt[_\s-]?secret|mfa[_\s-]?key)|"
+            r"\b(?:jwt[_\s-]?secret|admin[_\s-]?key|mfa[_\s-]?(?:encryption[_\s-]?)?key|environment[_\s-]?variables?|\.env\b)\b",
             re.IGNORECASE,
         ),
     ),
     (
         "role_escalation",
         re.compile(
-            r"\b(?:act|behave|respond)\s+as\s+(?:an?\s+)?"
-            r"(?:admin(?:istrator)?|root|superuser|developer|system)\b",
+            r"\b(?:act|behave|respond|pretend\s+to\s+be|you\s+are\s+now|from\s+now\s+on(?:,\s*you)?)\s+(?:as\s+)?(?:an?\s+)?"
+            r"(?:admin(?:istrator)?|root|superuser|developer|system|unrestricted|dan)\b",
             re.IGNORECASE,
         ),
     ),
@@ -91,6 +96,20 @@ _PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
     (
         "jailbreak",
         re.compile(r"\b(?:jailbreak|developer\s+mode|do\s+anything\s+now)\b", re.IGNORECASE),
+    ),
+    (
+        "delimiter_injection",
+        re.compile(
+            r"(<\|(im_start|im_end|system|assistant|endoftext)\|>|\[/?INST\]|<<\s*/?\s*SYS\s*>>|###\s*(system|assistant)\b)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "tool_override",
+        re.compile(
+            r"\b(?:call|invoke|run|execute|use)\b[\s\S]{0,40}?\b(?:query_tool|read_csv_tool|read_photo_tool|validate_tool|summary_tool|export_tool)\b",
+            re.IGNORECASE,
+        ),
     ),
     (
         "instruction_boundary_spoof",
@@ -267,6 +286,8 @@ def detect_injection(text: str) -> Optional[str]:
 
 
 def screen_agent_input(text: str) -> None:
+    if len(text or "") > MAX_AGENT_INPUT_CHARS:
+        raise PromptInjectionError("input_too_long")
     finding = find_prompt_injection(text)
     if finding is not None:
         raise PromptInjectionError(finding.rule)

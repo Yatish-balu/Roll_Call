@@ -106,8 +106,11 @@ def authorize_tool(tool_name: str, actor_role: Union[Role, str, _TrustedInternal
         )
 
 
-def require_tool_access(tool_name: str, role: Optional[Role]) -> None:
+def require_tool_access(tool_name: str, role: Optional[Union[Role, str, _TrustedInternalExecution]]) -> None:
     """Compatibility alias for authorize_tool."""
+    policy = TOOL_POLICIES.get(tool_name)
+    if policy is None:
+        raise ToolAuthorizationError(f"Tool '{tool_name}' is not recognized or permitted.")
     authorize_tool(tool_name, role)
 
 
