@@ -32,31 +32,31 @@ if str(_BACKEND_DIR) not in sys.path:
 _REPO_ROOT = _BACKEND_DIR.parent
 _LIVE_DB = _REPO_ROOT / "data" / "attendance.db"
 
+_ISOLATED_DIR = tempfile.mkdtemp(prefix="rollcall_test_db_")
+_ISOLATED_DB = Path(_ISOLATED_DIR) / "attendance.db"
 if _LIVE_DB.exists():
-    _ISOLATED_DIR = tempfile.mkdtemp(prefix="rollcall_test_db_")
-    _ISOLATED_DB = Path(_ISOLATED_DIR) / "attendance.db"
     shutil.copy2(_LIVE_DB, _ISOLATED_DB)
-    os.environ["SQLITE_PATH"] = str(_ISOLATED_DB)
-    os.environ["DATABASE_PATH"] = str(_ISOLATED_DB)
-    # Tests run against the SQLite backend, never against Supabase.
-    os.environ["DB_BACKEND"] = "sqlite"
+os.environ["SQLITE_PATH"] = str(_ISOLATED_DB)
+os.environ["DATABASE_PATH"] = str(_ISOLATED_DB)
+# Tests run against the SQLite backend, never against Supabase.
+os.environ["DB_BACKEND"] = "sqlite"
 
-    # Bring the isolated copy to the current schema head so that the
-    # application models and the database agree. The live database is only
-    # read (copied) here and is never migrated.
-    try:
-        from alembic import command
-        from alembic.config import Config
+# Bring the isolated copy (or fresh CI database) to the current schema head so
+# that the application models and the database agree. The live database is only
+# read (copied) here and is never migrated.
+try:
+    from alembic import command
+    from alembic.config import Config
 
-        _alembic_cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
-        _alembic_cfg.set_main_option(
-            "sqlalchemy.url", "sqlite:///" + str(_ISOLATED_DB).replace("\\", "/")
-        )
-        command.upgrade(_alembic_cfg, "head")
-    except Exception as _migration_error:  # pragma: no cover - surfaced in the logs
-        print(
-            f"WARNING: the isolated test database could not be migrated to head: {_migration_error}"
-        )
+    _alembic_cfg = Config(str(_BACKEND_DIR / "alembic.ini"))
+    _alembic_cfg.set_main_option(
+        "sqlalchemy.url", "sqlite:///" + str(_ISOLATED_DB).replace("\\", "/")
+    )
+    command.upgrade(_alembic_cfg, "head")
+except Exception as _migration_error:  # pragma: no cover - surfaced in the logs
+    print(
+        f"WARNING: the isolated test database could not be migrated to head: {_migration_error}"
+    )
 
 import pytest
 from sqlalchemy.orm import sessionmaker

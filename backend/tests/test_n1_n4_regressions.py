@@ -447,14 +447,9 @@ def test_unknown_user_logins_are_rate_limited_by_ip(monkeypatch):
     now_dt = datetime.now(timezone.utc)
     now_iso = _iso(now_dt)
     ip = "203.0.113.77"
-    factory = get_sync_session_factory()
+    engine = _make_engine()
+    factory = _seed(engine)
 
-    def _clean():
-        with factory() as db:
-            db.execute(__import__("sqlalchemy").text("DELETE FROM login_attempts WHERE ip_address = :ip"), {"ip": ip})
-            db.commit()
-
-    _clean()
     try:
         with factory() as db:
             assert _check_rate_limit(db, "ghost_user", now_dt, ip_address=ip) is True
@@ -464,7 +459,7 @@ def test_unknown_user_logins_are_rate_limited_by_ip(monkeypatch):
             # quota must still block the attempt.
             assert _check_rate_limit(db, "ghost_user", now_dt, ip_address=ip) is False
     finally:
-        _clean()
+        engine.dispose()
 
 
 def test_known_user_failures_are_rate_limited_even_from_a_new_ip():
@@ -473,19 +468,11 @@ def test_known_user_failures_are_rate_limited_even_from_a_new_ip():
     now_dt = datetime.now(timezone.utc)
     now_iso = _iso(now_dt)
     ip = "203.0.113.78"
-    factory = get_sync_session_factory()
+    engine = _make_engine()
+    factory = _seed(engine)
     # login_attempts.user_id is a real FK, so use an existing account.
-    target = "faculty_cn"
+    target = "faculty_ds"
 
-    def _clean():
-        with factory() as db:
-            db.execute(
-                __import__("sqlalchemy").text("DELETE FROM login_attempts WHERE user_id = :u"),
-                {"u": target},
-            )
-            db.commit()
-
-    _clean()
     try:
         with factory() as db:
             for _ in range(5):
@@ -495,7 +482,7 @@ def test_known_user_failures_are_rate_limited_even_from_a_new_ip():
             # A different account from a clean IP is unaffected.
             assert _check_rate_limit(db, "faculty_ml", now_dt, ip_address="198.51.100.9") is True
     finally:
-        _clean()
+        engine.dispose()
 
 
 def test_authentication_fails_closed_when_database_is_unavailable(api, monkeypatch):

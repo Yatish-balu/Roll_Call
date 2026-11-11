@@ -17,9 +17,10 @@ useDefault = true
 # files - does not match these patterns and is still reported. The same lines
 # also carry inline `# gitleaks:allow` comments for the working-tree scan.
 [allowlist]
-description = "Exact test-only dummy JWT signing values used by backend unit tests"
+description = "Exact test-only dummy JWT signing values and truncated doc header example"
 regexTarget = "secret"
 regexes = [
     '''^test-secret-key-for-n6-gap-tests-at-least-32-characters$''',
     '''^person1-test-secret-key-at-least-32-characters-long$''',
+    '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9(\.\.\.)?$''',
 ]

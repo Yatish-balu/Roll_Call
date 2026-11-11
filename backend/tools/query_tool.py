@@ -253,6 +253,9 @@ def _get_readonly_conn(
     if hasattr(db_target, "execute") and (hasattr(db_target, "commit") or hasattr(db_target, "flush")):
         return _ReadOnlyDB("sqlalchemy", db_target, should_close=False)
 
+    if isinstance(db_target, os.PathLike):
+        db_target = os.fspath(db_target)
+
     # 3. Check backend first if default or supabase target
     backend = get_backend()
     if backend == "supabase" and (db_target == DEFAULT_DB_PATH or db_target == "default"):
