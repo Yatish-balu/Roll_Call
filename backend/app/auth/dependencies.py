@@ -11,7 +11,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.auth.jwt import AuthenticationError, decode_and_verify_token
 from app.auth.roles import Role, normalize_role, role_satisfies
 from app.db.connection import get_sync_session_factory
-from app.db.models import User
+from app.db.models import AuthSession, User
 from app.schemas.auth import AuthenticatedUser
 
 
@@ -54,15 +54,33 @@ def get_current_user(
         SessionLocal = get_sync_session_factory()
         with SessionLocal() as db:
             db_user = db.get(User, user.user_id)
-            if db_user is not None:
-                if not db_user.is_active:
+            if db_user is None:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User account no longer exists.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            if not db_user.is_active:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="User account is deactivated.",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            # Database role is authoritative
+            user.role = normalize_role(db_user.role)
+            session_id = user.claims.get("sid")
+            if session_id:
+                auth_session = db.get(AuthSession, str(session_id))
+                if (
+                    auth_session is None
+                    or auth_session.user_id != user.user_id
+                    or auth_session.revoked_at is not None
+                ):
                     raise HTTPException(
                         status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="User account is deactivated.",
+                        detail="Authentication session is no longer active.",
                         headers={"WWW-Authenticate": "Bearer"},
                     )
-                # Database role is authoritative
-                user.role = normalize_role(db_user.role)
     except HTTPException:
         raise
     except Exception as exc:

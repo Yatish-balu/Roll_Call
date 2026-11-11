@@ -38,6 +38,8 @@ from tools.validate_tool import validate_tool, ValidationResult
 from tools.summary_tool import summary_tool, SummaryReport
 from tools.query_tool import query_tool, QueryResult, NO_DATA_MESSAGE
 from tools.export_tool import export_tool, ExportResult
+from app.security.ai_policy import authorize_tool
+from app.auth.roles import Role
 
 logger = logging.getLogger("rollcall.agent")
 
@@ -192,7 +194,7 @@ class AgentResponse:
 class ToolRegistry:
     """Maintains definitions and handlers for registered tools."""
 
-    def __init__(self, tool_logger: ToolLogger, scope: Any = None) -> None:
+    def __init__(self, tool_logger: ToolLogger, scope: Any = None, actor_role: Any = Role.VIEWER) -> None:
         self.logger = tool_logger
         self.tools: Dict[str, ToolDefinition] = {}
         self.validated_requests: set[str] = set()
@@ -200,6 +202,11 @@ class ToolRegistry:
         # attendance/session/student read performed by a tool is restricted to
         # this scope, so the model can never widen its own access.
         self.scope = scope
+        # Verified role of the caller (from the auth context). The registry
+        # always enforces the server-side tool permission matrix before any
+        # handler runs. Missing/invalid roles fail closed as VIEWER; trusted
+        # internal jobs must pass TRUSTED_INTERNAL explicitly.
+        self.actor_role = actor_role
         self._register_default_tools()
 
     def register(self, tool_def: ToolDefinition) -> None:
@@ -246,6 +253,22 @@ class ToolRegistry:
                 error_message=err,
             )
             raise ValueError(err)
+
+        # Server-side tool authorization (defense in depth). The role comes from
+        # the verified authentication context, never from the prompt/model.
+        try:
+            authorize_tool(name, self.actor_role)
+        except PermissionError as exc:
+            self.logger.log(
+                request_id=request_id,
+                tool_name=name,
+                arguments=kwargs,
+                success=False,
+                result_summary="Tool authorization denied",
+                duration_seconds=0.0,
+                error_message=str(exc),
+            )
+            raise
 
         start_time = time.perf_counter()
         try:
@@ -387,7 +410,7 @@ class ToolRegistry:
                     "properties": {
                         "query_type": {
                             "type": "string",
-                            "enum": ["attendance", "session_stats", "absentees", "students", "sql"],
+                            "enum": ["attendance", "session_stats", "absentees", "students"],
                             "description": "Category of query to perform.",
                         },
                         "session_id": {"type": "string", "description": "Target session ID."},
@@ -441,14 +464,18 @@ class AttendanceAgent:
         confidence_threshold: float = CONFIDENCE_CONFIRMATION_THRESHOLD,
         db_target: Optional[Union[str, sqlite3.Connection, SqlAlchemySession]] = None,
         scope: Any = None,
+        actor_role: Any = Role.VIEWER,
     ) -> None:
         self.tool_logger = tool_logger or ToolLogger()
         # Kept under the historical name: other code paths read ``agent.logger``.
         self.logger = self.tool_logger
-        self.registry = ToolRegistry(tool_logger=self.tool_logger, scope=scope)
+        self.registry = ToolRegistry(
+            tool_logger=self.tool_logger, scope=scope, actor_role=actor_role
+        )
         self.confidence_threshold = confidence_threshold
         self.db_target = db_target
         self.scope = scope
+        self.actor_role = actor_role
 
     def get_logs(self, request_id: Optional[str] = None) -> List[ToolCallLog]:
         return self.logger.get_logs(request_id)

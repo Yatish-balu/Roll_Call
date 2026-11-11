@@ -16,6 +16,7 @@ from app.agent import (
     SYSTEM_INSTRUCTION,
     CONFIDENCE_CONFIRMATION_THRESHOLD,
 )
+from app.security.ai_policy import TRUSTED_INTERNAL
 from app.db.schema import init_db
 from app.db.crud import insert_student, insert_room, insert_session, insert_attendance
 from tools.read_photo_tool import PhotoExtractionResult, PhotoRow, ExtractionSource
@@ -38,7 +39,7 @@ def mock_db():
 
 @pytest.fixture
 def agent(mock_db):
-    return AttendanceAgent(db_target=mock_db)
+    return AttendanceAgent(actor_role=TRUSTED_INTERNAL, db_target=mock_db)
 
 
 @pytest.fixture

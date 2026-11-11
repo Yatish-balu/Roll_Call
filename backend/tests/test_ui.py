@@ -21,6 +21,16 @@ import pandas as pd
 import pytest
 
 from app.agent import AttendanceAgent
+from app.security.ai_policy import TRUSTED_INTERNAL
+
+
+def test_legacy_streamlit_entry_requires_explicit_local_opt_in(monkeypatch):
+    from app.ui import main
+
+    monkeypatch.delenv("APP_ENV", raising=False)
+    monkeypatch.delenv("LEGACY_STREAMLIT_ENABLED", raising=False)
+    with pytest.raises(RuntimeError, match="LEGACY_STREAMLIT_ENABLED=true"):
+        main()
 from app.db import init_db, insert_student, insert_room, insert_session, get_attendance_by_session
 from app.ui import (
     process_uploaded_file,
@@ -69,7 +79,7 @@ def test_ui_upload_clean_csv(tmp_path):
     ).encode("utf-8")
     uploaded = MockUploadedFile("clean_test.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
 
     resp, tmp_file = process_uploaded_file(
         agent,
@@ -95,7 +105,7 @@ def test_ui_upload_invalid_csv_triggers_confirmation():
     ).encode("utf-8")
     uploaded = MockUploadedFile("bad_test.csv", csv_content)
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
 
     resp, tmp_file = process_uploaded_file(
         agent,
@@ -121,7 +131,7 @@ def test_ui_table_corrections_and_revalidation():
         {"usn": "1MS21CS002", "name": "Bob Jones", "branch": "CSE", "room_id": "LH-101", "status": "ABSENT"},
     ]
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
 
     resp, tmp_file = revalidate_and_summarise(
         agent,
@@ -157,7 +167,7 @@ def test_ui_photo_upload_low_confidence_requires_confirmation(monkeypatch):
         source=ExtractionSource.OCR_FALLBACK,
     )
 
-    agent = AttendanceAgent()
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL)
     agent.registry.tools["read_photo_tool"].handler = MagicMock(return_value=mock_result)
 
     uploaded = MockUploadedFile("test_sheet.jpg", b"fake_image_bytes")
@@ -216,7 +226,7 @@ def test_ui_attendance_calculations():
 
 def test_ui_chat_agent_query(test_db):
     """Verify chat tab handles agent database questions and anti-hallucination queries."""
-    agent = AttendanceAgent(db_target=test_db)
+    agent = AttendanceAgent(actor_role=TRUSTED_INTERNAL, db_target=test_db)
 
     # 1. Valid question
     resp = agent.process_request("Who was absent in session SESS-20261024-01?")

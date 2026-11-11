@@ -146,6 +146,10 @@ def client(engine, monkeypatch):
 
 def test_jwt_secret_matrix(monkeypatch):
     monkeypatch.setenv("APP_ENV", "production")
+    # Isolate from any operator .env file: an unset secret must actually be unset.
+    monkeypatch.delenv("JWT_SECRET", raising=False)
+    monkeypatch.delenv("JWT_SECRET_KEY", raising=False)
+    monkeypatch.delenv("SUPABASE_JWT_SECRET", raising=False)
     # unset / empty
     with pytest.raises(ValueError) as exc:
         jwt_module.validate_jwt_secret_configuration(None)

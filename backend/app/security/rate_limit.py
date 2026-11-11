@@ -42,6 +42,7 @@ class LimitScope(str, Enum):
     LOGIN = "login"
     REFRESH = "refresh"
     PASSWORD_RESET = "password_reset"
+    PASSWORD_CHANGE = "password_change"
     MFA_VERIFY = "mfa_verify"
     UPLOAD = "upload"
     API = "api"
@@ -66,6 +67,7 @@ DEFAULT_POLICIES: Dict[LimitScope, LimitPolicy] = {
     LimitScope.LOGIN: LimitPolicy(limit=5, window_seconds=600, lockout_seconds=0, base_delay_seconds=0.2),
     LimitScope.REFRESH: LimitPolicy(limit=30, window_seconds=600, lockout_seconds=300, base_delay_seconds=0.0),
     LimitScope.PASSWORD_RESET: LimitPolicy(limit=3, window_seconds=3600, lockout_seconds=1800, base_delay_seconds=0.0),
+    LimitScope.PASSWORD_CHANGE: LimitPolicy(limit=5, window_seconds=300, lockout_seconds=900, base_delay_seconds=0.0),
     LimitScope.MFA_VERIFY: LimitPolicy(limit=5, window_seconds=300, lockout_seconds=900, base_delay_seconds=0.0),
     LimitScope.UPLOAD: LimitPolicy(limit=20, window_seconds=600, lockout_seconds=300, base_delay_seconds=0.0),
     LimitScope.API: LimitPolicy(limit=120, window_seconds=60, lockout_seconds=0, base_delay_seconds=0.0),

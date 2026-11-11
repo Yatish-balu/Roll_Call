@@ -59,7 +59,7 @@ Roll_Call/
 │   │   ├── read_photo_tool.py                 # EasyOCR / Gemini Vision photo attendance extraction
 │   │   ├── summary_tool.py                    # Four-state metrics aggregation
 │   │   └── validate_tool.py                   # Roster and rule validation guardrail
-│   ├── tests/                                 # Pytest test suite (332 passing tests)
+│   ├── tests/                                 # Pytest test suite (698 passing tests)
 │   ├── alembic/                               # Alembic migration environment
 │   ├── scripts/                               # Evaluation & benchmarking utilities
 │   ├── alembic.ini                            # Migration runner configuration
@@ -202,7 +202,7 @@ When `APP_ENV=production`, the application performs a deliberate database connec
 
 ## Running Tests
 
-All 332 automated tests can be executed from either the repository root or the `backend/` directory:
+All 698 automated tests can be executed from either the repository root or the `backend/` directory:
 
 ### From Repository Root
 
@@ -265,6 +265,25 @@ python backend/scripts/generate_complete_report_pdf.py
 
 ---
 
+## Security & Operations
+
+Person 2 security controls (HTTP headers, CORS, AI authorization, dependency
+scanning, edge proxy, backups, monitoring) are documented in
+[`docs/SECURITY_OPERATIONS.md`](docs/SECURITY_OPERATIONS.md).
+
+```powershell
+# Run dependency audits + frontend checks
+pwsh ./scripts/security-scan.ps1
+
+# Create a backup (SQLite and/or PostgreSQL)
+pwsh ./deploy/backup/backup.ps1 -RetentionDays 30
+```
+
+Deployment examples live in [`deploy/`](deploy/): Nginx/Caddy TLS + security
+headers, Promtail log shipping and alert guidance.
+
+---
+
 ## Implementation Status
 
 | Component | Status | Technology |
@@ -274,7 +293,7 @@ python backend/scripts/generate_complete_report_pdf.py
 | **Database Layer** | Implemented | SQLite + SQLAlchemy 2.0 ORM + Alembic |
 | **AI Tool-Calling Agent** | Implemented | Deterministic pipeline, EasyOCR, Gemini Vision |
 | **Rate Limiting & Hardening** | Implemented | In-memory sliding-window, magic byte validation |
-| **Automated Test Suite** | 332 Passing | Pytest, TestClient, In-memory isolation |
+| **Automated Test Suite** | 698 Passing (2 skipped) | Pytest, TestClient, In-memory isolation |
 | **Monorepo Separation** | Implemented | `backend/`, `frontend/`, `data/`, `docs/` |
 | **Next.js Web Frontend** | Planned (Phase 7.1) | Next.js 14+, TypeScript, Tailwind CSS |
 | **Supabase PostgreSQL** | Planned | Remote Supabase deployment with Auth & RLS |

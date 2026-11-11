@@ -35,6 +35,8 @@ logger = logging.getLogger("rollcall.seed")
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password using bcrypt."""
+    if len(password.encode("utf-8")) > 72:
+        raise ValueError("Password must not exceed 72 UTF-8 bytes for bcrypt.")
     return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 

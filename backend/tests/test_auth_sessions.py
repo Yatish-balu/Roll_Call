@@ -329,6 +329,46 @@ def test_logout_revokes_session_and_clears_cookie(client, session_test_db):
     assert ref_res.status_code == 401
 
 
+def test_login_refresh_logout_browser_cors_preflights(client):
+    """Browser-equivalent preflights allow the frontend's CSRF headers."""
+    origin = "http://localhost:5173"
+    csrf_headers = "content-type,x-requested-with,x-rollcall-csrf"
+    for path, requested_headers in (
+        ("/api/v1/auth/login", "content-type"),
+        ("/api/v1/auth/refresh", csrf_headers),
+        ("/api/v1/auth/logout", csrf_headers),
+    ):
+        preflight = client.options(
+            path,
+            headers={
+                "Origin": origin,
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": requested_headers,
+            },
+        )
+        assert preflight.status_code == 200
+        assert preflight.headers.get("access-control-allow-origin") == origin
+        allowed = preflight.headers.get("access-control-allow-headers", "").lower()
+        assert all(header in allowed for header in requested_headers.split(","))
+
+    login = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "teacher_alice", "password": "FacultyPass123!"},
+        headers={"Origin": origin},
+    )
+    assert login.status_code == 200
+    refresh = client.post(
+        "/api/v1/auth/refresh",
+        headers={"Origin": origin, "X-Requested-With": "XMLHttpRequest"},
+    )
+    assert refresh.status_code == 200
+    logout = client.post(
+        "/api/v1/auth/logout",
+        headers={"Origin": origin, "X-RollCall-CSRF": "1"},
+    )
+    assert logout.status_code == 200
+
+
 def test_revoked_session_cannot_refresh(client, session_test_db):
     """Test 12: An explicitly revoked session cannot be refreshed."""
     engine, SessionLocal, _ = session_test_db

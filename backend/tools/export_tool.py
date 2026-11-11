@@ -102,6 +102,28 @@ def _validate_output_path(output_path: Union[str, Path], overwrite: bool = False
     return path
 
 
+_SPREADSHEET_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _neutralize_spreadsheet_formulas(frame: Optional[pd.DataFrame]) -> Optional[pd.DataFrame]:
+    """Escape untrusted text cells that spreadsheet programs may execute."""
+    if frame is None:
+        return None
+    safe = frame.copy()
+
+    def escape(value: Any) -> Any:
+        if isinstance(value, str):
+            probe = value.lstrip(" \t\r\n")
+            if value.startswith(_SPREADSHEET_FORMULA_PREFIXES) or probe.startswith(("=", "+", "-", "@")):
+                return "'" + value
+        return value
+
+    for column in safe.columns:
+        if safe[column].dtype == object or pd.api.types.is_string_dtype(safe[column].dtype):
+            safe[column] = safe[column].map(escape)
+    return safe
+
+
 def export_to_excel(
     data: Union[pd.DataFrame, List[Dict[str, Any]], SummaryReport, Dict[str, Any]],
     output_path: Union[str, Path],
@@ -118,6 +140,9 @@ def export_to_excel(
     """
     target_path = _validate_output_path(output_path, overwrite=overwrite)
     detail_df, room_df, branch_df = _prepare_export_dataframes(data)
+    detail_df = _neutralize_spreadsheet_formulas(detail_df)
+    room_df = _neutralize_spreadsheet_formulas(room_df)
+    branch_df = _neutralize_spreadsheet_formulas(branch_df)
 
     sheets_written: List[str] = []
     total_rows = 0

@@ -28,6 +28,7 @@ if str(project_root) not in sys.path:
     sys.path.insert(0, str(project_root))
 
 from app.agent import AttendanceAgent, AgentResponse, CONFIDENCE_CONFIRMATION_THRESHOLD
+from app.security.ai_policy import TRUSTED_INTERNAL
 from app.db import (
     DEFAULT_DB_PATH,
     get_connection,
@@ -60,7 +61,11 @@ def get_or_create_agent(db_target: Optional[Union[str, Path]] = DEFAULT_DB_PATH)
     """Return or initialize an AttendanceAgent instance with the active database target."""
     target_str = str(db_target) if db_target else None
     if "agent" not in st.session_state or st.session_state.get("agent_db_target") != target_str:
-        st.session_state["agent"] = AttendanceAgent(db_target=target_str)
+        # This legacy interface is unauthenticated and only permitted in
+        # development. Production startup is blocked above.
+        st.session_state["agent"] = AttendanceAgent(
+            db_target=target_str, actor_role=TRUSTED_INTERNAL
+        )
         st.session_state["agent_db_target"] = target_str
     return st.session_state["agent"]
 
@@ -84,7 +89,7 @@ def process_uploaded_file(
     if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
         raw_bytes = uploaded_file.getbuffer() if hasattr(uploaded_file, "getbuffer") else uploaded_file.read()
         if not isinstance(raw_bytes, bytes) or not raw_bytes:
-            return AttendanceAgent().process_request(
+            return AttendanceAgent(actor_role=TRUSTED_INTERNAL).process_request(
                 user_input=f"Process attendance file: {filename}",
                 file_path=None,
             ), Path(filename)
@@ -628,6 +633,18 @@ def render_ask_tab(agent: AttendanceAgent) -> None:
 # ==============================================================================
 
 def main() -> None:
+    # This unauthenticated UI can invoke trusted internal AI tools. Require an
+    # explicit local-development opt-in; it must never be deployed in prod.
+    if (
+        os.getenv("APP_ENV", "").strip().lower() != "development"
+        or os.getenv("LEGACY_STREAMLIT_ENABLED", "false").strip().lower()
+        not in {"1", "true", "yes", "on"}
+    ):
+        raise RuntimeError(
+            "The legacy Streamlit UI requires APP_ENV=development and "
+            "LEGACY_STREAMLIT_ENABLED=true. Use the authenticated React application in production."
+        )
+
     st.set_page_config(
         page_title="RollCall AI — Intelligent Attendance Agent",
         page_icon="🎓",

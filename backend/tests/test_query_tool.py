@@ -151,6 +151,26 @@ def test_safe_sql_blocks_unauthorized_tables():
         validate_read_only_sql("SELECT name FROM sqlite_master")
 
 
+@pytest.mark.parametrize("sql", [
+    'SELECT * FROM "sqlite_master"',
+    "SELECT * FROM [sqlite_master]",
+    "SELECT * FROM `sqlite_master`",
+    'SELECT * FROM "main"."students"',
+])
+def test_safe_sql_rejects_quoted_and_schema_qualified_table_names(sql):
+    with pytest.raises(ValueError):
+        validate_read_only_sql(sql)
+
+
+def test_scoped_custom_sql_fails_closed():
+    class Scoped:
+        unrestricted = False
+
+    result = safe_sql_query("SELECT * FROM attendance", scope=Scoped())
+    assert result.found is False
+    assert result.metadata["error"] == "scoped_custom_sql_disabled"
+
+
 def test_query_tool_dispatcher(populated_db):
     # Dispatch attendance
     res1 = query_tool("attendance", session_id="SESS-01", db_target=populated_db)

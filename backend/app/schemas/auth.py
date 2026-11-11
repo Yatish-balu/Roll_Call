@@ -41,8 +41,9 @@ class AuthenticatedUser(BaseModel):
 
 class LoginRequest(BaseModel):
     """User login credential payload."""
-    user_id: str = Field(..., description="Unique user identifier", min_length=1)
-    password: str = Field("", description="User plaintext password")
+    user_id: str = Field(..., description="Unique user identifier", min_length=1, max_length=128)
+    password: str = Field("", description="User plaintext password", max_length=1024)
+    mfa_code: Optional[str] = Field(None, description="TOTP or single-use recovery code", max_length=64)
     admin_key: Optional[str] = Field(None, description="Administrative authorization key required for ADMIN accounts")
     remember_me: bool = Field(default=False, description="Whether to establish a persistent 7-day session")
 
