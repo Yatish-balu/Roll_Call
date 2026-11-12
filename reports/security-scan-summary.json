@@ -1,0 +1,27 @@
+﻿[
+    {
+        "Check":  "Bandit (medium/high)",
+        "Status":  "PASS",
+        "ExitCode":  0
+    },
+    {
+        "Check":  "pip-audit (backend requirements)",
+        "Status":  "PASS",
+        "ExitCode":  0
+    },
+    {
+        "Check":  "gitleaks (committed secrets)",
+        "Status":  "SKIPPED",
+        "ExitCode":  127
+    },
+    {
+        "Check":  "npm audit (frontend)",
+        "Status":  "PASS",
+        "ExitCode":  0
+    },
+    {
+        "Check":  "Adversarial attack suite",
+        "Status":  "PASS",
+        "ExitCode":  0
+    }
+]
