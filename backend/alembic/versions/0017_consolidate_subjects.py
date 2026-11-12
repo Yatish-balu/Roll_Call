@@ -44,33 +44,50 @@ def upgrade() -> None:
         op.create_index("idx_faculty_subjects_user_id", "faculty_subjects", ["user_id"], unique=False)
         op.create_index("idx_faculty_subjects_subject_code", "faculty_subjects", ["subject_code"], unique=False)
     else:
-        # Table exists: check columns
         fs_cols = {c["name"] for c in insp.get_columns("faculty_subjects")}
-        if "semester" not in fs_cols:
-            op.add_column("faculty_subjects", sa.Column("semester", sa.Integer(), nullable=True))
+        uqs = {u["name"] for u in insp.get_unique_constraints("faculty_subjects")}
+        fks = {fk["name"] for fk in insp.get_foreign_keys("faculty_subjects")}
 
-        # In PostgreSQL, make dept_id nullable and relax FK if needed
-        if not _sqlite_dialect():
+        if _sqlite_dialect():
+            with op.batch_alter_table("faculty_subjects") as batch_op:
+                if "semester" not in fs_cols:
+                    batch_op.add_column(sa.Column("semester", sa.Integer(), nullable=True))
+                batch_op.alter_column("dept_id", existing_type=sa.String(), nullable=True)
+                if "uq_faculty_subject_dept" in uqs:
+                    batch_op.drop_constraint("uq_faculty_subject_dept", type_="unique")
+                if "uq_faculty_subject" not in uqs:
+                    batch_op.create_unique_constraint("uq_faculty_subject", ["user_id", "subject_code"])
+                if "fk_faculty_subjects_subject_code" in fks:
+                    batch_op.drop_constraint("fk_faculty_subjects_subject_code", type_="foreignkey")
+                if "fk_faculty_subjects_dept_id" in fks:
+                    batch_op.drop_constraint("fk_faculty_subjects_dept_id", type_="foreignkey")
+        else:
+            if "semester" not in fs_cols:
+                op.add_column("faculty_subjects", sa.Column("semester", sa.Integer(), nullable=True))
             try:
                 op.alter_column("faculty_subjects", "dept_id", nullable=True)
             except Exception:
                 pass
-            try:
-                op.drop_constraint("fk_faculty_subjects_dept_id", "faculty_subjects", type_="foreignkey")
-            except Exception:
-                pass
-            try:
-                op.drop_constraint("fk_faculty_subjects_subject_code", "faculty_subjects", type_="foreignkey")
-            except Exception:
-                pass
-
-        # Ensure UNIQUE(user_id, subject_code)
-        uqs = {u["name"] for u in insp.get_unique_constraints("faculty_subjects")}
-        if "uq_faculty_subject" not in uqs:
-            try:
-                op.create_unique_constraint("uq_faculty_subject", "faculty_subjects", ["user_id", "subject_code"])
-            except Exception:
-                pass
+            if "uq_faculty_subject_dept" in uqs:
+                try:
+                    op.drop_constraint("uq_faculty_subject_dept", "faculty_subjects", type_="unique")
+                except Exception:
+                    pass
+            if "uq_faculty_subject" not in uqs:
+                try:
+                    op.create_unique_constraint("uq_faculty_subject", "faculty_subjects", ["user_id", "subject_code"])
+                except Exception:
+                    pass
+            if "fk_faculty_subjects_subject_code" in fks:
+                try:
+                    op.drop_constraint("fk_faculty_subjects_subject_code", "faculty_subjects", type_="foreignkey")
+                except Exception:
+                    pass
+            if "fk_faculty_subjects_dept_id" in fks:
+                try:
+                    op.drop_constraint("fk_faculty_subjects_dept_id", "faculty_subjects", type_="foreignkey")
+                except Exception:
+                    pass
 
     # 2. Migrate existing rows from teacher_subjects to faculty_subjects
     if "teacher_subjects" in tables:

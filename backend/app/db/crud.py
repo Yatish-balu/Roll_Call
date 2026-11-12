@@ -35,6 +35,8 @@ from app.db.models import (
     User,
     FacultySubject,
     TeacherSubject,
+    Subject,
+    Department,
     AuditLog,
     AuditChainHead,
     LoginAttempt,
