@@ -74,7 +74,7 @@ def test_five_new_tables_crud_and_schema(disposable_sqlite_db):
         assert fetched_user is not None
         assert fetched_user["email"] == "oak@kanto.edu"
 
-        # 2. teacher_subjects
+        # 2. faculty_subjects (consolidated mapping)
         ts = assign_teacher_subject(session, user_id="prof_oak", subject_code="ML")
         session.commit()
         assert ts["subject_code"] == "ML"

@@ -17,7 +17,6 @@ ALTER TABLE IF EXISTS public.students ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.rooms ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.sessions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.attendance ENABLE ROW LEVEL SECURITY;
-ALTER TABLE IF EXISTS public.teacher_subjects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.faculty_subjects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.audit_log ENABLE ROW LEVEL SECURITY;
 ALTER TABLE IF EXISTS public.audit_chain_head ENABLE ROW LEVEL SECURITY;
@@ -47,7 +46,7 @@ DECLARE
     tbl text;
     tbls text[] := ARRAY[
         'users', 'students', 'rooms', 'sessions', 'attendance',
-        'teacher_subjects', 'faculty_subjects', 'audit_log', 'audit_chain_head',
+        'faculty_subjects', 'audit_log', 'audit_chain_head',
         'pending_edits', 'login_attempts', 'auth_sessions', 'auth_refresh_tokens',
         'security_rate_limits', 'security_decoys', 'colleges', 'departments',
         'academic_years', 'semesters', 'sections', 'batches', 'subjects',
@@ -163,11 +162,6 @@ CREATE POLICY attendance_update_authenticated ON public.attendance
 -- -----------------------------------------------------------------------------
 -- 7. Teacher-Subject Assignments Policies
 -- -----------------------------------------------------------------------------
-DROP POLICY IF EXISTS teacher_subjects_read_authenticated ON public.teacher_subjects;
-CREATE POLICY teacher_subjects_read_authenticated ON public.teacher_subjects
-    FOR SELECT TO authenticated
-    USING (true);
-
 DROP POLICY IF EXISTS faculty_subjects_read_authenticated ON public.faculty_subjects;
 CREATE POLICY faculty_subjects_read_authenticated ON public.faculty_subjects
     FOR SELECT TO authenticated

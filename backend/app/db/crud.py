@@ -33,6 +33,7 @@ from app.db.models import (
     Session as DbSession,
     Attendance,
     User,
+    FacultySubject,
     TeacherSubject,
     AuditLog,
     AuditChainHead,
@@ -113,11 +114,13 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
             "is_active": row.is_active,
             "created_at": row.created_at,
         }
-    if isinstance(row, TeacherSubject):
+    if isinstance(row, (TeacherSubject, FacultySubject)):
         return {
             "id": row.id,
             "user_id": row.user_id,
             "subject_code": row.subject_code,
+            "dept_id": getattr(row, "dept_id", None),
+            "semester": getattr(row, "semester", None),
         }
     if isinstance(row, AuditLog):
         return {
@@ -1870,25 +1873,37 @@ def is_teacher_assigned_to_subject(
     user_id: str = "",
     subject_code: str = "",
 ) -> bool:
-    """True when ``user_id`` is mapped to ``subject_code`` in teacher_subjects."""
+    """True when ``user_id`` is mapped to ``subject_code`` in faculty_subjects."""
     clean_user = (user_id or "").strip()
     clean_code = (subject_code or "").strip().upper()
     if not clean_user or not clean_code:
         return False
 
     if isinstance(target, Session):
-        stmt = select(TeacherSubject.id).where(
-            TeacherSubject.user_id == clean_user,
-            func.upper(TeacherSubject.subject_code) == clean_code,
+        stmt = select(FacultySubject.id).where(
+            FacultySubject.user_id == clean_user,
+            func.upper(FacultySubject.subject_code) == clean_code,
         )
         return target.execute(stmt).first() is not None
 
     with _get_conn(target) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
-            (clean_user, clean_code),
-        ).fetchone()
-        return row is not None
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM faculty_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
+                (clean_user, clean_code),
+            ).fetchone()
+            if row is not None:
+                return True
+        except Exception:
+            pass
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
+                (clean_user, clean_code),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
 
 
 def get_attendance_by_student(
@@ -2081,22 +2096,38 @@ def assign_teacher_subject(
     *,
     user_id: str,
     subject_code: str,
+    dept_id: Optional[str] = None,
+    semester: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Assign a subject code to a teacher."""
+    """Assign a subject code to a teacher in faculty_subjects."""
     clean_uid = user_id.strip()
     clean_code = subject_code.strip().upper()
+    clean_dept = dept_id.strip() if dept_id else None
 
     if isinstance(target, Session):
-        ts = TeacherSubject(user_id=clean_uid, subject_code=clean_code)
-        target.add(ts)
+        fs = FacultySubject(
+            user_id=clean_uid,
+            subject_code=clean_code,
+            dept_id=clean_dept,
+            semester=semester,
+        )
+        target.add(fs)
         target.flush()
-        return _row_to_dict(ts)  # type: ignore
+        return _row_to_dict(fs)  # type: ignore
 
-    query = "INSERT INTO teacher_subjects (user_id, subject_code) VALUES (?, ?)"
+    query = "INSERT INTO faculty_subjects (user_id, subject_code, dept_id, semester) VALUES (?, ?, ?, ?)"
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, (clean_uid, clean_code))
-        new_id = cursor.lastrowid
-    return {"id": new_id, "user_id": clean_uid, "subject_code": clean_code}
+        try:
+            cursor = conn.execute(query, (clean_uid, clean_code, clean_dept, semester))
+            new_id = cursor.lastrowid
+        except Exception:
+            # Fallback for unmigrated temporary test fixtures that only have teacher_subjects
+            cursor = conn.execute(
+                "INSERT INTO teacher_subjects (user_id, subject_code) VALUES (?, ?)",
+                (clean_uid, clean_code),
+            )
+            new_id = cursor.lastrowid
+    return {"id": new_id, "user_id": clean_uid, "subject_code": clean_code, "dept_id": clean_dept, "semester": semester}
 
 
 def get_teacher_subjects(
@@ -2104,33 +2135,28 @@ def get_teacher_subjects(
     *,
     user_id: str,
 ) -> List[str]:
-    """List all subject codes assigned to a given teacher across teacher_subjects and faculty_subjects."""
+    """List all subject codes assigned to a given teacher exclusively from faculty_subjects."""
     clean_uid = user_id.strip()
     if isinstance(target, Session):
-        stmt1 = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
-        codes = set(target.execute(stmt1).scalars().all())
-        try:
-            from app.db.models import FacultySubject
-            stmt2 = select(FacultySubject.subject_code).where(FacultySubject.user_id == clean_uid)
-            codes.update(target.execute(stmt2).scalars().all())
-        except Exception:
-            pass
+        stmt = select(FacultySubject.subject_code).where(FacultySubject.user_id == clean_uid)
+        codes = set(target.execute(stmt).scalars().all())
         return sorted(codes)
 
     codes = set()
     with _get_conn(target) as conn:
         try:
-            cursor = conn.execute("SELECT subject_code FROM teacher_subjects WHERE user_id = ?", (clean_uid,))
+            cursor = conn.execute("SELECT subject_code FROM faculty_subjects WHERE user_id = ?", (clean_uid,))
             for r in cursor.fetchall():
                 codes.add(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0])
         except Exception:
             pass
-        try:
-            cursor2 = conn.execute("SELECT subject_code FROM faculty_subjects WHERE user_id = ?", (clean_uid,))
-            for r in cursor2.fetchall():
-                codes.add(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0])
-        except Exception:
-            pass
+        if not codes:
+            try:
+                cursor2 = conn.execute("SELECT subject_code FROM teacher_subjects WHERE user_id = ?", (clean_uid,))
+                for r in cursor2.fetchall():
+                    codes.add(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0])
+            except Exception:
+                pass
     return sorted(codes)
 
 
@@ -2141,43 +2167,32 @@ def list_teacher_subject_mappings(
     subject_code: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    List teacher-subject mappings, optionally filtered by user and/or subject code.
+    List teacher-subject mappings from faculty_subjects exclusively.
     Admin-facing helper for the teacher-subject management endpoint (N4).
-    Harmonizes records from both teacher_subjects and faculty_subjects tables.
     """
     clean_uid = user_id.strip() if user_id else None
     clean_code = subject_code.strip().upper() if subject_code else None
 
     if isinstance(target, Session):
-        stmt = select(TeacherSubject)
+        stmt = select(FacultySubject)
         if clean_uid:
-            stmt = stmt.where(TeacherSubject.user_id == clean_uid)
+            stmt = stmt.where(FacultySubject.user_id == clean_uid)
         if clean_code:
-            stmt = stmt.where(TeacherSubject.subject_code == clean_code)
-        stmt = stmt.order_by(TeacherSubject.user_id.asc(), TeacherSubject.subject_code.asc())
+            stmt = stmt.where(FacultySubject.subject_code == clean_code)
+        stmt = stmt.order_by(FacultySubject.user_id.asc(), FacultySubject.subject_code.asc())
         rows = target.execute(stmt).scalars().all()
-        result = [
-            {"id": r.id, "user_id": r.user_id, "subject_code": r.subject_code}
+        return [
+            {
+                "id": r.id,
+                "user_id": r.user_id,
+                "subject_code": r.subject_code,
+                "dept_id": getattr(r, "dept_id", None),
+                "semester": getattr(r, "semester", None),
+            }
             for r in rows
         ]
-        existing_pairs = {(r["user_id"], r["subject_code"]) for r in result}
-        try:
-            from app.db.models import FacultySubject
-            stmt2 = select(FacultySubject)
-            if clean_uid:
-                stmt2 = stmt2.where(FacultySubject.user_id == clean_uid)
-            if clean_code:
-                stmt2 = stmt2.where(FacultySubject.subject_code == clean_code)
-            fs_rows = target.execute(stmt2).scalars().all()
-            for fs in fs_rows:
-                if (fs.user_id, fs.subject_code) not in existing_pairs:
-                    result.append({"id": fs.id, "user_id": fs.user_id, "subject_code": fs.subject_code, "dept_id": fs.dept_id})
-                    existing_pairs.add((fs.user_id, fs.subject_code))
-        except Exception:
-            pass
-        return result
 
-    query = "SELECT id, user_id, subject_code FROM teacher_subjects WHERE 1=1"
+    query = "SELECT id, user_id, subject_code, dept_id, semester FROM faculty_subjects WHERE 1=1"
     params: List[Any] = []
     if clean_uid:
         query += " AND user_id = ?"
@@ -2193,35 +2208,15 @@ def list_teacher_subject_mappings(
             for r in cursor.fetchall():
                 result.append(_row_to_dict(r))
         except Exception:
-            pass
-        # Harmonize with faculty_subjects
-        existing_pairs = {(r["user_id"], r["subject_code"]) for r in result}
-        try:
-            fs_q = "SELECT id, user_id, subject_code, dept_id FROM faculty_subjects WHERE 1=1"
-            fs_params: List[Any] = []
-            if clean_uid:
-                fs_q += " AND user_id = ?"
-                fs_params.append(clean_uid)
-            if clean_code:
-                fs_q += " AND subject_code = ?"
-                fs_params.append(clean_code)
-            cursor2 = conn.execute(fs_q, tuple(fs_params))
-            for r in cursor2.fetchall():
-                d = _row_to_dict(r)
-                if (d.get("user_id"), d.get("subject_code")) not in existing_pairs:
-                    result.append(d)
-                    existing_pairs.add((d.get("user_id"), d.get("subject_code")))
-        except Exception:
-            pass
+            # Fallback for unmigrated temporary test fixtures
+            try:
+                fb_q = "SELECT id, user_id, subject_code FROM teacher_subjects WHERE 1=1"
+                cursor = conn.execute(fb_q, tuple(params))
+                for r in cursor.fetchall():
+                    result.append(_row_to_dict(r))
+            except Exception:
+                pass
     return result
-    with _get_conn(target) as conn:
-        cursor = conn.execute(query, tuple(params))
-        return [
-            {"id": r["id"], "user_id": r["user_id"], "subject_code": r["subject_code"]}
-            if isinstance(r, sqlite3.Row)
-            else {"id": r[0], "user_id": r[1], "subject_code": r[2]}
-            for r in cursor.fetchall()
-        ]
 
 
 _AUDIT_ROLE_SUPPORT_CACHE: "WeakKeyDictionary[Any, bool]" = WeakKeyDictionary()
@@ -2895,9 +2890,9 @@ def apply_attendance_edit_atomic(
         if not teacher_assigned and sess.coordinator_faculty_id == clean_uid:
             teacher_assigned = True
         if not teacher_assigned and subj_code:
-            stmt = select(TeacherSubject).where(
-                TeacherSubject.user_id == clean_uid,
-                TeacherSubject.subject_code == subj_code,
+            stmt = select(FacultySubject).where(
+                FacultySubject.user_id == clean_uid,
+                FacultySubject.subject_code == subj_code,
             )
             teacher_assigned = session.execute(stmt).first() is not None
 

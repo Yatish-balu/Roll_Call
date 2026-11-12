@@ -103,10 +103,7 @@ def _entry_to_response(entry: TimetableEntry, db: Session) -> TimetableEntryResp
 
 
 def _mapped_subject_codes(db: Session, current_user: AuthenticatedUser) -> List[str]:
-    from app.db.models import TeacherSubject
-
-    stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == current_user.user_id)
-    return sorted({row[0] for row in db.execute(stmt).all()})
+    return crud.get_teacher_subjects(db, user_id=current_user.user_id)
 
 
 def _visible_entry_filter(db: Session, current_user: AuthenticatedUser):

@@ -19,7 +19,7 @@ from sqlalchemy import (
     event,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, foreign
 from app.db.base import Base
 
 
@@ -57,9 +57,18 @@ class User(Base):
     mfa_recovery_codes: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     mfa_last_counter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    teacher_subjects: Mapped[List["TeacherSubject"]] = relationship(
-        "TeacherSubject", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    faculty_subjects: Mapped[List["FacultySubject"]] = relationship(
+        "FacultySubject", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+
+    @property
+    def teacher_subjects(self) -> List["FacultySubject"]:
+        return self.faculty_subjects
+
+    @property
+    def faculty_subjects_new(self) -> List["FacultySubject"]:
+        return self.faculty_subjects
+
     sessions: Mapped[List["Session"]] = relationship(
         "Session",
         primaryjoin="Session.teacher_id == User.user_id",
@@ -79,9 +88,6 @@ class User(Base):
     headed_departments: Mapped[List["Department"]] = relationship(
         "Department", back_populates="head_of_dept"
     )
-    faculty_subjects_new: Mapped[List["FacultySubject"]] = relationship(
-        "FacultySubject", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
-    )
     department_staff_records: Mapped[List["DepartmentStaff"]] = relationship(
         "DepartmentStaff", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -100,23 +106,47 @@ class User(Base):
         return self.name or (self.email.split("@")[0] if self.email else self.user_id)
 
 
-class TeacherSubject(Base):
-    __tablename__ = "teacher_subjects"
+class FacultySubject(Base):
+    """Faculty-subject assignment (consolidated mapping table), with optional department and semester."""
+
+    __tablename__ = "faculty_subjects"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(
         String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
     )
     subject_code: Mapped[str] = mapped_column(String, nullable=False)
+    dept_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, default=None
+    )
+    semester: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, default=None
+    )
 
-    user: Mapped["User"] = relationship("User", back_populates="teacher_subjects")
+    user: Mapped["User"] = relationship("User", back_populates="faculty_subjects")
+    subject: Mapped[Optional["Subject"]] = relationship(
+        "Subject",
+        primaryjoin="foreign(FacultySubject.subject_code) == Subject.subject_code",
+        back_populates="faculty_assignments",
+    )
+    dept: Mapped[Optional["Department"]] = relationship(
+        "Department",
+        primaryjoin="foreign(FacultySubject.dept_id) == Department.dept_id",
+        back_populates="faculty_subjects",
+    )
 
     __table_args__ = (
-        UniqueConstraint("user_id", "subject_code", name="uq_teacher_subject"),
+        UniqueConstraint("user_id", "subject_code", name="uq_faculty_subject"),
+        Index("idx_faculty_subjects_user_id", "user_id"),
+        Index("idx_faculty_subjects_subject_code", "subject_code"),
     )
 
     def __repr__(self) -> str:
-        return f"<TeacherSubject(user_id={self.user_id!r}, subject_code={self.subject_code!r})>"
+        return f"<FacultySubject(user_id={self.user_id!r}, subject_code={self.subject_code!r})>"
+
+
+# Backwards compatibility alias:
+TeacherSubject = FacultySubject
 
 
 class AuditLog(Base):
@@ -644,7 +674,11 @@ class Department(Base):
         "Subject", back_populates="dept", cascade="all, delete-orphan", passive_deletes=True
     )
     faculty_subjects: Mapped[List["FacultySubject"]] = relationship(
-        "FacultySubject", back_populates="dept", cascade="all, delete-orphan", passive_deletes=True
+        "FacultySubject",
+        primaryjoin="Department.dept_id == foreign(FacultySubject.dept_id)",
+        back_populates="dept",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     staff_records: Mapped[List["DepartmentStaff"]] = relationship(
         "DepartmentStaff", back_populates="dept", cascade="all, delete-orphan", passive_deletes=True
@@ -831,7 +865,11 @@ class Subject(Base):
 
     dept: Mapped["Department"] = relationship("Department", back_populates="subjects")
     faculty_assignments: Mapped[List["FacultySubject"]] = relationship(
-        "FacultySubject", back_populates="subject", cascade="all, delete-orphan", passive_deletes=True
+        "FacultySubject",
+        primaryjoin="Subject.subject_code == foreign(FacultySubject.subject_code)",
+        back_populates="subject",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     __table_args__ = (
@@ -840,36 +878,6 @@ class Subject(Base):
 
     def __repr__(self) -> str:
         return f"<Subject(subject_code={self.subject_code!r}, name={self.name!r})>"
-
-
-class FacultySubject(Base):
-    """Faculty-subject-department assignment (extends teacher_subjects with dept scoping)."""
-
-    __tablename__ = "faculty_subjects"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(
-        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
-    )
-    subject_code: Mapped[str] = mapped_column(
-        String, ForeignKey("subjects.subject_code", ondelete="CASCADE"), nullable=False
-    )
-    dept_id: Mapped[str] = mapped_column(
-        String, ForeignKey("departments.dept_id", ondelete="CASCADE"), nullable=False
-    )
-
-    user: Mapped["User"] = relationship("User", back_populates="faculty_subjects_new")
-    subject: Mapped["Subject"] = relationship("Subject", back_populates="faculty_assignments")
-    dept: Mapped["Department"] = relationship("Department", back_populates="faculty_subjects")
-
-    __table_args__ = (
-        UniqueConstraint("user_id", "subject_code", "dept_id", name="uq_faculty_subject_dept"),
-        Index("idx_faculty_subjects_user_id", "user_id"),
-        Index("idx_faculty_subjects_subject_code", "subject_code"),
-    )
-
-    def __repr__(self) -> str:
-        return f"<FacultySubject(user_id={self.user_id!r}, subject_code={self.subject_code!r})>"
 
 
 class DepartmentStaff(Base):

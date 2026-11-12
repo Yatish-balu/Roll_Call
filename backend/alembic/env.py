@@ -77,12 +77,13 @@ def run_migrations_online() -> None:
         # PRAGMA foreign_keys cannot run inside a SQLite transaction, so execute
         # it on the raw DBAPI connection outside the migration transaction.
         raw_dbapi_conn = connection.connection
-        try:
-            cursor = raw_dbapi_conn.cursor()
-            cursor.execute("PRAGMA foreign_keys = OFF")
-            cursor.close()
-        except Exception:
-            pass
+        if connection.dialect.name == "sqlite":
+            try:
+                cursor = raw_dbapi_conn.cursor()
+                cursor.execute("PRAGMA foreign_keys = OFF")
+                cursor.close()
+            except Exception:
+                pass
         context.configure(
             connection=connection,
             target_metadata=target_metadata,

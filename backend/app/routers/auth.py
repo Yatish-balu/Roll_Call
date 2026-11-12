@@ -543,8 +543,7 @@ def login(request: Request, payload: LoginRequest):
                 )
 
         # 10. Fetch assigned subject codes
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
-        subject_codes = [r[0] for r in db.execute(stmt).all()]
+        subject_codes = crud.get_teacher_subjects(db, user_id=clean_uid)
 
         out_response = JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -756,8 +755,7 @@ def refresh(request: Request):
         db.commit()
 
         # Fetch assigned subject codes
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == user.user_id)
-        subject_codes = [r[0] for r in db.execute(stmt).all()]
+        subject_codes = crud.get_teacher_subjects(db, user_id=user.user_id)
 
         # Issue replacement 15-minute access JWT
         exp_dt = now_dt + timedelta(minutes=15)
@@ -889,8 +887,7 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == db_user.user_id)
-        subject_codes = [r[0] for r in db.execute(stmt).all()]
+        subject_codes = crud.get_teacher_subjects(db, user_id=db_user.user_id)
 
         return UserMeResponse(
             user_id=db_user.user_id,
