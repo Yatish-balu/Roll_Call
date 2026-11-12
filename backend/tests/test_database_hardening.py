@@ -180,6 +180,7 @@ def test_postgresql_ssl_asyncpg_connect_args(monkeypatch):
     _set_env(
         monkeypatch,
         APP_ENV="development",
+        DB_BACKEND="supabase",
         DATABASE_URL_ASYNC="postgresql+asyncpg://user:pass@localhost:6543/db",
     )
 
@@ -223,6 +224,41 @@ def test_sqlite_engine_uses_sqlite_driver(monkeypatch):
     _set_env(monkeypatch, APP_ENV="development", DB_BACKEND="sqlite")
     engine = conn_module.create_sync_engine()
     assert engine.url.drivername.startswith("sqlite")
+
+
+# ---------------------------------------------------------------------------
+# 7b. Supabase-only enforcement (no implicit SQLite)
+# ---------------------------------------------------------------------------
+
+def test_supabase_mode_blocks_implicit_raw_sqlite(monkeypatch):
+    _set_env(monkeypatch, APP_ENV="development", DB_BACKEND="supabase")
+    with pytest.raises(RuntimeError, match="Raw SQLite access is disabled"):
+        conn_module.get_connection(":memory:")
+
+
+def test_operator_tool_can_explicitly_opt_into_sqlite(monkeypatch):
+    _set_env(monkeypatch, APP_ENV="development", DB_BACKEND="supabase")
+    conn = conn_module.get_connection(":memory:", allow_sqlite=True)
+    try:
+        assert conn.execute("SELECT 1").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_supabase_engine_requires_a_database_url(monkeypatch):
+    _set_env(
+        monkeypatch,
+        APP_ENV="development",
+        DB_BACKEND="supabase",
+        DATABASE_URL_SYNC="",
+        DATABASE_URL="",
+    )
+    # Module constants may still hold the value loaded from .env at import time.
+    monkeypatch.setattr(conn_module, "DATABASE_URL", "")
+    monkeypatch.setattr(conn_module, "DATABASE_URL_SYNC", "")
+
+    with pytest.raises(RuntimeError, match="DATABASE_URL_SYNC"):
+        conn_module.get_engine()
 
 
 # ---------------------------------------------------------------------------

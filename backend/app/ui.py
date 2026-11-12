@@ -645,6 +645,17 @@ def main() -> None:
             "LEGACY_STREAMLIT_ENABLED=true. Use the authenticated React application in production."
         )
 
+    # The legacy UI is built on raw SQLite access. It is intentionally not
+    # available in Supabase-only mode; use the React app / FastAPI API instead.
+    from app.db import get_backend
+
+    if get_backend() != "sqlite":
+        raise RuntimeError(
+            "The legacy Streamlit UI is SQLite-only and is disabled while the "
+            "application runs on Supabase (DB_BACKEND=supabase). Use the React "
+            "frontend and FastAPI API, or set DB_BACKEND=sqlite for this local tool."
+        )
+
     st.set_page_config(
         page_title="RollCall AI — Intelligent Attendance Agent",
         page_icon="🎓",

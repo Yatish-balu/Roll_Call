@@ -15,11 +15,15 @@ from tools.query_tool import (
 
 
 @pytest.fixture(params=["sqlite", "supabase"])
-def backend_setup(request, tmp_path):
+def backend_setup(request, tmp_path, monkeypatch):
     """
     Parametrized fixture providing database setup for both backends:
     - 'sqlite': creates a temporary SQLite database initialized with schema and seed data.
     - 'supabase': connects using READONLY_DATABASE_URL / DATABASE_URL if available; skips if unconfigured.
+
+    Environment changes use ``monkeypatch`` so they are restored even when the
+    Supabase probe is unreachable and the fixture calls ``pytest.skip()`` before
+    yielding (a plain ``os.environ`` assignment would leak into later tests).
     """
     backend = request.param
     test1_csv = Path(__file__).resolve().parents[2] / "data" / "test1.csv"
@@ -59,30 +63,17 @@ def backend_setup(request, tmp_path):
             )
         conn.close()
 
-        old_backend = os.environ.get("DB_BACKEND")
-        old_sqlite = os.environ.get("SQLITE_PATH")
-        os.environ["DB_BACKEND"] = "sqlite"
-        os.environ["SQLITE_PATH"] = db_path
+        monkeypatch.setenv("DB_BACKEND", "sqlite")
+        monkeypatch.setenv("SQLITE_PATH", db_path)
 
         yield {"backend": "sqlite", "target": db_path, "expected_count": len(records)}
-
-        if old_backend is not None:
-            os.environ["DB_BACKEND"] = old_backend
-        else:
-            os.environ.pop("DB_BACKEND", None)
-
-        if old_sqlite is not None:
-            os.environ["SQLITE_PATH"] = old_sqlite
-        else:
-            os.environ.pop("SQLITE_PATH", None)
 
     elif backend == "supabase":
         ro_url = os.environ.get("READONLY_DATABASE_URL") or os.environ.get("DATABASE_URL")
         if not ro_url:
             pytest.skip("Supabase READONLY_DATABASE_URL or DATABASE_URL not configured")
 
-        old_backend = os.environ.get("DB_BACKEND")
-        os.environ["DB_BACKEND"] = "supabase"
+        monkeypatch.setenv("DB_BACKEND", "supabase")
 
         # This is a genuine integration test against a live managed database.
         # Probe connectivity first: when the managed database is unreachable
@@ -103,11 +94,6 @@ def backend_setup(request, tmp_path):
             )
 
         yield {"backend": "supabase", "target": None, "expected_count": len(records)}
-
-        if old_backend is not None:
-            os.environ["DB_BACKEND"] = old_backend
-        else:
-            os.environ.pop("DB_BACKEND", None)
 
 
 def test_counts_match_test1_csv(backend_setup):

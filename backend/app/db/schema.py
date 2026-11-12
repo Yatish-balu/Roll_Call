@@ -97,8 +97,31 @@ END;
 """
 
 
+def _ensure_postgres_schema(engine: Any) -> Any:
+    """Verify that the Alembic-managed PostgreSQL schema has been applied.
+
+    SQLite is bootstrapped from the idempotent ``SCHEMA_SQL`` script, but the
+    PostgreSQL schema (including triggers and partial unique indexes) is owned
+    by the versioned migrations in ``backend/alembic``. Running ad-hoc DDL here
+    would silently drift from the migration head, so this only checks that the
+    database has been initialized.
+    """
+    from sqlalchemy import text
+
+    with engine.connect() as conn:
+        initialized = conn.execute(
+            text("SELECT to_regclass('public.alembic_version')")
+        ).scalar()
+    if not initialized:
+        raise RuntimeError(
+            "Supabase schema is not initialized. Run `python -m alembic upgrade "
+            "head` from the backend directory before using the database."
+        )
+    return engine
+
+
 def init_db(db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH) -> Any:
-    """Initialize database tables and indexes for SQLite or Supabase Postgres."""
+    """Initialize database tables and indexes for SQLite or verify Supabase Postgres."""
     # If explicitly passed an SQLite connection
     if isinstance(db_target, sqlite3.Connection):
         db_target.executescript(SCHEMA_SQL)
@@ -107,32 +130,13 @@ def init_db(db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH) ->
 
     # If SQLAlchemy Engine is passed
     if hasattr(db_target, "connect") and hasattr(db_target, "begin"):
-        try:
-            from sqlalchemy import text
-            with db_target.begin() as conn:
-                statements = [s.strip() for s in POSTGRES_SCHEMA_SQL.split(";") if s.strip()]
-                for stmt in statements:
-                    conn.execute(text(stmt))
-            return db_target
-        except Exception:
-            raise
+        return _ensure_postgres_schema(db_target)
 
     # Check backend
     backend = get_backend()
     if backend == "supabase" and (db_target == DEFAULT_DB_PATH or db_target is None):
         engine = get_engine(backend="supabase")
-        if engine is not None:
-            try:
-                from sqlalchemy import text
-                with engine.begin() as conn:
-                    # Execute individual statements
-                    statements = [s.strip() for s in POSTGRES_SCHEMA_SQL.split(";") if s.strip()]
-                    for stmt in statements:
-                        conn.execute(text(stmt))
-                return engine
-            except Exception:
-                # Fallback to sqlite if supabase connection fails
-                pass
+        return _ensure_postgres_schema(engine)
 
     conn = get_connection(str(db_target))
     try:

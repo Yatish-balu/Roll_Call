@@ -193,8 +193,12 @@ _SAFE_IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def inspect_database(db_path: str = DEFAULT_DB_PATH) -> Dict[str, Any]:
-    """Inspect existing tables and record counts in the SQLite database."""
-    conn = get_connection(db_path)
+    """Inspect existing tables and record counts in the SQLite database.
+
+    This local CLI is explicitly SQLite-based, so it opts into SQLite access
+    even when the application backend is Supabase.
+    """
+    conn = get_connection(db_path, allow_sqlite=True)
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name ASC;")
@@ -223,7 +227,8 @@ def inspect_database(db_path: str = DEFAULT_DB_PATH) -> Dict[str, Any]:
 def setup_database(db_path: str = DEFAULT_DB_PATH, seed: bool = True) -> Dict[str, Any]:
     """Initialize schema tables and optionally seed starter data."""
     print(f"[*] Initializing database schema at: {db_path}")
-    conn = init_db(db_path)
+    conn = get_connection(db_path, allow_sqlite=True)
+    init_db(conn)
 
     seeded_info = {"students": 0, "rooms": 0, "sessions": 0, "attendance": 0}
 

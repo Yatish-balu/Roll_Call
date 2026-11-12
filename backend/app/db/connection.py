@@ -1,4 +1,9 @@
-"""Database connection management for SQLite and SQLAlchemy 2.0 with Supabase dual-backend support."""
+"""Database connection management.
+
+Supabase PostgreSQL is the only supported runtime backend. SQLite remains
+available only when ``DB_BACKEND=sqlite`` is set explicitly for isolated tests
+or emergency local tooling.
+"""
 
 from __future__ import annotations
 
@@ -119,80 +124,104 @@ def _resolve_default_db_path() -> str:
 
 DEFAULT_DB_PATH = _resolve_default_db_path()
 SQLITE_PATH = DEFAULT_DB_PATH
-DB_BACKEND = os.getenv("DB_BACKEND", "sqlite").strip().lower()
+# Supabase/PostgreSQL is the only supported runtime backend. SQLite remains
+# available only when DB_BACKEND=sqlite is set explicitly (isolated tests and
+# emergency local tooling).
+DB_BACKEND = os.getenv("DB_BACKEND", "supabase").strip().lower()
+SUPPORTED_BACKENDS = ("supabase", "sqlite")
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 READONLY_DATABASE_URL = os.getenv("READONLY_DATABASE_URL", "").strip()
 
 
-def get_backend() -> str:
-    """Return currently active backend: 'supabase' or 'sqlite'.
+def _configured_backend() -> str:
+    """Return the explicitly configured backend, defaulting to Supabase."""
+    return os.getenv("DB_BACKEND", DB_BACKEND).strip().lower()
 
-    In production, DB_BACKEND=supabase and DATABASE_URL_SYNC are mandatory;
-    there is no silent fallback to SQLite.
+
+def _sqlite_enabled() -> bool:
+    """True only when SQLite was requested explicitly (tests/tooling)."""
+    return _configured_backend() == "sqlite"
+
+
+def _supabase_url() -> str:
+    """Return the authoritative synchronous PostgreSQL URL, if configured."""
+    return (os.getenv("DATABASE_URL_SYNC") or DATABASE_URL_SYNC or "").strip()
+
+
+def get_backend() -> str:
+    """Return the active backend: 'supabase' (default) or 'sqlite'.
+
+    Supabase is the only supported runtime backend. SQLite is never selected
+    implicitly: it requires an explicit ``DB_BACKEND=sqlite``.
     """
-    # Validate production configuration before selecting a backend.
     _validate_production_config()
 
-    backend = os.getenv("DB_BACKEND", DB_BACKEND).strip().lower()
-    has_url = bool(
-        os.getenv("READONLY_DATABASE_URL")
-        or os.getenv("DATABASE_URL")
-        or READONLY_DATABASE_URL
-        or DATABASE_URL
-        or os.getenv("DATABASE_URL_SYNC")
-        or DATABASE_URL_SYNC
-    )
-    if backend == "supabase" and not has_url:
-        return "sqlite"
+    backend = _configured_backend()
+    if backend not in SUPPORTED_BACKENDS:
+        raise RuntimeError(
+            f"Unsupported DB_BACKEND={backend!r}. Use 'supabase' (default) or "
+            "'sqlite' (tests/emergency tooling only)."
+        )
     return backend
 
 
 def get_engine(backend: Optional[str] = None, db_url: Optional[str] = None):
     """
-    Get or create SQLAlchemy engine based on configured backend.
+    Get or create a SQLAlchemy engine for the configured backend.
 
-    In production, connection failures are propagated and never silently
-    fall back to SQLite. PostgreSQL (Supabase) connections require SSL.
+    Supabase is authoritative: a missing ``DATABASE_URL_SYNC`` or a failed
+    connection raises instead of silently falling back to SQLite.
     """
     active_backend = backend or get_backend()
 
-    try:
-        if active_backend == "supabase":
-            # DATABASE_URL_SYNC is the authoritative write URL; DATABASE_URL is legacy.
-            url = db_url or os.getenv("DATABASE_URL_SYNC") or os.getenv("DATABASE_URL", DATABASE_URL)
-            if url.startswith("postgres://"):
-                url = url.replace("postgres://", "postgresql://", 1)
-
-            # Sync psycopg driver: sslmode=require via connect_args.
-            engine_kwargs = {"pool_pre_ping": True}
-            if url.startswith("postgresql"):
-                engine_kwargs["connect_args"] = {"sslmode": "require"}
-
-            return create_engine(url, **engine_kwargs)
-        else:
-            path = db_url or SQLITE_PATH
-            if path != ":memory:" and os.path.dirname(path):
-                os.makedirs(os.path.dirname(path), exist_ok=True)
-            db_path_posix = path.replace(os.sep, "/") if path != ":memory:" else ":memory:"
-            return create_engine(f"sqlite:///{db_path_posix}")
-    except Exception as exc:
-        if _is_production():
-            # Never silently fall back to SQLite in production.
+    if active_backend == "supabase":
+        # DATABASE_URL_SYNC is the authoritative write URL; DATABASE_URL is legacy.
+        url = (db_url or _supabase_url() or os.getenv("DATABASE_URL") or DATABASE_URL).strip()
+        if not url:
             raise RuntimeError(
-                f"Failed to create production database engine: {exc}"
-            ) from exc
-        # Development: fall back to SQLite.
-        path = SQLITE_PATH
-        db_path_posix = path.replace(os.sep, "/") if path != ":memory:" else ":memory:"
-        return create_engine(f"sqlite:///{db_path_posix}")
+                "Supabase is the only supported backend, but DATABASE_URL_SYNC "
+                "is not configured. Set DATABASE_URL_SYNC to a "
+                "postgresql+psycopg:// URL, or set DB_BACKEND=sqlite explicitly "
+                "for isolated tests/tooling."
+            )
+        if url.startswith("postgres://"):
+            url = url.replace("postgres://", "postgresql://", 1)
+
+        # Sync psycopg driver: sslmode=require via connect_args.
+        engine_kwargs = {"pool_pre_ping": True}
+        if url.startswith("postgresql"):
+            engine_kwargs["connect_args"] = {"sslmode": "require"}
+
+        return create_engine(url, **engine_kwargs)
+
+    if active_backend != "sqlite":
+        raise RuntimeError(f"Unsupported database backend: {active_backend!r}")
+
+    path = db_url or SQLITE_PATH
+    if path != ":memory:" and os.path.dirname(path):
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+    db_path_posix = path.replace(os.sep, "/") if path != ":memory:" else ":memory:"
+    return create_engine(f"sqlite:///{db_path_posix}")
 
 
 # ==============================================================================
 # 1. Legacy SQLite Connection Management (Unchanged for backwards compatibility)
 # ==============================================================================
 
-def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
-    """Create and return an SQLite connection with Row factory and foreign keys enabled."""
+def get_connection(
+    db_path: str = DEFAULT_DB_PATH, *, allow_sqlite: bool = False
+) -> sqlite3.Connection:
+    """Create and return an SQLite connection with Row factory and foreign keys enabled.
+
+    In Supabase-only mode (the default) this raises unless ``allow_sqlite`` is
+    explicitly set by a test or local tooling helper.
+    """
+    if not allow_sqlite and not _sqlite_enabled():
+        raise RuntimeError(
+            "Raw SQLite access is disabled because DB_BACKEND=supabase. Use the "
+            "SQLAlchemy session/engine APIs instead. Set DB_BACKEND=sqlite only "
+            "for isolated tests or emergency local tooling."
+        )
     if db_path != ":memory:" and os.path.dirname(db_path):
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
 
@@ -204,7 +233,9 @@ def get_connection(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
 
 @contextmanager
 def get_db_cursor(
-    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH
+    db_target: Union[str, sqlite3.Connection] = DEFAULT_DB_PATH,
+    *,
+    allow_sqlite: bool = False,
 ) -> Generator[sqlite3.Cursor, None, None]:
     """Context manager yielding a cursor and handling commit/rollback."""
     if isinstance(db_target, sqlite3.Connection):
@@ -214,7 +245,7 @@ def get_db_cursor(
         finally:
             cursor.close()
     else:
-        conn = get_connection(db_target)
+        conn = get_connection(db_target, allow_sqlite=allow_sqlite)
         try:
             cursor = conn.cursor()
             yield cursor
@@ -238,29 +269,32 @@ def create_sync_engine(
 ) -> Engine:
     """
     Explicitly create a synchronous SQLAlchemy Engine.
-    Differentiates SQLite configurations (e.g. testing) from PostgreSQL production configurations.
     Does not connect on initialization.
 
-    DATABASE_URL_SYNC is the authoritative write connection for the FastAPI
-    application. In production it must point at Supabase PostgreSQL with SSL.
-    When DB_BACKEND=sqlite is explicitly set (or no URL is configured), SQLite is used.
+    DATABASE_URL_SYNC is the authoritative write connection and is required for
+    the default Supabase backend. SQLite is used only when DB_BACKEND=sqlite is
+    set explicitly (isolated tests/tooling) or a SQLite ``url`` is passed.
     """
     db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
 
     # Determine the effective backend
-    effective_backend = os.getenv("DB_BACKEND", DB_BACKEND).strip().lower()
+    effective_backend = _configured_backend()
 
     if url is not None:
         target_url = url
     elif effective_backend == "sqlite":
-        # SQLite explicitly requested (e.g. development or testing)
+        # SQLite explicitly requested (e.g. testing or emergency tooling)
         target_url = f"sqlite:///{db_path_posix}"
-    elif os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC):
-        # Supabase/PostgreSQL configured via DATABASE_URL_SYNC
-        target_url = os.getenv("DATABASE_URL_SYNC", DATABASE_URL_SYNC)
     else:
-        # No configuration: default to local SQLite
-        target_url = f"sqlite:///{db_path_posix}"
+        # Supabase/PostgreSQL is the default and only runtime backend.
+        target_url = _supabase_url()
+        if not target_url:
+            raise RuntimeError(
+                "Supabase is the only supported backend, but DATABASE_URL_SYNC "
+                "is not configured. Set DATABASE_URL_SYNC to a "
+                "postgresql+psycopg:// URL, or set DB_BACKEND=sqlite explicitly "
+                "for isolated tests/tooling."
+            )
 
     # Production: authoritative write URL is required; no SQLite fallback.
     if _is_production():
@@ -306,7 +340,18 @@ def create_async_engine_instance(
     get_sync_session_factory() / create_sync_engine(). Phase 3 (async wiring)
     is intentionally deferred.
     """
-    target_url = url or os.getenv("DATABASE_URL_ASYNC", DATABASE_URL_ASYNC) or f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+    if url is not None:
+        target_url = url
+    elif _configured_backend() == "sqlite":
+        target_url = f"sqlite+aiosqlite:///{DEFAULT_DB_PATH}"
+    else:
+        target_url = (os.getenv("DATABASE_URL_ASYNC") or DATABASE_URL_ASYNC or "").strip()
+        if not target_url:
+            raise RuntimeError(
+                "DATABASE_URL_ASYNC is not configured. Supabase is the only "
+                "supported backend; set DATABASE_URL_ASYNC to a "
+                "postgresql+asyncpg:// URL, or set DB_BACKEND=sqlite explicitly."
+            )
 
     if "sqlite" in target_url:
         engine_kwargs = {
@@ -343,18 +388,17 @@ def get_async_session_factory(async_engine: Optional[AsyncEngine] = None) -> asy
 
 def verify_database_connectivity() -> None:
     """
-    Deliberate database connectivity check for production startup.
+    Deliberate database connectivity check for application startup.
 
-    Ensures a failed Supabase connection cannot be mistaken for a successful
-    startup. In production, this validates that DATABASE_URL_SYNC is configured,
-    the backend is supabase, and a real connection can be established.
-    In non-production environments this is a no-op (SQLite is created lazily).
+    Supabase is the only supported runtime backend, so a missing URL or an
+    unreachable database is a hard startup failure rather than a silent
+    fallback. When ``DB_BACKEND=sqlite`` is explicitly set (tests/emergency
+    tooling) the check is a no-op because SQLite is created lazily.
     """
-    if not _is_production():
-        return
+    backend = get_backend()
 
-    # Validate configuration (raises if misconfigured).
-    _validate_production_config()
+    if backend == "sqlite":
+        return
 
     # Attempt an actual connection so failures are visible at startup.
     engine = create_sync_engine()
@@ -363,6 +407,15 @@ def verify_database_connectivity() -> None:
             conn.execute(text("SELECT 1"))
     except Exception as exc:
         raise RuntimeError(
-            "Production database connectivity check failed: "
-            f"Supabase is unreachable ({exc})"
+            "Supabase database connectivity check failed: the database is "
+            f"unreachable or the credentials are invalid ({exc}).\n"
+            "Check DATABASE_URL_SYNC in .env:\n"
+            "  - confirm the Supabase project is running (not paused);\n"
+            "  - reset the database password if needed (Supabase Dashboard -> "
+            "Project Settings -> Database -> Reset database password);\n"
+            "  - percent-encode special characters in the password;\n"
+            "  - ensure no stale DATABASE_URL_SYNC environment variable is "
+            "overriding .env."
         ) from exc
+    finally:
+        engine.dispose()
