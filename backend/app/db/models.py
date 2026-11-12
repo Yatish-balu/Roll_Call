@@ -40,6 +40,7 @@ class User(Base):
     __tablename__ = "users"
 
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False)
     hashed_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -92,6 +93,11 @@ class User(Base):
 
     def __repr__(self) -> str:
         return f"<User(user_id={self.user_id!r}, email={self.email!r}, role={self.role!r})>"
+
+    @property
+    def display_name(self) -> str:
+        """Human-readable display name, falling back to email prefix or user_id."""
+        return self.name or (self.email.split("@")[0] if self.email else self.user_id)
 
 
 class TeacherSubject(Base):
@@ -148,6 +154,24 @@ class AuditLog(Base):
 
     def __repr__(self) -> str:
         return f"<AuditLog(log_id={self.log_id}, actor_id={self.actor_id!r}, action={self.action!r})>"
+
+    @property
+    def event(self) -> str:
+        """Playbook-compatible alias for action."""
+        return self.action
+
+    @event.setter
+    def event(self, val: str) -> None:
+        self.action = val
+
+    @property
+    def at_utc(self) -> str:
+        """Playbook-compatible alias for timestamp."""
+        return self.timestamp
+
+    @at_utc.setter
+    def at_utc(self, val: str) -> None:
+        self.timestamp = val
 
 
 class AuditChainHead(Base):
@@ -313,6 +337,24 @@ class PendingEdit(Base):
 
     def __repr__(self) -> str:
         return f"<PendingEdit(edit_id={self.edit_id!r}, user_id={self.user_id!r}, consumed={self.consumed})>"
+
+    @property
+    def pending_id(self) -> str:
+        """Playbook-compatible alias for edit_id."""
+        return self.edit_id
+
+    @pending_id.setter
+    def pending_id(self, val: str) -> None:
+        self.edit_id = val
+
+    @property
+    def used(self) -> int:
+        """Playbook-compatible alias for consumed."""
+        return self.consumed
+
+    @used.setter
+    def used(self, val: int) -> None:
+        self.consumed = val
 
 
 class AuthSession(Base):

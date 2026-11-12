@@ -70,7 +70,16 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
     if row is None:
         return None
     if isinstance(row, sqlite3.Row):
-        return dict(row)
+        d = dict(row)
+        if "edit_id" in d and "pending_id" not in d:
+            d["pending_id"] = d["edit_id"]
+        if "consumed" in d and "used" not in d:
+            d["used"] = d["consumed"]
+        if "action" in d and "event" not in d:
+            d["event"] = d["action"]
+        if "timestamp" in d and "at_utc" not in d:
+            d["at_utc"] = d["timestamp"]
+        return d
     if isinstance(row, Student):
         return {"usn": row.usn, "name": row.name, "branch": row.branch}
     if isinstance(row, Room):
@@ -98,6 +107,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
     if isinstance(row, User):
         return {
             "user_id": row.user_id,
+            "name": getattr(row, "name", None),
             "email": row.email,
             "role": row.role,
             "is_active": row.is_active,
@@ -114,6 +124,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
             "log_id": row.log_id,
             "actor_id": row.actor_id,
             "action": row.action,
+            "event": row.action,
             "session_id": row.session_id,
             "usn": row.usn,
             "entity_type": row.entity_type,
@@ -122,6 +133,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
             "new_value": row.new_value,
             "reason": row.reason,
             "timestamp": row.timestamp,
+            "at_utc": row.timestamp,
         }
     if isinstance(row, LoginAttempt):
         return {
@@ -134,6 +146,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
     if isinstance(row, PendingEdit):
         return {
             "edit_id": row.edit_id,
+            "pending_id": row.edit_id,
             "user_id": row.user_id,
             "session_id": row.session_id,
             "usn": row.usn,
@@ -142,6 +155,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
             "created_at": row.created_at,
             "expires_at": row.expires_at,
             "consumed": row.consumed,
+            "used": row.consumed,
         }
     if hasattr(row, "_mapping"):
         return dict(row._mapping)
@@ -2090,17 +2104,34 @@ def get_teacher_subjects(
     *,
     user_id: str,
 ) -> List[str]:
-    """List all subject codes assigned to a given teacher."""
+    """List all subject codes assigned to a given teacher across teacher_subjects and faculty_subjects."""
     clean_uid = user_id.strip()
     if isinstance(target, Session):
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
-        res = target.execute(stmt)
-        return [row[0] for row in res.all()]
+        stmt1 = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
+        codes = set(target.execute(stmt1).scalars().all())
+        try:
+            from app.db.models import FacultySubject
+            stmt2 = select(FacultySubject.subject_code).where(FacultySubject.user_id == clean_uid)
+            codes.update(target.execute(stmt2).scalars().all())
+        except Exception:
+            pass
+        return sorted(codes)
 
-    query = "SELECT subject_code FROM teacher_subjects WHERE user_id = ? ORDER BY subject_code ASC"
+    codes = set()
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, (clean_uid,))
-        return [r["subject_code"] if isinstance(r, sqlite3.Row) else r[0] for r in cursor.fetchall()]
+        try:
+            cursor = conn.execute("SELECT subject_code FROM teacher_subjects WHERE user_id = ?", (clean_uid,))
+            for r in cursor.fetchall():
+                codes.add(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0])
+        except Exception:
+            pass
+        try:
+            cursor2 = conn.execute("SELECT subject_code FROM faculty_subjects WHERE user_id = ?", (clean_uid,))
+            for r in cursor2.fetchall():
+                codes.add(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0])
+        except Exception:
+            pass
+    return sorted(codes)
 
 
 def list_teacher_subject_mappings(
@@ -2112,6 +2143,7 @@ def list_teacher_subject_mappings(
     """
     List teacher-subject mappings, optionally filtered by user and/or subject code.
     Admin-facing helper for the teacher-subject management endpoint (N4).
+    Harmonizes records from both teacher_subjects and faculty_subjects tables.
     """
     clean_uid = user_id.strip() if user_id else None
     clean_code = subject_code.strip().upper() if subject_code else None
@@ -2124,10 +2156,26 @@ def list_teacher_subject_mappings(
             stmt = stmt.where(TeacherSubject.subject_code == clean_code)
         stmt = stmt.order_by(TeacherSubject.user_id.asc(), TeacherSubject.subject_code.asc())
         rows = target.execute(stmt).scalars().all()
-        return [
+        result = [
             {"id": r.id, "user_id": r.user_id, "subject_code": r.subject_code}
             for r in rows
         ]
+        existing_pairs = {(r["user_id"], r["subject_code"]) for r in result}
+        try:
+            from app.db.models import FacultySubject
+            stmt2 = select(FacultySubject)
+            if clean_uid:
+                stmt2 = stmt2.where(FacultySubject.user_id == clean_uid)
+            if clean_code:
+                stmt2 = stmt2.where(FacultySubject.subject_code == clean_code)
+            fs_rows = target.execute(stmt2).scalars().all()
+            for fs in fs_rows:
+                if (fs.user_id, fs.subject_code) not in existing_pairs:
+                    result.append({"id": fs.id, "user_id": fs.user_id, "subject_code": fs.subject_code, "dept_id": fs.dept_id})
+                    existing_pairs.add((fs.user_id, fs.subject_code))
+        except Exception:
+            pass
+        return result
 
     query = "SELECT id, user_id, subject_code FROM teacher_subjects WHERE 1=1"
     params: List[Any] = []
@@ -2138,6 +2186,34 @@ def list_teacher_subject_mappings(
         query += " AND subject_code = ?"
         params.append(clean_code)
     query += " ORDER BY user_id ASC, subject_code ASC"
+    result: List[Dict[str, Any]] = []
+    with _get_conn(target) as conn:
+        try:
+            cursor = conn.execute(query, tuple(params))
+            for r in cursor.fetchall():
+                result.append(_row_to_dict(r))
+        except Exception:
+            pass
+        # Harmonize with faculty_subjects
+        existing_pairs = {(r["user_id"], r["subject_code"]) for r in result}
+        try:
+            fs_q = "SELECT id, user_id, subject_code, dept_id FROM faculty_subjects WHERE 1=1"
+            fs_params: List[Any] = []
+            if clean_uid:
+                fs_q += " AND user_id = ?"
+                fs_params.append(clean_uid)
+            if clean_code:
+                fs_q += " AND subject_code = ?"
+                fs_params.append(clean_code)
+            cursor2 = conn.execute(fs_q, tuple(fs_params))
+            for r in cursor2.fetchall():
+                d = _row_to_dict(r)
+                if (d.get("user_id"), d.get("subject_code")) not in existing_pairs:
+                    result.append(d)
+                    existing_pairs.add((d.get("user_id"), d.get("subject_code")))
+        except Exception:
+            pass
+    return result
     with _get_conn(target) as conn:
         cursor = conn.execute(query, tuple(params))
         return [
@@ -2612,6 +2688,7 @@ def _audit_row_to_dict(row: Any) -> Dict[str, Any]:
         "actor_role": data.get("actor_role"),
         "event_type": data.get("action"),
         "action": data.get("action"),
+        "event": data.get("action"),
         "session_id": data.get("session_id"),
         "usn": data.get("usn"),
         "entity_type": data.get("entity_type"),
@@ -2622,6 +2699,7 @@ def _audit_row_to_dict(row: Any) -> Dict[str, Any]:
         "new_value": data.get("new_value"),
         "reason": data.get("reason"),
         "timestamp": data.get("timestamp"),
+        "at_utc": data.get("timestamp"),
     }
 
 
@@ -2706,6 +2784,7 @@ def create_pending_edit(
         conn.execute(query, (edit_id, clean_uid, clean_sid, clean_usn, clean_old, clean_new, now_ts, exp_ts))
     return {
         "edit_id": edit_id,
+        "pending_id": edit_id,
         "user_id": clean_uid,
         "session_id": clean_sid,
         "usn": clean_usn,
@@ -2714,6 +2793,7 @@ def create_pending_edit(
         "created_at": now_ts,
         "expires_at": exp_ts,
         "consumed": 0,
+        "used": 0,
     }
 
 

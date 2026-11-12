@@ -876,6 +876,7 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
             return UserMeResponse(
                 user_id=user.user_id,
                 email=user.email or f"{user.user_id}@rollcall.internal",
+                name=getattr(user, "name", None) or user.user_id,
                 role=user.role.value,
                 is_active=1,
                 subject_codes=[],
@@ -894,6 +895,7 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
         return UserMeResponse(
             user_id=db_user.user_id,
             email=db_user.email,
+            name=getattr(db_user, "name", None) or (db_user.email.split("@")[0] if db_user.email else db_user.user_id),
             role=db_user.role,
             is_active=db_user.is_active,
             subject_codes=subject_codes,

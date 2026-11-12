@@ -2,14 +2,18 @@ import os
 import sys
 from logging.config import fileConfig
 
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-from sqlalchemy import text
-
 from alembic import context
+from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool, text
 
-# Ensure project root is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+# Ensure project root is on sys.path and load .env
+_BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, _BACKEND_DIR)
+_ENV_FILE = os.path.join(os.path.dirname(_BACKEND_DIR), ".env")
+if os.path.exists(_ENV_FILE):
+    load_dotenv(_ENV_FILE)
+else:
+    load_dotenv()
 
 from app.db.base import Base
 import app.db.models  # Ensure models are loaded into Base.metadata
@@ -20,17 +24,20 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 # Override sqlalchemy.url with environment variable if present.
-# Only override when the current URL is the default alembic.ini postgres placeholder
-# or when no URL was explicitly configured. Tests that set sqlalchemy.url directly
-# on the Config object (e.g. to a temporary SQLite DB) must be respected.
+# When DB_BACKEND is sqlite (or local dev default without an explicit backend),
+# target the canonical local SQLite database.
+db_backend = os.getenv("DB_BACKEND", "sqlite").strip().lower()
 sync_db_url = os.getenv("DATABASE_URL_SYNC")
 current_url = config.get_main_option("sqlalchemy.url")
 is_default_postgres_url = current_url and "localhost:5432/postgres" in current_url
-if sync_db_url and (not current_url or is_default_postgres_url):
-    # DATABASE_URL_SYNC configured and no explicit URL (or only default placeholder): use it
+
+if db_backend == "sqlite" and (not current_url or is_default_postgres_url):
+    from app.db.connection import DEFAULT_DB_PATH
+    db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path_posix}")
+elif sync_db_url and (not current_url or is_default_postgres_url):
     config.set_main_option("sqlalchemy.url", sync_db_url)
 elif not current_url or is_default_postgres_url:
-    # No URL or only the default postgres placeholder: fall back to local SQLite
     from app.db.connection import DEFAULT_DB_PATH
     db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
     config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path_posix}")

@@ -68,6 +68,7 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
     return [
         {
             "user_id": os.getenv("SEED_ADMIN_USER_ID", "admin_root"),
+            "name": os.getenv("SEED_ADMIN_NAME", "System Administrator"),
             "email": os.getenv("SEED_ADMIN_EMAIL", "admin@rollcall.internal"),
             "password": admin_pw,
             "role": "ADMIN",
@@ -75,6 +76,7 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         },
         {
             "user_id": os.getenv("SEED_FACULTY_1_USER_ID", "faculty_ds"),
+            "name": os.getenv("SEED_FACULTY_1_NAME", "Dr. Distributed Systems"),
             "email": os.getenv("SEED_FACULTY_1_EMAIL", "faculty.ds@rollcall.internal"),
             "password": f1_pw,
             "role": "FACULTY",
@@ -82,6 +84,7 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         },
         {
             "user_id": os.getenv("SEED_FACULTY_2_USER_ID", "faculty_ml"),
+            "name": os.getenv("SEED_FACULTY_2_NAME", "Dr. Machine Learning"),
             "email": os.getenv("SEED_FACULTY_2_EMAIL", "faculty.ml@rollcall.internal"),
             "password": f2_pw,
             "role": "FACULTY",
@@ -89,6 +92,7 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         },
         {
             "user_id": os.getenv("SEED_FACULTY_3_USER_ID", "faculty_cn"),
+            "name": os.getenv("SEED_FACULTY_3_NAME", "Dr. Computer Networks"),
             "email": os.getenv("SEED_FACULTY_3_EMAIL", "faculty.cn@rollcall.internal"),
             "password": f3_pw,
             "role": "FACULTY",
@@ -114,12 +118,16 @@ def seed_users(session_factory=None) -> Dict[str, int]:
             uid = acc["user_id"]
             existing = db.get(User, uid)
             if existing:
+                if acc.get("name") and not getattr(existing, "name", None):
+                    existing.name = acc["name"]
+                    db.flush()
                 logger.info("User '%s' already exists in database; skipping creation.", uid)
                 skipped_count += 1
             else:
                 pw_hash = hash_password(acc["password"])
                 user = User(
                     user_id=uid,
+                    name=acc.get("name"),
                     email=acc["email"],
                     role=acc["role"],
                     hashed_password=pw_hash,
