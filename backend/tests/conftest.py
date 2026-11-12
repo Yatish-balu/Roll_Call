@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -52,6 +53,24 @@ try:
     _alembic_cfg.set_main_option(
         "sqlalchemy.url", "sqlite:///" + str(_ISOLATED_DB).replace("\\", "/")
     )
+
+    # The live snapshot predates Alembic: it has the 0001 schema but no
+    # alembic_version table, so an upgrade from base would try to recreate
+    # existing tables. Stamp the baseline first, exactly as a legacy database
+    # must be bootstrapped.
+    _conn = sqlite3.connect(str(_ISOLATED_DB))
+    try:
+        _has_version = _conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
+        ).fetchone()
+        _has_legacy_tables = _conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'students'"
+        ).fetchone()
+    finally:
+        _conn.close()
+    if _has_legacy_tables and not _has_version:
+        command.stamp(_alembic_cfg, "0001_initial_schema")
+
     command.upgrade(_alembic_cfg, "head")
 except Exception as _migration_error:  # pragma: no cover - surfaced in the logs
     print(

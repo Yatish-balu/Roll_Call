@@ -6,15 +6,15 @@ Designed as a modular monorepo, RollCall AI decouples a deterministic Python/Fas
 
 ---
 
-## Database Architecture & Dual-Backend Setup
+## Database Architecture (Supabase-Only)
 
-- **Cloud-first production**: Supabase PostgreSQL is the production source of truth. SQLite is retained for local development, isolated tests, and optional offline capabilities only.
-- **Environment Variables**: Managed in `.env` using `DB_BACKEND` (`supabase` | `sqlite`), `DATABASE_URL_SYNC` (authoritative write URL for production), `READONLY_DATABASE_URL` (read-only replica), `SQLITE_PATH` (`data/attendance.db`), and `APP_ENV` (`development` | `production`).
-- **Production requirements**: When `APP_ENV=production`, `DB_BACKEND=supabase` and `DATABASE_URL_SYNC` are mandatory. A deliberate connectivity check runs at startup; a failed Supabase connection is reported clearly and never silently falls back to SQLite.
+- **Supabase is the only supported runtime backend.** `DB_BACKEND` defaults to `supabase`; there is no automatic SQLite fallback. A missing `DATABASE_URL_SYNC` or an unreachable database is a hard startup error.
+- **Environment Variables**: `.env` uses `DB_BACKEND=supabase`, `DATABASE_URL_SYNC` (authoritative write URL), `DATABASE_URL_ASYNC` (async URL), `READONLY_DATABASE_URL` (read-only replica) and `APP_ENV`.
+- **Startup check**: The application performs a real `SELECT 1` connectivity check on every startup. Failures are reported clearly instead of running against an empty/legacy schema.
 - **SSL**: PostgreSQL connections require SSL (`sslmode=require` for psycopg, `ssl=require` for asyncpg).
-- **How to Switch Backends**: Set `DB_BACKEND=supabase` or `DB_BACKEND=sqlite` in `.env`; all application and query layers adapt without code modifications.
-- **Data Synchronization**: No automatic dual writes or SQLite-to-Supabase synchronization. Run `python backend/scripts/sync.py` only for manual, operator-initiated copies between environments.
-- **Alembic Migrations**: Alembic manages schema for both backends using `DATABASE_URL_SYNC`.
+- **SQLite (tests/tooling only)**: SQLite code paths are retained but disabled unless `DB_BACKEND=sqlite` is set explicitly. This is used by the isolated test suite and emergency local tooling; it is never selected implicitly.
+- **Data Synchronization**: No automatic dual writes. Run `python backend/scripts/sync.py` only for manual, operator-initiated copies between environments.
+- **Alembic Migrations**: Alembic targets `DATABASE_URL_SYNC` and requires it for normal CLI runs.
 
 ---
 
@@ -159,7 +159,8 @@ cp .env.example .env
 Key environment variables:
 - `APP_ENV`: `development` (default) or `production`.
 - `JWT_SECRET_KEY`: Minimum 32-character secret key for JWT authentication.
-- `DATABASE_URL_SYNC`: Authoritative synchronous write URL for production (Supabase PostgreSQL). Required when `APP_ENV=production` and `DB_BACKEND=supabase`.
+- `DB_BACKEND`: `supabase` (default and only runtime backend). `sqlite` is reserved for isolated tests/emergency tooling.
+- `DATABASE_URL_SYNC`: Authoritative synchronous write URL for Supabase PostgreSQL. Required whenever `DB_BACKEND=supabase`.
 - `DATABASE_URL_ASYNC`: Asynchronous URL for Supabase (not currently wired into the FastAPI request path).
 - `READONLY_DATABASE_URL`: Read-only replica URL for secure queries. Must not equal `DATABASE_URL_SYNC`.
 - `SQLITE_PATH`: Defaults to `data/attendance.db`. Canonical path resolution automatically handles execution from any directory.
@@ -210,9 +211,9 @@ Once started, navigate to:
 - **ReDoc Documentation:** [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc)
 - **Health Check:** [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
 
-### Startup Failure Behaviour (Production)
+### Startup Failure Behaviour
 
-When `APP_ENV=production`, the application performs a deliberate database connectivity check during startup. If `DB_BACKEND` is not `supabase`, or `DATABASE_URL_SYNC` is missing, or the Supabase connection cannot be established, the application fails to start with a clear error message. SQLite is never used as a silent fallback in production.
+On every startup the application verifies the Supabase connection. If `DATABASE_URL_SYNC` is missing or the database is unreachable/invalid, startup fails with a clear error. SQLite is never used as a silent fallback; it is only used when `DB_BACKEND=sqlite` is set explicitly (tests/tooling). In production, `DB_BACKEND=supabase` remains mandatory.
 
 ---
 
@@ -249,23 +250,52 @@ pytest backend/tests/test_agent_api.py backend/tests/test_tools.py -v
 
 ### Database Location
 
-The primary SQLite database is located at:
-`data/attendance.db`
-Both `data/attendance.db` and `data/attendance_backup_before_migration.db` are SHA256 verified against:
-`BC08C731CDF034157B7E676AF12F1AB332654F3E62868864800D9731B3564629`.
+The application data lives in **Supabase PostgreSQL**, configured by
+`DATABASE_URL_SYNC`. The local `data/attendance.db` file is only used when
+`DB_BACKEND=sqlite` is explicitly set (tests/emergency tooling).
 
 ### Alembic Migrations
 
-Alembic commands can be run from the repository root or from `backend/`:
+Alembic reads `DATABASE_URL_SYNC` from `.env`; run migrations from `backend/`:
 
 ```bash
-# From repository root
-alembic -c backend/alembic.ini heads
-
-# From backend directory
 cd backend
-alembic heads
+alembic upgrade head
 ```
+
+Legacy, pre-Alembic SQLite files (no `alembic_version` table) must be stamped at
+the baseline before upgrading:
+
+```bash
+alembic stamp 0001_initial_schema
+alembic upgrade head
+```
+
+### First-run seeding
+
+The schema migration does not create application accounts. After the first
+`alembic upgrade head` against an empty Supabase project, seed the development
+accounts (idempotent):
+
+```bash
+cd backend
+python -m scripts.seed_users
+```
+
+ADMIN logins additionally require `ADMIN_KEY` in `.env`; without it the app
+fails closed and ADMIN password logins return `401`. Faculty logins work with
+`user_id` + password only.
+
+To copy data from the local SQLite file into a fresh Supabase project (also
+idempotent, upserts on each table's primary key):
+
+```bash
+cd backend
+python -m scripts.sync --init
+```
+
+Run `python -m scripts.sync` without `--init` for the reverse direction. Both
+directions copy only columns present in both schemas.
 
 ---
 

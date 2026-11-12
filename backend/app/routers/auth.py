@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import create_access_token
 from app.auth.roles import normalize_role
+from app.db import crud
 from app.db.connection import get_sync_session_factory
 from app.db.models import AuthRefreshToken, AuthSession, LoginAttempt, TeacherSubject, User
 from app.schemas.auth import AuthenticatedUser, LoginRequest, LoginResponse, Role, UserMeResponse

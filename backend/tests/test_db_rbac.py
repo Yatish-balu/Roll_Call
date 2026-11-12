@@ -448,12 +448,23 @@ def test_live_database_attendance_survives_migration():
         shutil.rmtree(temp_dir, ignore_errors=True)
         pytest.skip("The live snapshot contains no attendance rows.")
 
+    # A live snapshot written before Alembic existed has no alembic_version
+    # table, but its schema is the 0001 baseline. Stamp it there so the forward
+    # migration can run; only versioned snapshots can be downgraded.
+    conn = sqlite3.connect(test_db)
+    has_version_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'alembic_version'"
+    ).fetchone()
+    conn.close()
     try:
-        command.downgrade(alembic_cfg, "0001_initial_schema")
+        if has_version_table:
+            command.downgrade(alembic_cfg, "0001_initial_schema")
+        else:
+            command.stamp(alembic_cfg, "0001_initial_schema")
         command.upgrade(alembic_cfg, "0002_rbac_tables")
     except Exception as exc:
         shutil.rmtree(temp_dir, ignore_errors=True)
-        pytest.skip(f"Live snapshot cannot be downgraded to 0001_initial_schema: {exc}")
+        pytest.skip(f"Live snapshot cannot be migrated: {exc}")
 
     conn = sqlite3.connect(test_db)
     cur = conn.cursor()

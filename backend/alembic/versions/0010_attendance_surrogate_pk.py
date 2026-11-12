@@ -74,11 +74,14 @@ def upgrade() -> None:
             ),
         )
 
-        # Copy data (recorded_at defaults to created_at equivalent for legacy rows)
+        # Copy data (recorded_at defaults to created_at equivalent for legacy rows).
+        # Pre-Alembic databases were created without the status CHECK constraint
+        # and may contain lowercase values, so canonicalise them before they hit
+        # the new table's check_attendance_status constraint.
         op.execute(
             """
             INSERT INTO attendance_new (attendance_id, session_id, allocation_id, usn, room_id, status, source, confidence, recorded_at)
-            SELECT attendance_id, session_id, allocation_id, usn, room_id, status, source, confidence,
+            SELECT attendance_id, session_id, allocation_id, usn, room_id, upper(trim(status)), source, confidence,
                    strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
             FROM attendance
             """
