@@ -19,7 +19,15 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool, QueuePool
 
-load_dotenv()
+# Search for .env in current directory, backend directory, or project root
+_THIS_DIR = Path(__file__).resolve().parent
+for _candidate_dir in [Path.cwd(), _THIS_DIR.parents[1], _THIS_DIR.parents[2]]:
+    _env_candidate = _candidate_dir / ".env"
+    if _env_candidate.is_file():
+        load_dotenv(dotenv_path=_env_candidate)
+        break
+else:
+    load_dotenv()
 
 # Authoritative environment configuration (read at import time, overridable via os.environ)
 APP_ENV = os.getenv("APP_ENV", "development").strip().lower()
