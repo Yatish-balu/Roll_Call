@@ -181,6 +181,10 @@ def _decoded_instruction(text: str) -> Optional[tuple[str, int, int]]:
         token = match.group(0)
         for offset in range(min(4, len(token))):
             candidates.append((token[offset:], match.start() + offset, "base64"))
+            eq_idx = token.find("=")
+            if eq_idx != -1 and eq_idx >= offset + 12:
+                end_pad = min(len(token), eq_idx + 1 + (1 if eq_idx + 1 < len(token) and token[eq_idx + 1] == "=" else 0))
+                candidates.append((token[offset:end_pad], match.start() + offset, "base64"))
     for match in _HEX_CANDIDATE.finditer(text):
         candidates.append((match.group(0), match.start(), "hex"))
 
