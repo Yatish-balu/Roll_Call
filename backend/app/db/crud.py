@@ -2132,6 +2132,49 @@ def assign_teacher_subject(
     return {"id": new_id, "user_id": clean_uid, "subject_code": clean_code, "dept_id": clean_dept, "semester": semester}
 
 
+def remove_teacher_subject(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    *,
+    user_id: str,
+    subject_code: str,
+) -> bool:
+    """Remove a subject assignment for a teacher from faculty_subjects."""
+    from sqlalchemy import delete as sql_delete
+    clean_uid = user_id.strip()
+    clean_code = subject_code.strip().upper()
+
+    if isinstance(target, Session):
+        stmt = sql_delete(FacultySubject).where(
+            FacultySubject.user_id == clean_uid,
+            FacultySubject.subject_code == clean_code,
+        )
+        res = target.execute(stmt)
+        try:
+            target.execute(
+                sql_delete(TeacherSubject).where(
+                    TeacherSubject.user_id == clean_uid,
+                    TeacherSubject.subject_code == clean_code,
+                )
+            )
+        except Exception:
+            pass
+        return bool(res.rowcount and res.rowcount > 0)
+
+    deleted = False
+    with _get_conn(target) as conn:
+        try:
+            c1 = conn.execute("DELETE FROM faculty_subjects WHERE user_id = ? AND UPPER(subject_code) = ?", (clean_uid, clean_code))
+            deleted = bool(c1.rowcount and c1.rowcount > 0)
+        except Exception:
+            pass
+        try:
+            c2 = conn.execute("DELETE FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ?", (clean_uid, clean_code))
+            deleted = deleted or bool(c2.rowcount and c2.rowcount > 0)
+        except Exception:
+            pass
+    return deleted
+
+
 def get_teacher_subjects(
     target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
     *,

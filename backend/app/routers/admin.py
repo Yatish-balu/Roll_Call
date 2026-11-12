@@ -238,3 +238,43 @@ def assign_teacher_subject(
         db.rollback()
         logger.error("Failed to assign subject %s to %s: %s", payload.subject_code, payload.user_id, exc)
         raise
+
+
+@router.delete(
+    "/teacher-subjects",
+    summary="Unassign a subject from a teacher",
+    description="ADMIN-only removal of a teacher-subject assignment.",
+)
+def remove_teacher_subject(
+    user_id: str = Query(..., description="Teacher user ID"),
+    subject_code: str = Query(..., description="Subject code to unassign"),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    removed = crud.remove_teacher_subject(db, user_id=user_id, subject_code=subject_code)
+    if not removed:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Assignment for teacher '{user_id}' with subject '{subject_code}' not found.",
+        )
+    try:
+        crud.create_audit_entry(
+            db,
+            actor_id=current_user.user_id,
+            action="TEACHER_SUBJECT_UNASSIGN",
+            entity_type="teacher_subject",
+            entity_id=f"{user_id}:{subject_code}",
+            old_value=subject_code,
+            timestamp=_utcnow_iso(),
+            actor_role=getattr(current_user.role, "value", str(current_user.role)),
+        )
+        db.commit()
+    except Exception as exc:
+        logger.warning("Audit logging failed on unassign: %s", exc)
+        db.commit()
+
+    return {
+        "success": True,
+        "message": f"Successfully unassigned subject '{subject_code}' from teacher '{user_id}'.",
+    }
+

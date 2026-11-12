@@ -12,6 +12,8 @@ from app.routers.auth import router as auth_router
 from app.routers.me import router as me_router
 from app.routers.meta import router as meta_router
 from app.routers.admin import router as admin_router
+from app.routers.profile import router as profile_router
+from app.routers.calendar import router as calendar_router
 
 __all__ = [
     "students_router",
@@ -26,5 +28,7 @@ __all__ = [
     "me_router",
     "meta_router",
     "admin_router",
+    "profile_router",
+    "calendar_router",
 ]
 

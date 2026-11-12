@@ -41,6 +41,8 @@ from app.routers import (
     sessions_router,
     students_router,
     timetable_router,
+    profile_router,
+    calendar_router,
 )
 
 
@@ -74,8 +76,16 @@ async def lifespan(app: FastAPI):
 
     # Deliberate database connectivity check for production startup.
     # A failed Supabase connection must not be mistaken for a successful startup.
-    from app.db.connection import verify_database_connectivity
+    from app.db.connection import verify_database_connectivity, get_sync_session_factory
     verify_database_connectivity()
+
+    try:
+        from app.routers.profile import _ensure_profile_table
+        session_factory = get_sync_session_factory()
+        with session_factory() as session:
+            _ensure_profile_table(session)
+    except Exception as exc:
+        logger.warning("Could not auto-create profile table at startup: %s", exc)
 
     # Password reset only works if a reset link can be delivered. Report the
     # missing provider at startup instead of discovering it on the first reset.
@@ -513,6 +523,8 @@ app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(profile_router, prefix="/api/v1")
+app.include_router(calendar_router, prefix="/api/v1")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
 app.include_router(auth_router, prefix="/api")
@@ -527,6 +539,8 @@ app.include_router(attendance_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+app.include_router(profile_router, prefix="/api")
+app.include_router(calendar_router, prefix="/api")
 
 
 
