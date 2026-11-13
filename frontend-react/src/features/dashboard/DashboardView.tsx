@@ -13,7 +13,7 @@ import { useAuth } from "@/hooks/useAuth";
 import { todayIso } from "@/lib/schedule";
 
 export function DashboardView() {
-  const { isAdmin } = useAuth();
+  const { isAdmin, isLoading: isAuthLoading } = useAuth();
   const [data, setData] = useState<DashboardData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -36,6 +36,7 @@ export function DashboardView() {
   }, [isAdmin]);
 
   useEffect(() => {
+    if (isAuthLoading) return;
     let isMounted = true;
     const reload = () => {
       fetchDashboardData(todayIso(), { includeTeacherMappings: isAdmin })
@@ -64,7 +65,7 @@ export function DashboardView() {
       isMounted = false;
       window.removeEventListener("rollcall-attendance-updated", reload);
     };
-  }, [isAdmin]);
+  }, [isAdmin, isAuthLoading]);
 
   // The dashboard's "today" panels must only count sessions dated today. The
   // sessions endpoint returns the whole register, so filter it here instead of

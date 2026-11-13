@@ -9,6 +9,7 @@ import {
   type SessionItem,
 } from "@/services/api/sessions";
 import { fetchStudents } from "@/services/api/students";
+import { fetchRooms, type Room } from "@/services/api/rooms";
 import { useAuth } from "@/hooks/useAuth";
 import {
   fetchSessionAttendance,
@@ -25,6 +26,8 @@ export function AttendanceView() {
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   // Real class slots (room / batch / time) of the sessions the caller may see.
   const [allocations, setAllocations] = useState<SessionAllocation[]>([]);
+  const [availableRooms, setAvailableRooms] = useState<Room[]>([]);
+  const [selectedRoomOverride, setSelectedRoomOverride] = useState<string>("");
   const [selectedSessionId, setSelectedSessionId] = useState<string>(querySession);
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
   const [isLoadingSessions, setIsLoadingSessions] = useState(true);
@@ -72,12 +75,14 @@ export function AttendanceView() {
       Promise.all([
         fetchSessions({ limit: 50 }),
         fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 })),
+        fetchRooms({ limit: 100 }).catch(() => ({ items: [] as Room[], total: 0, limit: 100, offset: 0 })),
       ])
-        .then(([res, allocationsRes]) => {
+        .then(([res, allocationsRes, roomsRes]) => {
           if (!isMounted) return;
           const allItems = res.items || [];
           setSessions(allItems);
           setAllocations(allocationsRes.items || []);
+          setAvailableRooms(roomsRes.items || []);
 
           if (querySession) {
             setSelectedSessionId(querySession);
@@ -123,6 +128,7 @@ export function AttendanceView() {
 
   useEffect(() => {
     if (!selectedSessionId) return;
+    setSelectedRoomOverride("");
     let isMounted = true;
     Promise.resolve().then(() => {
       if (isMounted) void loadAttendance(selectedSessionId);
@@ -166,6 +172,7 @@ export function AttendanceView() {
   );
   const sessionSlot = sessionAllocations[0] ?? null;
   const sessionRoom = sessionRooms[0] ?? "";
+  const effectiveRoom = selectedRoomOverride || sessionRoom || "UNALLOCATED";
 
   // Attendance counts
   const counts = useMemo(() => {
@@ -220,7 +227,7 @@ export function AttendanceView() {
         student_name: s.name,
         branch: s.branch,
         status: "UNREVIEWED",
-        room_id: sessionRoom || "UNALLOCATED",
+        room_id: effectiveRoom,
         source: "manual",
       }));
       setAttendanceRecords(newRecords);
@@ -259,7 +266,7 @@ export function AttendanceView() {
     try {
       const payload = attendanceRecords.map((r) => ({
         usn: r.usn,
-        room_id: r.room_id || sessionRoom || "UNALLOCATED",
+        room_id: (r.room_id && r.room_id !== "UNALLOCATED") ? r.room_id : effectiveRoom,
         status: r.status,
       }));
       const res = await updateSessionAttendance(selectedSessionId, payload);
@@ -446,9 +453,35 @@ export function AttendanceView() {
               <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#24251C] font-semibold border border-[#E4DDCA]">
                 Date: {activeSession.date}
               </span>
-              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
-                Room: {sessionRooms.length > 0 ? sessionRooms.join(", ") : "Not allocated"}
-              </span>
+              {sessionRooms.length > 0 ? (
+                <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
+                  Room: {sessionRooms.join(", ")}
+                </span>
+              ) : (
+                <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-xl bg-[#EDE8D8] text-[#24251C] text-xs font-semibold border border-[#E4DDCA]">
+                  <span className="text-[#77735F] font-medium">Room:</span>
+                  <select
+                    value={selectedRoomOverride || "UNALLOCATED"}
+                    onChange={(e) => {
+                      const newRoom = e.target.value;
+                      setSelectedRoomOverride(newRoom);
+                      setAttendanceRecords((prev) =>
+                        prev.map((rec) => ({ ...rec, room_id: newRoom }))
+                      );
+                    }}
+                    className="bg-transparent font-bold text-[#24251C] focus:outline-none cursor-pointer py-0.5"
+                  >
+                    <option value="UNALLOCATED">Not allocated / General</option>
+                    {availableRooms
+                      .filter((r) => r.room_id !== "UNALLOCATED")
+                      .map((r) => (
+                        <option key={r.room_id} value={r.room_id}>
+                          {r.room_id} ({r.name})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
               <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
                 Time:{" "}
                 {sessionSlot
@@ -573,8 +606,14 @@ export function AttendanceView() {
                       <td className="py-3.5 px-4 font-semibold text-[#24251C]">
                         {rec.student_name || rec.usn}
                       </td>
-                      <td className="py-3.5 px-4 text-xs text-[#77735F]">
-                        {rec.room_id || "Unallocated"}
+                      <td className="py-3.5 px-4 text-xs font-medium">
+                        {rec.room_id && rec.room_id !== "UNALLOCATED" ? (
+                          <span className="font-mono font-bold text-[#6C5119]">{rec.room_id}</span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-stone-100 text-stone-600 border border-stone-200">
+                            Not allocated
+                          </span>
+                        )}
                       </td>
                       <td className="py-3.5 px-4">
                         {canMarkAttendance ? (

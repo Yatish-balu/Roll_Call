@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 from app.auth import Role, get_current_user, require_roles
 from app.auth.session_scope import resolve_data_scope
 from app.db import crud
+from app.db.models import Attendance, Session as DbSession
 from app.dependencies import get_db
+from app.health import health_band
 from app.security.context import get_request_id
 from app.security.decoys import probe_decoy
 from app.security.detection import detector
@@ -293,3 +295,145 @@ def bulk_create_students(
         db.rollback()
         logger.error("Error during bulk student creation: %s", exc)
         raise
+
+
+# ==============================================================================
+# N12: Student lookup and ledger
+# ==============================================================================
+
+@router.get(
+    "/lookup",
+    summary="Student lookup (partial USN or name)",
+    description=(
+        "Search students by partial USN or name (max 20 results). "
+        "Teacher sees only students in their assigned subjects; admin sees all."
+    ),
+)
+def lookup_students(
+    q: str = Query(..., min_length=1, description="Search term (USN or name)"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from sqlalchemy import func, or_, select
+
+    from app.db.models import Student
+
+    clean_q = q.strip()
+    if not clean_q:
+        return {"results": [], "total": 0}
+
+    scope = resolve_data_scope(db, current_user)
+    condition = scope.student_condition()
+    term = f"%{clean_q.lower()}%"
+
+    stmt = select(Student.usn, Student.name, Student.branch).where(
+        or_(
+            func.lower(Student.usn).like(term),
+            func.lower(Student.name).like(term),
+        )
+    )
+    if condition is not None:
+        stmt = stmt.where(condition)
+
+    rows = db.execute(stmt.limit(20)).all()
+
+    return {
+        "results": [
+            {"usn": row.usn, "name": row.name, "branch": row.branch}
+            for row in rows
+        ],
+        "total": len(rows),
+    }
+
+
+@router.get(
+    "/{usn}/ledger",
+    summary="Student attendance ledger",
+    description=(
+        "Return a student's attendance history in date order with date, subject, "
+        "room, status, source, plus percent and colour band. Teacher sees only "
+        "their assigned subjects; admin sees all."
+    ),
+)
+def get_student_ledger(
+    usn: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    clean_usn = usn.strip().upper()
+
+    scope = resolve_data_scope(db, current_user)
+
+    # Visibility check (same as get_student_by_usn: no existence disclosure)
+    if not scope.is_student_visible(db, clean_usn):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{clean_usn}' not found.",
+        )
+
+    student = crud.get_student(db, usn=clean_usn)
+    if not student:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{clean_usn}' not found.",
+        )
+
+    # Query attendance records joined with sessions, scoped to caller
+    q = (
+        select(
+            Attendance.session_id,
+            Attendance.usn,
+            Attendance.status,
+            Attendance.source,
+            Attendance.confidence,
+            DbSession.date,
+            DbSession.subject,
+            DbSession.subject_code,
+            DbSession.teacher_id,
+        )
+        .join(DbSession, Attendance.session_id == DbSession.session_id)
+        .where(Attendance.usn == clean_usn)
+        .order_by(DbSession.date.asc(), DbSession.session_id.asc())
+    )
+
+    condition = scope.session_condition()
+    if condition is not None:
+        q = q.where(condition)
+
+    rows = db.execute(q).all()
+
+    total = len(rows)
+    present = sum(1 for r in rows if r.status == "PRESENT")
+    absent = sum(1 for r in rows if r.status == "ABSENT")
+    pct = round((present / total) * 100, 1) if total > 0 else 0.0
+
+    ledger = [
+        {
+            "session_id": r.session_id,
+            "date": r.date,
+            "subject": r.subject,
+            "subject_code": r.subject_code,
+            "room_id": r.room_id if hasattr(r, "room_id") else None,
+            "status": r.status,
+            "source": r.source,
+            "confidence": r.confidence,
+        }
+        for r in rows
+    ]
+
+    return {
+        "usn": clean_usn,
+        "name": student.name,
+        "branch": student.branch,
+        "total_classes": total,
+        "present": present,
+        "absent": absent,
+        "attendance_percentage": f"{pct}%",
+        "percent": pct,
+        "band": health_band(pct),
+        "ledger": ledger,
+    }
+
+
+__all__ = ["router"]
+

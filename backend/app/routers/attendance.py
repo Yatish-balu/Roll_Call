@@ -117,7 +117,9 @@ def _verify_roster_references(db: Session, records: Sequence[Any]) -> None:
             detail=f"Student with USN '{missing_usns[0]}' not found.",
         )
 
-    room_ids = {str(r.room_id).strip() for r in records}
+    room_ids = {str(r.room_id).strip() if getattr(r, "room_id", None) else "UNALLOCATED" for r in records}
+    if "UNALLOCATED" in room_ids:
+        crud.ensure_unallocated_room(db)
     known_rooms = crud.get_existing_room_ids(db, room_ids)
     missing_rooms = sorted(room_ids - known_rooms)
     if missing_rooms:
@@ -210,6 +212,12 @@ def record_attendance(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Attendance record for student '{clean_usn}' in session '{session_id}' conflicts.",
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         )
     except Exception as exc:
         db.rollback()
@@ -304,7 +312,7 @@ def bulk_record_attendance(
         {
             "session_id": session_id.strip(),
             "usn": r.usn.strip().upper(),
-            "room_id": r.room_id.strip(),
+            "room_id": r.room_id.strip() if getattr(r, "room_id", None) and str(r.room_id).strip() else "UNALLOCATED",
             "status": r.status,
             "source": r.source,
             "confidence": r.confidence,
@@ -325,6 +333,12 @@ def bulk_record_attendance(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Bulk insert failed due to duplicate or conflicting attendance records.",
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         )
     except Exception as exc:
         db.rollback()
@@ -401,7 +415,7 @@ def replace_attendance(
         {
             "session_id": session_id.strip(),
             "usn": r.usn.strip().upper(),
-            "room_id": r.room_id.strip(),
+            "room_id": r.room_id.strip() if getattr(r, "room_id", None) and str(r.room_id).strip() else "UNALLOCATED",
             "status": r.status,
             "source": r.source,
             "confidence": r.confidence,

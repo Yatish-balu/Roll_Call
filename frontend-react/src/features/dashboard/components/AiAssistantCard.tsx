@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef } from "react";
+import { Link } from "react-router-dom";
 import { sendAgentQuery, uploadAttendanceFile } from "@/services/api/dashboard";
 import type { VerifiedAgentResponse } from "@/types/dashboard";
 import { AnimatedAiMascot } from "./AnimatedAiMascot";
@@ -14,11 +15,37 @@ export function AiAssistantCard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatInputRef = useRef<HTMLInputElement>(null);
 
-  const handleSend = async (e?: React.FormEvent) => {
-    if (e) e.preventDefault();
-    if (!query.trim() || isProcessing) return;
+  // Restore recent chat from persistent local storage
+  const [recentChat, setRecentChat] = useState<{ query?: string; answer?: string } | null>(() => {
+    if (typeof window === "undefined") return null;
+    try {
+      const raw = window.localStorage.getItem("rollcall_recent_chat_messages_v1");
+      if (raw) {
+        const msgs = JSON.parse(raw);
+        if (Array.isArray(msgs) && msgs.length >= 2) {
+          const lastUser = [...msgs].reverse().find((m: { sender: string; text?: string }) => m.sender === "user");
+          const lastAssistant = [...msgs].reverse().find(
+            (m: { sender: string; id?: string; text?: string }) => m.sender === "assistant" && m.id !== "welcome"
+          );
+          if (lastAssistant && lastAssistant.text) {
+            return {
+              query: lastUser?.text,
+              answer: lastAssistant.text,
+            };
+          }
+        }
+      }
+    } catch {
+      // Ignore parse errors
+    }
+    return null;
+  });
 
-    const queryText = query.trim();
+  const handleSend = async (e?: React.FormEvent, customQuery?: string) => {
+    if (e) e.preventDefault();
+    const queryText = (customQuery || query).trim();
+    if (!queryText || isProcessing) return;
+
     setQuery("");
     setIsProcessing(true);
     setStatusNote(null);
@@ -27,6 +54,24 @@ export function AiAssistantCard() {
     try {
       const resp = await sendAgentQuery(queryText);
       setLastResponse(resp);
+      setRecentChat({ query: queryText, answer: resp.message });
+
+      // Persist to shared conversation transcript
+      if (typeof window !== "undefined") {
+        try {
+          const raw = window.localStorage.getItem("rollcall_recent_chat_messages_v1");
+          const msgs = raw ? JSON.parse(raw) : [];
+          const nowStr = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+          const updated = [
+            ...msgs,
+            { id: `u-${Date.now()}`, sender: "user", text: queryText, timestamp: nowStr },
+            { id: `a-${Date.now() + 1}`, sender: "assistant", text: resp.message, timestamp: nowStr },
+          ];
+          window.localStorage.setItem("rollcall_recent_chat_messages_v1", JSON.stringify(updated.slice(-50)));
+        } catch {
+          // Ignore write errors
+        }
+      }
     } catch (err: unknown) {
       if (err instanceof Error) {
         setErrorMessage(`Backend Connection Error: ${err.message}. Verify that FastAPI backend is running.`);
@@ -132,23 +177,48 @@ export function AiAssistantCard() {
       )}
 
       {/* Response Display Box (if agent has answered) */}
-      {lastResponse && (
-        <div className="p-3.5 rounded-xl bg-[#EDE8D8]/60 border border-[#E4DDCA] text-xs text-[#24251C] space-y-1.5 shadow-2xs">
+      {lastResponse ? (
+        <div className="p-3.5 rounded-xl bg-[#EDE8D8]/70 border border-[#E4DDCA] text-xs text-[#24251C] space-y-2 shadow-2xs animate-fadeIn">
           <div className="flex items-center justify-between font-bold text-[11px] text-[#6C5119]">
             <span className="flex items-center space-x-1">
               <span>✦</span>
               <span>Assistant Insight</span>
             </span>
-            <button
-              onClick={() => setLastResponse(null)}
-              className="text-[#77735F] hover:text-[#24251C] text-xs font-bold"
-            >
-              ✕
-            </button>
+            <div className="flex items-center gap-2">
+              <Link to="/assistant" className="text-[#6C5119] hover:underline font-semibold text-[10px]">
+                Full Chat →
+              </Link>
+              <button
+                onClick={() => setLastResponse(null)}
+                className="text-[#77735F] hover:text-[#24251C] text-xs font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
           </div>
-          <p className="leading-relaxed text-[#24251C]">{lastResponse.message}</p>
+          <p className="leading-relaxed text-[#24251C] whitespace-pre-wrap">{lastResponse.message}</p>
         </div>
-      )}
+      ) : recentChat ? (
+        <div className="p-3 rounded-xl bg-[#EDE8D8]/50 border border-[#E4DDCA] text-xs text-[#24251C] space-y-1.5 shadow-2xs">
+          <div className="flex items-center justify-between font-bold text-[11px] text-[#6C5119]">
+            <span className="flex items-center space-x-1">
+              <span>💬</span>
+              <span>Recent Conversation</span>
+            </span>
+            <Link to="/assistant" className="text-[#6C5119] hover:underline font-semibold text-[10px]">
+              Open Assistant →
+            </Link>
+          </div>
+          {recentChat.query && (
+            <p className="text-[11px] font-medium text-[#77735F] italic truncate">
+              "{recentChat.query}"
+            </p>
+          )}
+          <p className="leading-relaxed text-[#24251C] line-clamp-2 text-[11px]">
+            {recentChat.answer}
+          </p>
+        </div>
+      ) : null}
 
       {/* Processing Status Note */}
       {statusNote && !errorMessage && (
@@ -210,6 +280,34 @@ export function AiAssistantCard() {
           <svg className="w-4 h-4 text-[#77735F] group-hover:translate-x-1 group-hover:text-[#6C5119] transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
           </svg>
+        </button>
+      </div>
+
+      {/* Interactive Quick Prompt Chips */}
+      <div className="flex items-center gap-1.5 overflow-x-auto text-[11px] pt-1 no-scrollbar">
+        <button
+          type="button"
+          disabled={isProcessing}
+          onClick={() => void handleSend(undefined, "Summarize today's overall attendance")}
+          className="px-2.5 py-1 rounded-lg bg-white border border-[#E4DDCA] text-[#3F451F] hover:bg-[#EDE8D8] hover:border-[#6C5119]/40 transition-all font-medium whitespace-nowrap cursor-pointer shadow-2xs"
+        >
+          📊 Summarize Today
+        </button>
+        <button
+          type="button"
+          disabled={isProcessing}
+          onClick={() => void handleSend(undefined, "List students with attendance below 75%")}
+          className="px-2.5 py-1 rounded-lg bg-white border border-[#E4DDCA] text-[#3F451F] hover:bg-[#EDE8D8] hover:border-[#6C5119]/40 transition-all font-medium whitespace-nowrap cursor-pointer shadow-2xs"
+        >
+          ⚠️ Defaulters
+        </button>
+        <button
+          type="button"
+          disabled={isProcessing}
+          onClick={() => void handleSend(undefined, "Find vacant classrooms right now")}
+          className="px-2.5 py-1 rounded-lg bg-white border border-[#E4DDCA] text-[#3F451F] hover:bg-[#EDE8D8] hover:border-[#6C5119]/40 transition-all font-medium whitespace-nowrap cursor-pointer shadow-2xs"
+        >
+          🚪 Vacant Rooms
         </button>
       </div>
 

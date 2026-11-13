@@ -82,11 +82,13 @@ async def lifespan(app: FastAPI):
 
     try:
         from app.routers.profile import _ensure_profile_table
+        from app.db import crud
         session_factory = get_sync_session_factory()
         with session_factory() as session:
             _ensure_profile_table(session)
+            crud.ensure_unallocated_room(session)
     except Exception as exc:
-        logger.warning("Could not auto-create profile table at startup: %s", exc)
+        logger.warning("Could not auto-create profile table or default room at startup: %s", exc)
 
     try:
         from app.agent.tools import register_all_tools
@@ -513,6 +515,37 @@ def health_check():
     return {
         "status": "healthy",
         "version": app.version,
+    }
+
+
+@app.get("/models", tags=["General"])
+@app.get("/v1/models", tags=["General"])
+@app.get("/api/v1/models", tags=["General"])
+@app.get("/api/models", tags=["General"])
+def list_models():
+    """Return list of models supported by the RollCall AI backend in OpenAI-compatible format."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "gemini-3.5-flash-lite",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+            {
+                "id": "gemini-2.5-flash",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+            {
+                "id": "rollcall-ai-agent",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+        ],
     }
 
 

@@ -212,8 +212,21 @@ class GeminiProvider(LLMProvider):
 
         # If all candidates exhausted
         logger.error("All Gemini model candidates exhausted. Last error: %s", last_error)
+        err_msg = str(last_error) if last_error else "Unknown error"
+        if "401" in err_msg or "UNAUTHENTICATED" in err_msg or "ACCESS_TOKEN_TYPE_UNSUPPORTED" in err_msg or "API key not valid" in err_msg:
+            friendly_content = (
+                "⚠️ **Gemini API Key Authentication Notice (401)**\n\n"
+                "The `GEMINI_API_KEY` in `.env` is not a valid Google AI Studio Gemini API key. "
+                "(Gemini API keys start with `AIzaSy...`; authorization tokens starting with `AQ.` cannot be used as Gemini API keys).\n\n"
+                "To enable external general LLM answers, generate a free API key at [Google AI Studio](https://aistudio.google.com/apikey) "
+                "and paste it into `.env` under `GEMINI_API_KEY=`.\n\n"
+                "💡 **Local tools are fully working!** You can summarize attendance, list defaulters (<75%), "
+                "inspect pending sessions, check vacant classrooms, view class schedules, update your profile (e.g. mobile/phone), and upload attendance sheets."
+            )
+        else:
+            friendly_content = f"Attendance Assistant is momentarily unable to contact LLM provider: {last_error}"
         return ModelResponse(
-            content=f"Attendance Assistant is momentarily unable to contact LLM provider: {last_error}",
+            content=friendly_content,
             tool_calls=[],
         )
 

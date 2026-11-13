@@ -1,4 +1,4 @@
-﻿"""Production database-backed tools for RollCall AI Agent.
+"""Production database-backed tools for RollCall AI Agent.
 
 All tools query live Supabase PostgreSQL (or SQLite in local dev)
 with strict RBAC, subject-scoping, and non-hardcoded dynamic data.
@@ -412,6 +412,7 @@ def update_user_profile(
     clean_name = (full_name or "").strip()
 
     try:
+        updated_fields = []
         if clean_name:
             # Update users table
             db.execute(
@@ -427,23 +428,56 @@ def update_user_profile(
                     updated_at = EXCLUDED.updated_at
             """)
             db.execute(upsert_sql, {"uid": actor_id, "n": clean_name, "ts": now_iso})
+            updated_fields.append(f"Name set to '{clean_name}'")
 
         if email:
+            clean_email = email.strip()
             db.execute(
                 text("UPDATE users SET email = :e WHERE user_id = :uid"),
-                {"e": email.strip(), "uid": actor_id},
+                {"e": clean_email, "uid": actor_id},
             )
-            db.execute(
-                text("UPDATE user_profiles SET email = :e, updated_at = :ts WHERE user_id = :uid"),
-                {"e": email.strip(), "uid": actor_id, "ts": now_iso},
-            )
+            upsert_email = text("""
+                INSERT INTO user_profiles (user_id, email, updated_at)
+                VALUES (:uid, :e, :ts)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    email = EXCLUDED.email,
+                    updated_at = EXCLUDED.updated_at
+            """)
+            db.execute(upsert_email, {"uid": actor_id, "e": clean_email, "ts": now_iso})
+            updated_fields.append(f"Email set to '{clean_email}'")
+
+        if mobile:
+            clean_mobile = mobile.strip()
+            upsert_mobile = text("""
+                INSERT INTO user_profiles (user_id, mobile, updated_at)
+                VALUES (:uid, :m, :ts)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    mobile = EXCLUDED.mobile,
+                    updated_at = EXCLUDED.updated_at
+            """)
+            db.execute(upsert_mobile, {"uid": actor_id, "m": clean_mobile, "ts": now_iso})
+            updated_fields.append(f"Mobile set to '{clean_mobile}'")
+
+        if designation:
+            clean_desig = designation.strip()
+            upsert_desig = text("""
+                INSERT INTO user_profiles (user_id, designation, updated_at)
+                VALUES (:uid, :d, :ts)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    designation = EXCLUDED.designation,
+                    updated_at = EXCLUDED.updated_at
+            """)
+            db.execute(upsert_desig, {"uid": actor_id, "d": clean_desig, "ts": now_iso})
+            updated_fields.append(f"Designation set to '{clean_desig}'")
 
         db.commit()
+        desc = ", ".join(updated_fields) if updated_fields else "No fields changed"
         return {
             "status": "success",
             "user_id": actor_id,
             "full_name": clean_name or "unchanged",
-            "message": f"Successfully updated profile for user '{actor_id}'. Name set to '{clean_name}'.",
+            "mobile": mobile or "unchanged",
+            "message": f"Successfully updated profile for user '{actor_id}': {desc}.",
         }
     except Exception as exc:
         db.rollback()

@@ -21,6 +21,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.connection import DEFAULT_DB_PATH, get_connection
+from app.security.ai_input import validate_usn, validate_room_id
+import re
 from app.security.audit_chain import (
     DEFAULT_CHAIN_ID,
     compute_row_hash,
@@ -184,6 +186,7 @@ def insert_student(
     branch: str,
 ) -> Dict[str, Any]:
     """Insert a new student."""
+    validate_usn(usn)
     clean_usn = usn.strip()
     clean_name = name.strip()
     clean_branch = branch.strip()
@@ -214,10 +217,12 @@ def insert_students_bulk(
         target = target_or_students  # type: ignore[assignment]
         actual_students = students or []
 
-    records = [
-        {"usn": s["usn"].strip(), "name": s["name"].strip(), "branch": s["branch"].strip()}
-        for s in actual_students
-    ]
+    records = []
+    for s in actual_students:
+        validate_usn(s["usn"])
+        records.append(
+            {"usn": s["usn"].strip(), "name": s["name"].strip(), "branch": s["branch"].strip()}
+        )
 
     if isinstance(target, Session):
         if not records:
@@ -390,6 +395,7 @@ def insert_room(
     name: str,
 ) -> Dict[str, Any]:
     """Insert a new room."""
+    validate_room_id(room_id)
     clean_id = room_id.strip()
     clean_name = name.strip()
 
@@ -419,8 +425,10 @@ def insert_rooms_bulk(
         target = target_or_rooms  # type: ignore[assignment]
         actual_rooms = rooms or []
 
-    records = [{"room_id": r["room_id"].strip(), "name": r["name"].strip()} for r in actual_rooms]
-
+    records = []
+    for r in actual_rooms:
+        validate_room_id(r["room_id"])
+        records.append({"room_id": r["room_id"].strip(), "name": r["name"].strip()})
     if isinstance(target, Session):
         if not records:
             return 0
@@ -480,9 +488,38 @@ def get_existing_student_usns(
     placeholders = ",".join("?" for _ in clean)
     with _get_conn(target) as conn:
         rows = conn.execute(
-            f"SELECT usn FROM students WHERE usn IN ({placeholders})", tuple(clean)
+            f"SELECT usn FROM students WHERE usn IN ({placeholders})", tuple(clean)  # nosec B608 - placeholders only contains '?'
         ).fetchall()
         return {str(r[0]).strip().upper() for r in rows}
+
+
+def ensure_unallocated_room(target: Union[sqlite3.Connection, Session, str]) -> None:
+    """Ensure the fallback UNALLOCATED room exists in the rooms table."""
+    try:
+        if isinstance(target, Session):
+            existing = target.scalar(select(Room.room_id).where(Room.room_id == "UNALLOCATED"))
+            if not existing:
+                fallback = Room(
+                    room_id="UNALLOCATED",
+                    name="Unallocated Classroom",
+                    dept_id="GEN",
+                    room_type="Classroom",
+                    capacity=200,
+                )
+                target.add(fallback)
+                target.commit()
+        else:
+            with _get_conn(target) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT room_id FROM rooms WHERE room_id = 'UNALLOCATED'")
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO rooms (room_id, name, dept_id, room_type, capacity) VALUES (?, ?, ?, ?, ?)",
+                        ("UNALLOCATED", "Unallocated Classroom", "GEN", "Classroom", 200),
+                    )
+                    conn.commit()
+    except Exception as exc:
+        logger.warning("Could not ensure UNALLOCATED room: %s", exc)
 
 
 def get_existing_room_ids(
@@ -493,13 +530,15 @@ def get_existing_room_ids(
     clean = {str(r).strip() for r in room_ids if str(r).strip()}
     if not clean:
         return set()
+    if "UNALLOCATED" in clean:
+        ensure_unallocated_room(target)
     if isinstance(target, Session):
         rows = target.scalars(select(Room.room_id).where(Room.room_id.in_(clean))).all()
         return {str(r).strip() for r in rows}
     placeholders = ",".join("?" for _ in clean)
     with _get_conn(target) as conn:
         rows = conn.execute(
-            f"SELECT room_id FROM rooms WHERE room_id IN ({placeholders})", tuple(clean)
+            f"SELECT room_id FROM rooms WHERE room_id IN ({placeholders})", tuple(clean)  # nosec B608 - placeholders only contains '?'
         ).fetchall()
         return {str(r[0]).strip() for r in rows}
 
@@ -1048,6 +1087,8 @@ def insert_attendance(
     recorded_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Insert or optionally upsert an attendance record."""
+    validate_usn(usn)
+    validate_room_id(room_id)
     clean_status = normalize_attendance_status(status)
     clean_allocation_id = allocation_id.strip() if allocation_id else None
     clean_attendance_id = attendance_id.strip() if attendance_id else str(uuid4())
@@ -1256,20 +1297,23 @@ def insert_attendance_bulk(
         target = target_or_records  # type: ignore[assignment]
         actual_records = records or []
 
-    formatted_records = [
-        {
-            "attendance_id": str(uuid4()),
-            "session_id": r["session_id"].strip(),
-            "allocation_id": (r.get("allocation_id") or None),
-            "usn": r["usn"].strip(),
-            "room_id": r["room_id"].strip(),
-            "status": normalize_attendance_status(r["status"]),
-            "source": r["source"].strip(),
-            "confidence": float(r.get("confidence", 1.0)),
-            "recorded_at": r.get("recorded_at") or _utcnow_iso(),
-        }
-        for r in actual_records
-    ]
+    formatted_records = []
+    for r in actual_records:
+        validate_usn(r["usn"])
+        validate_room_id(r["room_id"])
+        formatted_records.append(
+            {
+                "attendance_id": str(uuid4()),
+                "session_id": r["session_id"].strip(),
+                "allocation_id": (r.get("allocation_id") or None),
+                "usn": r["usn"].strip(),
+                "room_id": r["room_id"].strip(),
+                "status": normalize_attendance_status(r["status"]),
+                "source": r["source"].strip(),
+                "confidence": float(r.get("confidence", 1.0)),
+                "recorded_at": r.get("recorded_at") or _utcnow_iso(),
+            }
+        )
 
     if not formatted_records:
         return 0
