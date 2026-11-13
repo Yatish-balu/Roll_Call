@@ -341,6 +341,9 @@ class ToolRegistry:
 
         def _resolve_tool(tool_name: str, fallback: Any) -> Any:
             import sys
+            leg_mod = sys.modules.get("app.agent.legacy_agent")
+            if leg_mod and hasattr(leg_mod, tool_name):
+                return getattr(leg_mod, tool_name)
             mod = sys.modules.get("app.agent")
             if mod and hasattr(mod, tool_name):
                 return getattr(mod, tool_name)

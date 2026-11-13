@@ -32,6 +32,15 @@ from app.agent.tools.timetable_tools import (
     GET_DAY_SCHEDULE_TOOL,
     GET_MY_TIMETABLE_TOOL,
 )
+from app.agent.tools.db_agent_tools import (
+    summarize_attendance,
+    get_pending_unreviewed_sessions,
+    get_class_schedule,
+    find_vacant_classrooms,
+    query_student_attendance_record,
+    create_attendance_session,
+    update_user_profile,
+)
 
 logger = logging.getLogger("rollcall.agent.tools")
 
@@ -80,5 +89,12 @@ __all__ = [
     "BULK_ATTENDANCE_PROPOSAL_TOOL",
     "GET_MY_PROFILE_TOOL",
     "GET_DEFAULTERS_ANALYSIS_TOOL",
+    "summarize_attendance",
+    "get_pending_unreviewed_sessions",
+    "get_class_schedule",
+    "find_vacant_classrooms",
+    "query_student_attendance_record",
+    "create_attendance_session",
+    "update_user_profile",
 ]
 
