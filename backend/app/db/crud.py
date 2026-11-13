@@ -34,6 +34,7 @@ from app.db.models import (
     Attendance,
     User,
     TeacherSubject,
+    FacultySubject,
     AuditLog,
     AuditChainHead,
     LoginAttempt,
@@ -1856,25 +1857,57 @@ def is_teacher_assigned_to_subject(
     user_id: str = "",
     subject_code: str = "",
 ) -> bool:
-    """True when ``user_id`` is mapped to ``subject_code`` in teacher_subjects."""
+    """True when ``user_id`` is mapped to ``subject_code`` in teacher_subjects or faculty_subjects."""
     clean_user = (user_id or "").strip()
     clean_code = (subject_code or "").strip().upper()
     if not clean_user or not clean_code:
         return False
 
     if isinstance(target, Session):
-        stmt = select(TeacherSubject.id).where(
-            TeacherSubject.user_id == clean_user,
-            func.upper(TeacherSubject.subject_code) == clean_code,
-        )
-        return target.execute(stmt).first() is not None
+        try:
+            stmt = select(TeacherSubject.id).where(
+                TeacherSubject.user_id == clean_user,
+                func.upper(TeacherSubject.subject_code) == clean_code,
+            )
+            if target.execute(stmt).first() is not None:
+                return True
+        except Exception:
+            pass
+
+        try:
+            stmt = select(FacultySubject.id).where(
+                FacultySubject.user_id == clean_user,
+                func.upper(FacultySubject.subject_code) == clean_code,
+            )
+            if target.execute(stmt).first() is not None:
+                return True
+        except Exception:
+            pass
+
+        return False
 
     with _get_conn(target) as conn:
-        row = conn.execute(
-            "SELECT 1 FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
-            (clean_user, clean_code),
-        ).fetchone()
-        return row is not None
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
+                (clean_user, clean_code),
+            ).fetchone()
+            if row is not None:
+                return True
+        except Exception:
+            pass
+
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM faculty_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
+                (clean_user, clean_code),
+            ).fetchone()
+            if row is not None:
+                return True
+        except Exception:
+            pass
+
+        return False
 
 
 def get_attendance_by_student(
@@ -2090,17 +2123,40 @@ def get_teacher_subjects(
     *,
     user_id: str,
 ) -> List[str]:
-    """List all subject codes assigned to a given teacher."""
+    """List all subject codes assigned to a given teacher across teacher_subjects and faculty_subjects."""
     clean_uid = user_id.strip()
+    codes: Set[str] = set()
     if isinstance(target, Session):
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
-        res = target.execute(stmt)
-        return [row[0] for row in res.all()]
+        try:
+            stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
+            codes.update(r[0] for r in target.execute(stmt).all() if r[0])
+        except Exception:
+            pass
 
-    query = "SELECT subject_code FROM teacher_subjects WHERE user_id = ? ORDER BY subject_code ASC"
+        try:
+            stmt = select(FacultySubject.subject_code).where(FacultySubject.user_id == clean_uid)
+            codes.update(r[0] for r in target.execute(stmt).all() if r[0])
+        except Exception:
+            pass
+
+        return sorted(codes)
+
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, (clean_uid,))
-        return [r["subject_code"] if isinstance(r, sqlite3.Row) else r[0] for r in cursor.fetchall()]
+        try:
+            query = "SELECT subject_code FROM teacher_subjects WHERE user_id = ? ORDER BY subject_code ASC"
+            cursor = conn.execute(query, (clean_uid,))
+            codes.update(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0] for r in cursor.fetchall())
+        except Exception:
+            pass
+
+        try:
+            query = "SELECT subject_code FROM faculty_subjects WHERE user_id = ? ORDER BY subject_code ASC"
+            cursor = conn.execute(query, (clean_uid,))
+            codes.update(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0] for r in cursor.fetchall())
+        except Exception:
+            pass
+
+    return sorted(codes)
 
 
 def list_teacher_subject_mappings(
@@ -2117,17 +2173,41 @@ def list_teacher_subject_mappings(
     clean_code = subject_code.strip().upper() if subject_code else None
 
     if isinstance(target, Session):
-        stmt = select(TeacherSubject)
-        if clean_uid:
-            stmt = stmt.where(TeacherSubject.user_id == clean_uid)
-        if clean_code:
-            stmt = stmt.where(TeacherSubject.subject_code == clean_code)
-        stmt = stmt.order_by(TeacherSubject.user_id.asc(), TeacherSubject.subject_code.asc())
-        rows = target.execute(stmt).scalars().all()
-        return [
-            {"id": r.id, "user_id": r.user_id, "subject_code": r.subject_code}
-            for r in rows
-        ]
+        mappings = []
+        seen = set()
+        try:
+            stmt = select(TeacherSubject)
+            if clean_uid:
+                stmt = stmt.where(TeacherSubject.user_id == clean_uid)
+            if clean_code:
+                stmt = stmt.where(TeacherSubject.subject_code == clean_code)
+            stmt = stmt.order_by(TeacherSubject.user_id.asc(), TeacherSubject.subject_code.asc())
+            rows = target.execute(stmt).scalars().all()
+            for r in rows:
+                key = (r.user_id, r.subject_code)
+                if key not in seen:
+                    seen.add(key)
+                    mappings.append({"id": r.id, "user_id": r.user_id, "subject_code": r.subject_code})
+        except Exception:
+            pass
+
+        try:
+            stmt2 = select(FacultySubject)
+            if clean_uid:
+                stmt2 = stmt2.where(FacultySubject.user_id == clean_uid)
+            if clean_code:
+                stmt2 = stmt2.where(FacultySubject.subject_code == clean_code)
+            stmt2 = stmt2.order_by(FacultySubject.user_id.asc(), FacultySubject.subject_code.asc())
+            rows2 = target.execute(stmt2).scalars().all()
+            for r in rows2:
+                key = (r.user_id, r.subject_code)
+                if key not in seen:
+                    seen.add(key)
+                    mappings.append({"id": r.id, "user_id": r.user_id, "subject_code": r.subject_code})
+        except Exception:
+            pass
+
+        return mappings
 
     query = "SELECT id, user_id, subject_code FROM teacher_subjects WHERE 1=1"
     params: List[Any] = []
@@ -2138,6 +2218,41 @@ def list_teacher_subject_mappings(
         query += " AND subject_code = ?"
         params.append(clean_code)
     query += " ORDER BY user_id ASC, subject_code ASC"
+    try:
+        with _get_conn(target) as conn:
+            cursor = conn.execute(query, tuple(params))
+            return [
+                {
+                    "id": r["id"] if isinstance(r, sqlite3.Row) else r[0],
+                    "user_id": r["user_id"] if isinstance(r, sqlite3.Row) else r[1],
+                    "subject_code": r["subject_code"] if isinstance(r, sqlite3.Row) else r[2],
+                }
+                for r in cursor.fetchall()
+            ]
+    except Exception:
+        # Fallback to faculty_subjects in SQLite if teacher_subjects doesn't exist
+        try:
+            f_query = "SELECT id, user_id, subject_code FROM faculty_subjects WHERE 1=1"
+            f_params: List[Any] = []
+            if clean_uid:
+                f_query += " AND user_id = ?"
+                f_params.append(clean_uid)
+            if clean_code:
+                f_query += " AND subject_code = ?"
+                f_params.append(clean_code)
+            f_query += " ORDER BY user_id ASC, subject_code ASC"
+            with _get_conn(target) as conn:
+                cursor = conn.execute(f_query, tuple(f_params))
+                return [
+                    {
+                        "id": r["id"] if isinstance(r, sqlite3.Row) else r[0],
+                        "user_id": r["user_id"] if isinstance(r, sqlite3.Row) else r[1],
+                        "subject_code": r["subject_code"] if isinstance(r, sqlite3.Row) else r[2],
+                    }
+                    for r in cursor.fetchall()
+                ]
+        except Exception:
+            return []
     with _get_conn(target) as conn:
         cursor = conn.execute(query, tuple(params))
         return [

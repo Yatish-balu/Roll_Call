@@ -70,6 +70,133 @@ def _reject_non_plain_table_reference(raw_ref: str) -> None:
         )
 
 
+_SET_OPERATION_RE = re.compile(r"\b(UNION|INTERSECT|EXCEPT)\b", re.IGNORECASE)
+_RISKY_TABLE_FUNCTION_RE = re.compile(
+    r"\b(FROM|JOIN)\s+(LATERAL\b|VALUES\b|json_each\s*\(|jsonb_each\s*\(|"
+    r"generate_series\s*\(|unnest\s*\()",
+    re.IGNORECASE,
+)
+_PAREN_TABLE_RE = re.compile(r"\b(FROM|JOIN)\s*\(", re.IGNORECASE)
+
+
+def _from_clause_has_comma(sql: str) -> bool:
+    """Detect a comma-separated table list at the top level of a FROM clause.
+
+    ``FROM students, attendance`` is a cross join in which only the first table
+    is preceded by ``FROM``. The scope rewrite only understands ``FROM``/``JOIN``
+    prefixes, so this form would leave the second table unscoped.
+    """
+    depth = 0
+    in_from = False
+    i = 0
+    n = len(sql)
+
+    while i < n:
+        ch = sql[i]
+
+        # Skip single-quoted string literals (including doubled quotes).
+        if ch == "'":
+            i += 1
+            while i < n:
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        i += 2
+                        continue
+                    break
+                i += 1
+            i += 1
+            continue
+
+        # Skip quoted identifiers.
+        if ch in ('"', "`", "["):
+            closing = '"' if ch == '"' else ("`" if ch == "`" else "]")
+            i += 1
+            while i < n and sql[i] != closing:
+                i += 1
+            i += 1
+            continue
+
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+
+        if depth == 0:
+            if ch.isalpha() or ch == "_":
+                j = i
+                while j < n and (sql[j].isalnum() or sql[j] == "_"):
+                    j += 1
+                word = sql[i:j].upper()
+                if word == "FROM":
+                    in_from = True
+                elif in_from and word in {
+                    "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET",
+                    "JOIN", "ON", "USING", "WINDOW", "QUALIFY",
+                }:
+                    in_from = False
+                i = j
+                continue
+            if in_from and ch == ",":
+                return True
+
+        i += 1
+
+    return False
+
+
+def _reject_unsafe_scoped_sql(sql: str) -> None:
+    """Reject constructs the regex scope rewrite cannot prove it covers.
+
+    The rewrite replaces ``FROM <table>`` / ``JOIN <table>`` with a filtered
+    sub-select. CTEs, set operations, parenthesised table expressions, and
+    comma-separated table lists can introduce a table reference in a position
+    the rewrite does not recognise, so they fail closed for scoped callers.
+    """
+    if re.match(r"^\s*WITH\b", sql, re.IGNORECASE):
+        raise ValueError(
+            "Common table expressions (WITH) are not permitted for scoped queries."
+        )
+    if _SET_OPERATION_RE.search(sql):
+        raise ValueError(
+            "Set operations (UNION/INTERSECT/EXCEPT) are not permitted for scoped queries."
+        )
+    if _RISKY_TABLE_FUNCTION_RE.search(sql):
+        raise ValueError(
+            "Table-valued functions are not permitted for scoped queries."
+        )
+    if _PAREN_TABLE_RE.search(sql):
+        raise ValueError(
+            "Parenthesised table expressions are not permitted for scoped queries."
+        )
+    if _from_clause_has_comma(sql):
+        raise ValueError(
+            "Comma-separated table lists are not permitted for scoped queries; "
+            "use explicit JOINs."
+        )
+
+
+def _is_unrestricted_scope(scope: Any) -> bool:
+    """Return True when the caller has unrestricted college-wide access.
+
+    Admin callers (``unrestricted=True`` or ``UserContext.role == 'admin'``)
+    never receive ``dept_id`` or ``subject_code`` SQL filters.
+    """
+    if scope is None:
+        return True
+    if getattr(scope, "unrestricted", False):
+        return True
+    role = getattr(scope, "role", None)
+    if role is not None:
+        role_str = getattr(role, "value", str(role)).strip().lower()
+        if role_str in ("admin", "role.admin"):
+            return True
+    return False
+
+
 def _scope_clause(
     scope: Any,
     table: str,
@@ -82,11 +209,36 @@ def _scope_clause(
     restriction is applied by the database engine and not by the caller (or by
     the model) afterwards.
     """
-    if scope is None or getattr(scope, "unrestricted", False):
+    if _is_unrestricted_scope(scope):
         return None
 
-    session_ids = sorted(scope.visible_session_ids(db)) if db is not None else []
+    codes = sorted(getattr(scope, "subject_codes", frozenset()) or frozenset())
+    session_ids = (
+        sorted(scope.visible_session_ids(db))
+        if (db is not None and hasattr(scope, "visible_session_ids"))
+        else []
+    )
     if not session_ids:
+        if db is None and codes:
+            code_placeholders = []
+            for idx, code in enumerate(codes):
+                key = f"{table}_code_{idx}"
+                params[key] = str(code).strip().upper()
+                code_placeholders.append(f":{key}")
+            code_in = ", ".join(code_placeholders)
+            if table == "sessions":
+                return f"(SELECT * FROM sessions WHERE UPPER(subject_code) IN ({code_in}))"  # nosec B608
+            if table == "attendance":
+                return (
+                    "(SELECT * FROM attendance WHERE session_id IN "  # nosec B608
+                    f"(SELECT session_id FROM sessions WHERE UPPER(subject_code) IN ({code_in})))"
+                )
+            if table == "students":
+                return (
+                    "(SELECT * FROM students WHERE usn IN "  # nosec B608
+                    "(SELECT a.usn FROM attendance a JOIN sessions s ON a.session_id = s.session_id "
+                    f"WHERE UPPER(s.subject_code) IN ({code_in})))"
+                )
         # No visible session: the table is empty for this caller.
         # nosec B608 - table names are restricted to ALLOWED_TABLES by _validate_sql.
         return "(SELECT * FROM {t} WHERE 1 = 0)".format(t=table)  # nosec B608
@@ -100,7 +252,6 @@ def _scope_clause(
     sess_list = ", ".join(placeholders)
     params.update(dict(sess_params))
 
-    codes = sorted(getattr(scope, "subject_codes", frozenset()) or frozenset())
     code_clause = ""
     if codes:
         code_placeholders = []
@@ -138,8 +289,12 @@ _VALIDATED_TABLE_REF_RE = re.compile(
 
 def _apply_scope_to_sql(sql: str, scope: Any, db: Any = None) -> Tuple[str, Dict[str, Any]]:
     """Rewrite a validated SELECT so that it can only read the caller's scope."""
-    if scope is None or getattr(scope, "unrestricted", False):
+    if _is_unrestricted_scope(scope):
         return sql, {}
+
+    # Fail closed on constructs the rewrite cannot prove it covers (CTEs, set
+    # operations, parenthesised table expressions, comma-separated table lists).
+    _reject_unsafe_scoped_sql(sql)
 
     # Defence in depth: never rewrite a statement whose table references the
     # scope rewrite cannot see (quoted / schema-qualified names, or a comment
@@ -383,6 +538,7 @@ def safe_sql_query(
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     limit: int = 500,
     scope: Any = None,
+    user_context: Any = None,
 ) -> QueryResult:
     """
     Execute an arbitrary read-only SQL query with safety validation and parameterization.
@@ -392,9 +548,10 @@ def safe_sql_query(
     enforce their scope directly; raw SQL is available only to unrestricted
     administrative callers.
     """
+    scope = scope if scope is not None else user_context
     validate_read_only_sql(sql)
 
-    if scope is not None and not getattr(scope, "unrestricted", False) and not hasattr(scope, "visible_session_ids"):
+    if not _is_unrestricted_scope(scope) and not hasattr(scope, "visible_session_ids"):
         return QueryResult(
             found=False,
             data=[],
@@ -465,6 +622,7 @@ def query_attendance(
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     scope: Any = None,
+    user_context: Any = None,
 ) -> QueryResult:
     """Query attendance records with optional filtering by session, room, branch, USN, or status.
 
@@ -472,6 +630,7 @@ def query_attendance(
     read, and an explicitly requested session outside that scope yields no data
     (the existence of the session is not confirmed).
     """
+    scope = scope if scope is not None else user_context
     # LIMIT is interpolated into the SQL text, so coerce it to a bounded int.
     try:
         limit = max(1, min(1000, int(limit)))
@@ -481,8 +640,8 @@ def query_attendance(
     conditions = []
     params: List[Any] = []
 
-    if scope is not None and not getattr(scope, "unrestricted", False):
-        visible = sorted(scope.visible_session_ids(db_target))
+    if not _is_unrestricted_scope(scope):
+        visible = sorted(scope.visible_session_ids(db_target)) if hasattr(scope, "visible_session_ids") else []
         if session_id and session_id.strip() and session_id.strip() not in visible:
             return QueryResult(
                 found=False,
@@ -681,12 +840,14 @@ def query_students(
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     scope: Any = None,
+    user_context: Any = None,
 ) -> QueryResult:
     """Retrieve students matching optional usn, branch, or name filters.
 
     When a ``scope`` is supplied only students inside the caller's scope are
     returned.
     """
+    scope = scope if scope is not None else user_context
     # LIMIT is interpolated into the SQL text, so coerce it to a bounded int.
     try:
         limit = max(1, min(1000, int(limit)))
@@ -696,8 +857,12 @@ def query_students(
     conditions = []
     params: List[Any] = []
 
-    if scope is not None and not getattr(scope, "unrestricted", False):
-        visible = sorted(scope.visible_student_usns(db_target))
+    if not _is_unrestricted_scope(scope):
+        visible = (
+            sorted(scope.visible_student_usns(db_target))
+            if hasattr(scope, "visible_student_usns")
+            else []
+        )
         if not visible:
             return QueryResult(
                 found=False,
@@ -755,16 +920,22 @@ def query_session_stats(
     session_id: str,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     scope: Any = None,
+    user_context: Any = None,
 ) -> QueryResult:
     """Calculate aggregated attendance metrics for a specific session.
 
     When a ``scope`` is supplied, a session outside the caller's scope is
     reported as "no data" instead of confirming that it exists.
     """
+    scope = scope if scope is not None else user_context
     clean_id = session_id.strip()
 
-    if scope is not None and not getattr(scope, "unrestricted", False):
-        visible = sorted(scope.visible_session_ids(db_target))
+    if not _is_unrestricted_scope(scope):
+        visible = (
+            sorted(scope.visible_session_ids(db_target))
+            if hasattr(scope, "visible_session_ids")
+            else []
+        )
         if clean_id not in visible:
             return QueryResult(
                 found=False,
@@ -876,8 +1047,10 @@ def query_absentees(
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     scope: Any = None,
+    user_context: Any = None,
 ) -> QueryResult:
     """Retrieve absent students for a given session or room/branch combination."""
+    scope = scope if scope is not None else user_context
     return query_attendance(
         session_id=session_id,
         room_id=room_id,
@@ -901,9 +1074,11 @@ def query_tool(
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     scope: Any = None,
+    user_context: Any = None,
     **kwargs: Any,
 ) -> QueryResult:
     """Universal dispatcher for database query operations."""
+    scope = scope if scope is not None else user_context
     clean_type = str(query_type).strip().lower()
 
     if clean_type in ("attendance", "records"):

@@ -28,16 +28,7 @@ logger = logging.getLogger("rollcall.routers.students")
 router = APIRouter(prefix="/students", tags=["Students"])
 
 
-def _client_ip(request: Optional[Request]) -> Optional[str]:
-    """Best-effort client address (never a credential)."""
-    if request is None:
-        return None
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
-    if request.client and request.client.host:
-        return request.client.host
-    return None
+from app.security.client_ip import get_client_ip as _client_ip
 
 
 @router.get(

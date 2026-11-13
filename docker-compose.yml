@@ -5,11 +5,13 @@
 # The application falls back to the database counters when REDIS_URL is unset.
 #
 #   docker compose up -d redis
-#   # then set in .env:  REDIS_URL=redis://127.0.0.1:6379/0
+#   # then set in .env:
+#   REDIS_URL=redis://:rollcall-local-dev-redis@127.0.0.1:6379/0
 #
-# Port 6379 is bound to 127.0.0.1 only: the cache is never reachable from the
-# network, so no password is required for local development. Production Redis
-# must be authenticated and reached over TLS (managed service or private VPC).
+# Port 6379 is bound to 127.0.0.1 only and Redis requires a password even for
+# local development. Override REDIS_PASSWORD for a non-default local value.
+# Production Redis must be authenticated and reached over TLS (managed service
+# or private VPC).
 
 services:
   redis:
@@ -22,12 +24,16 @@ services:
       - --save
       - "60"
       - "1"
+      - --requirepass
+      - ${REDIS_PASSWORD:-rollcall-local-dev-redis}
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-rollcall-local-dev-redis}
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep PONG"]
       interval: 5s
       timeout: 3s
       retries: 5

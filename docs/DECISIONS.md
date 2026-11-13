@@ -21,3 +21,5 @@ These close the gaps in the spec so the system behavior is well-defined and cons
 | **D14** | **Time display (NEW)** | API sends UTC with Z. React shows local time (IST) using one helper function. |
 | **D15** | **Error body (NEW)** | `{error: {code, message}}` with codes `UNAUTHENTICATED` 401, `FORBIDDEN` 403, `LOCKED` 403, `NOT_FOUND` 404, `VALIDATION` 422, `QUALITY_REJECTED` 422, `RATE_LIMITED` 429. |
 
+
+D16 (RC-RBAC-002): Admin access is strictly college-wide and unrestricted across all departments, branches, rooms, and subjects (`users.role = 'admin'` / `Role.ADMIN` applies zero `dept_id` or `subject_code` filters, even if a `dept_id` profile field is present). Teacher/faculty access (`Role.FACULTY`) is scoped strictly to their owned/coordinated sessions and mapped rows in `faculty_subjects` / `teacher_subjects`. Department-level leadership schema columns (`departments.head_of_dept_id` and `department_staff`) remain unused and deferred for post-freeze HOD features so they never filter admin queries.

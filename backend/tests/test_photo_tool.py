@@ -333,12 +333,27 @@ class TestParseAndValidateJson:
 class TestReadPhotoToolLLMPath:
     """Test the full pipeline with _call_gemini mocked — no API key needed."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_llm_egress(self, monkeypatch):
+        # Third-party vision egress is opt-in; these tests exercise that path.
+        monkeypatch.setenv("PHOTO_LLM_EGRESS_ENABLED", "true")
+
     def _valid_llm_response(self):
         return json.dumps([
             {"usn": "1MS21CS001", "name": "Alice Smith",   "status": "PRESENT", "confidence": 0.96},
             {"usn": "1MS21CS002", "name": "Bob Jones",     "status": "ABSENT",  "confidence": 0.92},
             {"usn": "1MS21CS003", "name": "Charlie Brown", "status": "PENDING", "confidence": 0.88},
         ])
+
+    def test_llm_egress_disabled_uses_local_ocr(self, attendance_image, monkeypatch):
+        """Without the explicit opt-in, student photos must never be uploaded."""
+        monkeypatch.delenv("PHOTO_LLM_EGRESS_ENABLED", raising=False)
+        with patch("tools.read_photo_tool._call_gemini") as mock_llm:
+            result = read_photo_tool(
+                str(attendance_image), api_key="fake-key", force_ocr=True
+            )
+        mock_llm.assert_not_called()
+        assert result.source == ExtractionSource.OCR_FALLBACK
 
     def test_llm_path_success(self, attendance_image):
         with patch("tools.read_photo_tool._call_gemini", return_value=self._valid_llm_response()):
@@ -529,6 +544,10 @@ class TestPhotoIntegration:
     to have been run first.
     All LLM calls mocked — runs offline using OCR only (force_ocr=True).
     """
+
+    @pytest.fixture(autouse=True)
+    def _enable_llm_egress(self, monkeypatch):
+        monkeypatch.setenv("PHOTO_LLM_EGRESS_ENABLED", "true")
 
     def test_clean_sheet_extracts_8_rows(self):
         path = PHOTOS_DIR / "sheet_clean.jpg"

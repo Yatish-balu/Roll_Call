@@ -89,14 +89,7 @@ ALLOWED_EXTENSIONS = {
 DOCUMENT_EXTENSIONS = {".pdf", ".xlsx", ".xls"}
 
 
-def _client_ip(request: Request) -> Optional[str]:
-    """Best-effort client address (never a credential)."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
-    if request.client and request.client.host:
-        return request.client.host
-    return None
+from app.security.client_ip import get_client_ip as _client_ip
 
 
 def _log_embedded_instruction(

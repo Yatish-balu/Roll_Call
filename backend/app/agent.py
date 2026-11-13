@@ -443,7 +443,6 @@ class ToolRegistry:
                     "properties": {
                         "data": {"type": "array", "description": "Validated attendance data or summary."},
                         "format": {"type": "string", "enum": ["excel", "pdf"], "description": "Export format."},
-                        "output_path": {"type": "string", "description": "Destination file path."},
                         "overwrite": {"type": "boolean", "description": "Allow overwrite."},
                     },
                     "required": ["data"],
@@ -509,8 +508,10 @@ class AttendanceAgent:
         req_id = request_id or str(uuid.uuid4())
         input_str = (user_input or "").strip()
 
-        # 1. Determine input mode
-        resolved_file = Path(file_path) if file_path else self._detect_file_in_text(input_str)
+        # 1. Determine input mode. Only an explicit, already-validated upload
+        # path is accepted; free-text paths are never resolved against the
+        # server filesystem (that would let a chat message read local files).
+        resolved_file = Path(file_path) if file_path else None
 
         if resolved_file:
             # Reject empty/malformed source files before starting the pipeline.
@@ -1024,16 +1025,6 @@ class AttendanceAgent:
             data=res.data,
             tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
         )
-
-    @staticmethod
-    def _detect_file_in_text(text: str) -> Optional[Path]:
-        """Detect file path mentioned inside text string."""
-        match = re.search(r"([A-Za-z0-9_./\\-]+\.(?:csv|png|jpg|jpeg|bmp|webp))", text, re.IGNORECASE)
-        if match:
-            candidate = Path(match.group(1))
-            if candidate.exists():
-                return candidate
-        return None
 
     @staticmethod
     def _detect_room_in_text(text: str) -> Optional[str]:

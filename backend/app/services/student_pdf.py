@@ -10,6 +10,7 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
@@ -112,10 +113,10 @@ def export_students_pdf(
     )
 
     story = [
-        Paragraph(title, title_style),
+        Paragraph(xml_escape(str(title)), title_style),
         Paragraph(
             f"Generated {datetime.datetime.now().strftime('%d %b %Y, %H:%M')} &nbsp;|&nbsp; "
-            f"{describe_filters(branch, semester)} &nbsp;|&nbsp; "
+            f"{xml_escape(describe_filters(branch, semester))} &nbsp;|&nbsp; "
             f"Students: {len(students)}",
             meta_style,
         ),

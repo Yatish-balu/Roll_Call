@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+import secrets
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -59,11 +60,27 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         if missing:
             raise ValueError(f"Production security error: The following seed passwords must be set in environment: {missing}")
     else:
-        # Development safe defaults
-        admin_pw = admin_pw or "AdminSecurePass_2026!"
-        f1_pw = f1_pw or "FacultyPass_DIST_2026!"
-        f2_pw = f2_pw or "FacultyPass_ML_2026!"
-        f3_pw = f3_pw or "FacultyPass_CN_2026!"
+        # Never ship a static default password. If the operator did not choose
+        # one, generate a random value per run and show it once. This keeps a
+        # seeded development database from being trivially guessable.
+        def _dev_password(env_name: str, user_id: str) -> str:
+            configured = os.getenv(env_name)
+            if configured:
+                return configured
+            generated = secrets.token_urlsafe(18)
+            logger.warning(
+                "No %s set; generated a random development password for '%s': %s "
+                "(change it after first login).",
+                env_name,
+                user_id,
+                generated,
+            )
+            return generated
+
+        admin_pw = _dev_password("SEED_ADMIN_PASSWORD", "admin_root")
+        f1_pw = _dev_password("SEED_FACULTY_1_PASSWORD", "faculty_ds")
+        f2_pw = _dev_password("SEED_FACULTY_2_PASSWORD", "faculty_ml")
+        f3_pw = _dev_password("SEED_FACULTY_3_PASSWORD", "faculty_cn")
 
     return [
         {

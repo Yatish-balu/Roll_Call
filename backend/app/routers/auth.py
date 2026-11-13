@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import create_access_token
 from app.auth.roles import normalize_role
+from app.db import crud
 from app.db.connection import get_sync_session_factory
 from app.db.models import AuthRefreshToken, AuthSession, LoginAttempt, TeacherSubject, User
 from app.schemas.auth import AuthenticatedUser, LoginRequest, LoginResponse, Role, UserMeResponse
@@ -80,15 +81,9 @@ def _client_ip(request: Request) -> str:
     because otherwise any client could spoof the header and dodge the per-IP
     quota.
     """
-    peer = request.client.host if request.client else "127.0.0.1"
-    trust_proxy = os.getenv("TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes", "on"}
-    if trust_proxy:
-        forwarded = request.headers.get("X-Forwarded-For", "")
-        if forwarded:
-            first = forwarded.split(",")[0].strip()
-            if first:
-                return first[:45]
-    return peer[:45]
+    from app.security.client_ip import get_client_ip
+
+    return get_client_ip(request, default="127.0.0.1") or "127.0.0.1"
 
 
 def _too_many_requests(retry_after: int, message: str) -> JSONResponse:
@@ -543,8 +538,7 @@ def login(request: Request, payload: LoginRequest):
                 )
 
         # 10. Fetch assigned subject codes
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
-        subject_codes = [r[0] for r in db.execute(stmt).all()]
+        subject_codes = crud.get_teacher_subjects(db, user_id=clean_uid)
 
         out_response = JSONResponse(
             status_code=status.HTTP_200_OK,
@@ -756,8 +750,7 @@ def refresh(request: Request):
         db.commit()
 
         # Fetch assigned subject codes
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == user.user_id)
-        subject_codes = [r[0] for r in db.execute(stmt).all()]
+        subject_codes = crud.get_teacher_subjects(db, user_id=user.user_id)
 
         # Issue replacement 15-minute access JWT
         exp_dt = now_dt + timedelta(minutes=15)
@@ -888,8 +881,7 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
                 headers={"WWW-Authenticate": "Bearer"},
             )
 
-        stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == db_user.user_id)
-        subject_codes = [r[0] for r in db.execute(stmt).all()]
+        subject_codes = crud.get_teacher_subjects(db, user_id=db_user.user_id)
 
         return UserMeResponse(
             user_id=db_user.user_id,

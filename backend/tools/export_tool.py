@@ -10,9 +10,11 @@ Verifies file generation before claiming success.
 from __future__ import annotations
 
 import os
+import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
+from xml.sax.saxutils import escape as xml_escape
 import pandas as pd
 
 from tools.summary_tool import SummaryReport, summary_tool
@@ -91,9 +93,47 @@ def _prepare_export_dataframes(
     return detail_df, room_df, branch_df
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    """Return True when *path* is inside *root* (after symlink resolution)."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _allowed_export_roots() -> List[Path]:
+    """Return the directories exports may be written to.
+
+    The default is ``<repo>/data/exports``. A deployment may point
+    ``ROLLCALL_EXPORT_ROOT`` at a dedicated volume. In non-production runs the
+    system temporary directory is also allowed so tests can use ``tmp_path``;
+    production never writes outside the configured export root.
+    """
+    roots = [(_find_repo_root() / "data" / "exports").resolve()]
+    configured = os.getenv("ROLLCALL_EXPORT_ROOT", "").strip()
+    if configured:
+        roots.append(Path(configured).expanduser().resolve())
+    if os.getenv("APP_ENV", "development").strip().lower() != "production":
+        roots.append(Path(tempfile.gettempdir()).resolve())
+    return roots
+
+
 def _validate_output_path(output_path: Union[str, Path], overwrite: bool = False) -> Path:
-    """Validate path, ensure parent directory exists, and check overwrite rule."""
+    """Validate the destination, ensure its parent exists, and check overwrite.
+
+    The path must resolve inside an allow-listed export root. Without this
+    check, a model- or user-supplied ``output_path`` could write an arbitrary
+    file anywhere the service account can write.
+    """
     path = Path(output_path).resolve()
+    if not any(_is_within(path, root) for root in _allowed_export_roots()):
+        raise ValueError(
+            "Export path is outside the permitted export directory. "
+            "Use a filename only; the server chooses the directory."
+        )
+    if path.exists() and path.is_dir():
+        raise IsADirectoryError(f"Export destination is a directory: '{path}'.")
     if path.exists() and not overwrite:
         raise FileExistsError(
             f"File already exists at '{path}'. Set overwrite=True to allow overwriting."
@@ -260,7 +300,7 @@ def export_to_pdf(
     )
 
     story: List[Any] = []
-    story.append(Paragraph(title, title_style))
+    story.append(Paragraph(xml_escape(str(title)), title_style))
     story.append(Spacer(1, 8))
 
     if pdf_include_timestamp:
@@ -275,11 +315,11 @@ def export_to_pdf(
     def _df_to_table(df: pd.DataFrame, header_bg: str = "#2563eb") -> Table:
         table_data = []
         # Header row
-        header_row = [Paragraph(str(col).replace("_", " ").title(), header_cell_style) for col in df.columns]
+        header_row = [Paragraph(xml_escape(str(col).replace("_", " ").title()), header_cell_style) for col in df.columns]
         table_data.append(header_row)
 
         for _, row in df.iterrows():
-            row_cells = [Paragraph(str(val) if pd.notna(val) else "", cell_style) for val in row]
+            row_cells = [Paragraph(xml_escape(str(val)) if pd.notna(val) else "", cell_style) for val in row]
             table_data.append(row_cells)
 
         t = Table(table_data, repeatRows=1)

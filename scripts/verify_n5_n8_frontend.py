@@ -1,9 +1,25 @@
 import os
 import sys
 import time
+from pathlib import Path
+
 from playwright.sync_api import sync_playwright
 
+# Screenshots stay inside the repository; never write to an absolute path that
+# belongs to a specific developer's machine.
+SCREENSHOT_DIR = Path(__file__).resolve().parents[1] / "reports" / "smoke"
+
 def run_verification():
+    smoke_user = os.getenv("ROLLCALL_SMOKE_USER", "faculty_ml")
+    smoke_password = os.getenv("ROLLCALL_SMOKE_PASSWORD", "")
+    if not smoke_password:
+        print(
+            "ROLLCALL_SMOKE_PASSWORD must be set to the seeded faculty password.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+    SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 900})
@@ -13,9 +29,9 @@ def run_verification():
         page.goto("http://localhost:5173/login", wait_until="networkidle")
         time.sleep(1)
 
-        # Fill credentials for faculty_ml
-        page.fill("input#user_id", "faculty_ml")
-        page.fill("input#password", "FacultyPass_ML_2026!")
+        # Fill credentials for the seeded faculty account
+        page.fill("input#user_id", smoke_user)
+        page.fill("input#password", smoke_password)
         page.click("button[type='submit']")
 
         print("[TEST 1] Waiting for dashboard navigation...")
@@ -23,7 +39,7 @@ def run_verification():
         print("  -> Logged in successfully as faculty_ml")
 
         # Save screenshot of dashboard
-        page.screenshot(path="C:/Users/Bhanu Prasad/.gemini/antigravity/brain/e7c57b79-0fa9-46dd-9c53-d3944d19ea1a/verify_dashboard.png")
+        page.screenshot(path=str(SCREENSHOT_DIR / "verify_dashboard.png"))
         print("  -> Captured verify_dashboard.png")
 
         # F5 Check: Verify breakdown tables on Dashboard
@@ -40,7 +56,7 @@ def run_verification():
         time.sleep(1)
         page.wait_for_selector("text=Academic Sessions", timeout=5000)
         page.wait_for_selector("text=Attendance Ledger", timeout=5000)
-        page.screenshot(path="C:/Users/Bhanu Prasad/.gemini/antigravity/brain/e7c57b79-0fa9-46dd-9c53-d3944d19ea1a/verify_sessions.png")
+        page.screenshot(path=str(SCREENSHOT_DIR / "verify_sessions.png"))
         print("  -> F2: Sessions list loaded with Attendance Ledger buttons and faculty attribution")
 
         # Open Schedule Session modal
@@ -49,7 +65,7 @@ def run_verification():
         page.wait_for_selector("text=Schedule New Session", timeout=5000)
         # Verify assigned subject code is present
         page.wait_for_selector("text=Assigned Subject Code", timeout=5000)
-        page.screenshot(path="C:/Users/Bhanu Prasad/.gemini/antigravity/brain/e7c57b79-0fa9-46dd-9c53-d3944d19ea1a/verify_schedule_modal.png")
+        page.screenshot(path=str(SCREENSHOT_DIR / "verify_schedule_modal.png"))
         print("  -> F2: Schedule Session modal correctly binds authoritative assigned subjects!")
         page.click("button:has-text('Cancel')")
 
@@ -72,7 +88,7 @@ def run_verification():
         print("[TEST 4] Clicking 'Save Changes'...")
         page.click("button:has-text('Save Changes')")
         time.sleep(3)
-        page.screenshot(path="C:/Users/Bhanu Prasad/.gemini/antigravity/brain/e7c57b79-0fa9-46dd-9c53-d3944d19ea1a/verify_attendance_saved.png")
+        page.screenshot(path=str(SCREENSHOT_DIR / "verify_attendance_saved.png"))
         alerts = page.locator("div[class*='border']").all_text_contents()
         print("Alerts/elements on page:", [a.strip() for a in alerts if "attendance" in a.lower() or "session" in a.lower() or "error" in a.lower() or "success" in a.lower() or "replace" in a.lower()])
 
@@ -81,7 +97,7 @@ def run_verification():
         page.goto("http://localhost:5173/assistant", wait_until="networkidle")
         time.sleep(1)
         page.wait_for_selector("text=RollCall AI Assistant", timeout=5000)
-        page.screenshot(path="C:/Users/Bhanu Prasad/.gemini/antigravity/brain/e7c57b79-0fa9-46dd-9c53-d3944d19ea1a/verify_assistant.png")
+        page.screenshot(path=str(SCREENSHOT_DIR / "verify_assistant.png"))
         print("  -> F10: Assistant View loaded cleanly with Dual-Source Agent and Confirmation Card architecture!")
 
         # F6 Check: RBAC Protection on /audit for Faculty
@@ -89,7 +105,7 @@ def run_verification():
         page.goto("http://localhost:5173/audit", wait_until="networkidle")
         time.sleep(1)
         page.wait_for_selector("text=Access Denied", timeout=5000)
-        page.screenshot(path="C:/Users/Bhanu Prasad/.gemini/antigravity/brain/e7c57b79-0fa9-46dd-9c53-d3944d19ea1a/verify_audit_denied_for_faculty.png")
+        page.screenshot(path=str(SCREENSHOT_DIR / "verify_audit_denied_for_faculty.png"))
         print("  -> F6: /audit route correctly rejects non-ADMIN faculty with Access Denied!")
 
         browser.close()

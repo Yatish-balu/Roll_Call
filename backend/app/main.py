@@ -7,7 +7,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
 
 # Ensure backend directory is in sys.path
 _BACKEND_DIR = str(Path(__file__).resolve().parents[1])
@@ -71,6 +71,36 @@ async def lifespan(app: FastAPI):
                 "cannot be used in production."
             )
         validate_jwt_secret_configuration(secret, env)
+
+    if env == "production":
+        # Fail closed on development-only switches that widen the attack surface.
+        debug_flag = os.getenv("DEBUG", "false").strip().lower()
+        if debug_flag in {"1", "true", "yes", "on"}:
+            raise RuntimeError(
+                "Production security violation: DEBUG must be false in production."
+            )
+
+        backend = os.getenv("DB_BACKEND", "supabase").strip().lower()
+        allow_sqlite = os.getenv("ALLOW_SQLITE_IN_PRODUCTION", "").strip().lower() in {
+            "1", "true", "yes", "on",
+        }
+        if backend == "sqlite" and not allow_sqlite:
+            raise RuntimeError(
+                "Production security violation: DB_BACKEND=sqlite is not permitted. "
+                "Use PostgreSQL/Supabase, or set ALLOW_SQLITE_IN_PRODUCTION=true only "
+                "for a deliberate single-node deployment."
+            )
+
+        for secret_name, minimum in (
+            ("AUDIT_CHAIN_HMAC_SECRET", 32),
+            ("MFA_ENCRYPTION_KEY", 32),
+        ):
+            value = os.getenv(secret_name, "").strip()
+            if len(value) < minimum:
+                raise RuntimeError(
+                    f"Production security violation: {secret_name} must be configured "
+                    f"with at least {minimum} characters."
+                )
 
     # Deliberate database connectivity check for production startup.
     # A failed Supabase connection must not be mistaken for a successful startup.
@@ -378,7 +408,13 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Format standard HTTP exceptions with standard {error: {code, message}} body (D15)."""
     code = _map_error_code(exc.status_code, exc.detail)
-    msg = str(exc.detail) if isinstance(exc.detail, str) else "An error occurred."
+    if exc.status_code >= 500:
+        # Never echo internal detail for server-side failures.
+        msg = "An unexpected internal server error occurred. Please try again later."
+        detail: Any = msg
+    else:
+        msg = str(exc.detail) if isinstance(exc.detail, str) else "An error occurred."
+        detail = exc.detail
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -387,7 +423,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
                 "message": msg,
             },
             "status_code": exc.status_code,
-            "detail": exc.detail,
+            "detail": detail,
         },
         headers=exc.headers,
     )
@@ -395,15 +431,31 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
-    """Handle business rule / value exceptions safely without stack trace leaks."""
+    """Handle business rule / value exceptions without leaking internals.
+
+    In production the exception text is written to the server log only; the
+    client receives a generic message. Development keeps the original text to
+    make local debugging practical.
+    """
     logger.warning("Business rule violation: %s", exc)
+    env = os.getenv("APP_ENV", "development").strip().lower()
+    if env == "production":
+        message = "The request could not be processed."
+        detail_value: Any = "Invalid request."
+    else:
+        message = str(exc)
+        detail_value = str(exc)
+    request_id = getattr(request.state, "request_id", None)
+    content: dict[str, Any] = {
+        "error": "BadRequest",
+        "message": message,
+        "detail": detail_value,
+    }
+    if request_id:
+        content["request_id"] = request_id
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content={
-            "error": "BadRequest",
-            "message": str(exc),
-            "detail": str(exc),
-        },
+        content=content,
     )
 
 
@@ -429,14 +481,7 @@ from app.security.detection import detector
 from app.security.events import log_security_event
 
 
-def _client_ip(request: Request) -> Optional[str]:
-    """Best-effort client address (never a credential)."""
-    forwarded = request.headers.get("x-forwarded-for")
-    if forwarded:
-        return forwarded.split(",")[0].strip()[:64]
-    if request.client and request.client.host:
-        return request.client.host
-    return None
+from app.security.client_ip import get_client_ip as _client_ip  # noqa: E402
 
 
 @app.middleware("http")

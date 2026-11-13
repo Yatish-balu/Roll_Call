@@ -142,10 +142,12 @@ source .venv/bin/activate
 
 ### 2. Install Dependencies
 
-Install the backend Python dependencies:
+Install the backend Python dependencies. For development and tests, also install
+the dev requirements (pytest, httpx, pytest-timeout, Streamlit):
 
 ```bash
 pip install -r backend/requirements.txt
+pip install -r backend/requirements-dev.txt   # development / CI only
 ```
 
 ### 3. Environment Configuration
@@ -321,7 +323,9 @@ scanning, edge proxy, backups, monitoring) are documented in
 # Run dependency audits + frontend checks
 pwsh ./scripts/security-scan.ps1
 
-# Create a backup (SQLite and/or PostgreSQL)
+# Create an encrypted backup (SQLite and/or PostgreSQL).
+# BACKUP_ENCRYPTION_PASSWORD is mandatory; the script refuses to write plaintext.
+$env:BACKUP_ENCRYPTION_PASSWORD = "<strong-passphrase>"
 pwsh ./deploy/backup/backup.ps1 -RetentionDays 30
 ```
 

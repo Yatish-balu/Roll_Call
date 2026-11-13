@@ -35,11 +35,22 @@ out/
 build/
 dist/
 
+# Database dumps / backups (contain PII and password hashes)
+backups/
+*.dump
+*.sql.gz
+*.dump.sha256
+postgres_*.sql
+postgres_*.sql.zip
+attendance_*.db
+attendance_*.db.zip
+
 # Temporary files
 *.tmp
 *.temp
 *.bak
 *.log
+.seed-credentials
 *~
 .DS_Store
 Thumbs.db

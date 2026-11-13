@@ -242,8 +242,17 @@ def get_defaulters(
             continue
         needed = 0
         if conducted > 0 and required > 0:
-            target = math.ceil((required / 100.0) * conducted)
-            needed = max(0, target - entry["present"])
+            target_ratio = required / 100.0
+            if target_ratio < 1.0:
+                needed = max(
+                    0,
+                    math.ceil(
+                        (target_ratio * conducted - entry["present"])
+                        / (1.0 - target_ratio)
+                    ),
+                )
+            else:
+                needed = conducted if entry["present"] < conducted else 0
         items.append(
             DefaulterStudent(
                 usn=entry["usn"],

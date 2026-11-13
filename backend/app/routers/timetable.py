@@ -103,10 +103,9 @@ def _entry_to_response(entry: TimetableEntry, db: Session) -> TimetableEntryResp
 
 
 def _mapped_subject_codes(db: Session, current_user: AuthenticatedUser) -> List[str]:
-    from app.db.models import TeacherSubject
+    from app.db import crud
 
-    stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == current_user.user_id)
-    return sorted({row[0] for row in db.execute(stmt).all()})
+    return crud.get_teacher_subjects(db, user_id=current_user.user_id)
 
 
 def _visible_entry_filter(db: Session, current_user: AuthenticatedUser):
@@ -414,6 +413,13 @@ def create_timetable_entry(
             detail=f"Timetable '{payload.timetable_id}' was not found.",
         )
 
+    # Faculty always create entries for themselves; only an admin may assign an
+    # entry to another faculty member. Using the effective value for the clash
+    # check also prevents double-booking by passing a different faculty_id.
+    effective_faculty_id = (
+        payload.faculty_id if current_user.role == Role.ADMIN else current_user.user_id
+    )
+
     conflicts = _find_overlaps(
         db,
         timetable_id=payload.timetable_id,
@@ -421,7 +427,7 @@ def create_timetable_entry(
         start_time=payload.start_time,
         end_time=payload.end_time,
         room_id=payload.room_id,
-        faculty_id=payload.faculty_id,
+        faculty_id=effective_faculty_id,
         batch_id=payload.batch_id,
     )
     if conflicts:
@@ -445,7 +451,7 @@ def create_timetable_entry(
         end_time=payload.end_time,
         subject_code=payload.subject_code,
         room_id=payload.room_id,
-        faculty_id=payload.faculty_id or (None if current_user.role == Role.ADMIN else current_user.user_id),
+        faculty_id=effective_faculty_id,
         batch_id=payload.batch_id,
         duration_minutes=duration,
     )
@@ -490,22 +496,39 @@ def update_timetable_entry(
             detail=f"Timetable entry '{entry_id}' was not found.",
         )
 
-    if current_user.role != Role.ADMIN and entry.faculty_id != current_user.user_id:
-        _assert_subject_allowed(db, current_user, entry.subject_code)
+    requested_subject = payload.subject_code.upper() if payload.subject_code else entry.subject_code
+
+    if current_user.role == Role.ADMIN:
+        effective_faculty_id = (
+            payload.faculty_id if payload.faculty_id is not None else entry.faculty_id
+        )
+    else:
+        # Faculty may only edit entries they own (or an unassigned entry for a
+        # subject mapped to them), may never hand an entry to another user, and
+        # must keep the resulting subject inside their own mapping. The previous
+        # code skipped the subject check whenever the caller owned the entry,
+        # which allowed moving it to any subject.
         if entry.faculty_id not in (None, current_user.user_id):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only modify your own timetable entries.",
             )
+        _assert_subject_allowed(db, current_user, requested_subject)
+        if payload.faculty_id is not None and payload.faculty_id != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You cannot assign a timetable entry to another faculty member.",
+            )
+        effective_faculty_id = entry.faculty_id or current_user.user_id
 
     updated = {
         "day_of_week": payload.day_of_week if payload.day_of_week is not None else entry.day_of_week,
         "period_number": payload.period_number if payload.period_number is not None else entry.period_number,
         "start_time": payload.start_time if payload.start_time is not None else entry.start_time,
         "end_time": payload.end_time if payload.end_time is not None else entry.end_time,
-        "subject_code": payload.subject_code.upper() if payload.subject_code else entry.subject_code,
+        "subject_code": requested_subject,
         "room_id": payload.room_id if payload.room_id else entry.room_id,
-        "faculty_id": payload.faculty_id if payload.faculty_id is not None else entry.faculty_id,
+        "faculty_id": effective_faculty_id,
         "batch_id": payload.batch_id if payload.batch_id is not None else entry.batch_id,
     }
 

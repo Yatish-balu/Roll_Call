@@ -10,6 +10,9 @@ Environment variables required (add to .env):
   GEMINI_API_KEY   - Google AI Studio API key for Gemini vision model.
 
 Optional environment variables:
+  PHOTO_LLM_EGRESS_ENABLED - Set to "1"/"true" to allow sending the image to
+                        Google Gemini. Default: disabled (local EasyOCR only),
+                        because attendance sheets contain student PII.
   PHOTO_LLM_MODEL  - Gemini model to use (default: gemini-2.0-flash).
   PHOTO_MIN_CONFIDENCE - Minimum confidence threshold to keep a row (default: 0.5).
   PHOTO_OCR_GPU    - Set to "1" to enable EasyOCR GPU acceleration (default: 0).
@@ -84,6 +87,16 @@ Rules:
 
 DEFAULT_MODEL = "gemini-2.0-flash"
 DEFAULT_MIN_CONFIDENCE = 0.5
+
+
+def llm_egress_enabled() -> bool:
+    """Return True only when third-party photo processing is explicitly allowed."""
+    return os.getenv("PHOTO_LLM_EGRESS_ENABLED", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -529,8 +542,10 @@ def read_photo_tool(
     raw_response: Optional[str] = None
     source = ExtractionSource.LLM
 
-    # Step 2: Try LLM
-    if not force_ocr and resolved_key:
+    # Step 2: Try LLM (opt-in only; student photos are PII and must not leave
+    # the deployment without an explicit decision and a documented DPA).
+    egress_enabled = llm_egress_enabled()
+    if not force_ocr and resolved_key and egress_enabled:
         try:
             raw_response = _call_gemini(rgb, resolved_key, resolved_model)
             rows = _parse_and_validate_json(raw_response, resolved_min_conf, source, warn)
@@ -550,6 +565,11 @@ def read_photo_tool(
         except Exception as exc:  # network, quota, etc.
             warn.append(f"LLM call failed ({type(exc).__name__}: {exc}). Falling back to EasyOCR.")
             logger.warning("LLM call failed — falling back to EasyOCR: %s", exc)
+    elif not force_ocr and resolved_key and not egress_enabled:
+        warn.append(
+            "PHOTO_LLM_EGRESS_ENABLED is not enabled. The image was processed "
+            "locally with EasyOCR and was not sent to Google Gemini."
+        )
     elif not force_ocr and not resolved_key:
         warn.append("GEMINI_API_KEY not set. Falling back to EasyOCR.")
 

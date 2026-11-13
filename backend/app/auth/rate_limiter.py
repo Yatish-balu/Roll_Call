@@ -22,7 +22,6 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-import jwt
 from fastapi import HTTPException, Request, status
 
 from app.security.rate_limit import get_redis_client
@@ -213,30 +212,30 @@ def reset_rate_limiter() -> None:
 def get_client_identifier(request: Request) -> str:
     """
     Extract a unique rate-limiting key.
-    Prefers authenticated user ID ('sub') extracted from Bearer token claims,
-    falling back to client IP address.
+    Prefers the authenticated user ID ('sub') from a cryptographically verified
+    Bearer token, falling back to the client IP address.
+
+    The signature is always verified before ``sub`` is trusted: an unverified
+    decode would let a caller rotate the ``sub`` claim and obtain a fresh quota
+    on every request.
     """
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         token = auth_header.split(" ", 1)[1].strip()
         try:
-            unverified = jwt.decode(
-                token,
-                options={
-                    "verify_signature": False,
-                    "verify_exp": False,
-                    "verify_iat": False,
-                    "verify_aud": False,
-                    "verify_iss": False,
-                },
-            )
-            sub = unverified.get("sub")
-            if sub:
-                return f"user:{str(sub).strip()}"
+            from app.auth.jwt import decode_and_verify_token
+
+            user = decode_and_verify_token(token)
+            if user.user_id:
+                return f"user:{str(user.user_id).strip()}"
         except Exception:
+            # Invalid/expired token: fall through to the IP-based bucket. The
+            # authentication dependency will reject the request separately.
             pass
 
-    client_ip = request.client.host if request.client and request.client.host else "unknown-client"
+    from app.security.client_ip import get_client_ip
+
+    client_ip = get_client_ip(request, default="unknown-client")
     return f"ip:{client_ip}"
 
 

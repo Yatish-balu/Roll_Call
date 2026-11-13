@@ -93,10 +93,14 @@ Enforced by `ToolRegistry.execute` in `backend/app/security/ai_policy.py`:
 
 ### Automated Backup Execution
 ```powershell
+# The script refuses to run without an encryption passphrase and 7-Zip.
+$env:BACKUP_ENCRYPTION_PASSWORD = "<strong-passphrase>"
 pwsh ./deploy/backup/backup.ps1 -RetentionDays 30
 ```
 * **SQLite:** Consistent `sqlite3 .backup` snapshot with SHA-256 integrity verification.
 * **PostgreSQL / Supabase:** `pg_dump` execution when `DATABASE_URL_SYNC` is defined.
+* **Encryption:** Every archive is 7-Zip AES-256 encrypted with encrypted headers
+  (`-mhe=on`); an unencrypted archive is never written.
 * Daily automated backups stored with versioning and encryption at rest.
 
 ### Quarterly Restore Drill

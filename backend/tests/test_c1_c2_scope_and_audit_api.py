@@ -25,7 +25,10 @@ from app.db.models import (
     Room,
     Session as DbSession,
     Student,
+    Subject,
     TeacherSubject,
+    Timetable,
+    TimetableEntry,
     User,
 )
 from app.dependencies import get_db
@@ -583,3 +586,108 @@ def test_audit_log_reflects_real_persisted_records(api):
     assert payload["items"][0]["event_type"] == "ATTENDANCE_BULK_UPSERT"
     assert payload["items"][0]["actor_role"] == "FACULTY"
     assert payload["items"][0]["new_status"] == "ABSENT"
+
+
+# ==============================================================================
+# Timetable authorization regressions
+# ==============================================================================
+
+def _seed_timetable(factory):
+    from sqlalchemy import text
+
+    with factory() as db:
+        # The in-memory fixture does not seed departments/semesters; timetable
+        # rows are test-only fixtures, so FK enforcement is relaxed for them.
+        db.execute(text("PRAGMA foreign_keys=OFF"))
+        db.add(Subject(
+            subject_code="DIST-SYS",
+            dept_id="DEPT-CSE",
+            name="Distributed Systems",
+            subject_type="theory",
+        ))
+        db.add(Subject(
+            subject_code="ML",
+            dept_id="DEPT-CSE",
+            name="Machine Learning",
+            subject_type="theory",
+        ))
+        db.add(Timetable(
+            timetable_id="TT-TEST",
+            dept_id="DEPT-CSE",
+            semester_id="SEM-1",
+            section_id="SEC-A",
+            year_id="YEAR-2026",
+            effective_from="2026-01-01",
+        ))
+        db.add(TimetableEntry(
+            entry_id="TTE-1",
+            timetable_id="TT-TEST",
+            day_of_week="Monday",
+            period_number=1,
+            start_time="09:00",
+            end_time="10:00",
+            subject_code="DIST-SYS",
+            room_id="LH-101",
+            faculty_id="faculty_ds",
+            duration_minutes=60,
+        ))
+        db.commit()
+
+
+def test_faculty_cannot_move_own_entry_to_unmapped_subject(api):
+    client, factory = api
+    _seed_timetable(factory)
+
+    res = client.put(
+        "/api/v1/timetable/entries/TTE-1",
+        json={"subject_code": "ML"},
+        headers=_headers("faculty_ds", "FACULTY"),
+    )
+    assert res.status_code == 403, res.text
+
+
+def test_faculty_cannot_reassign_entry_to_another_faculty(api):
+    client, factory = api
+    _seed_timetable(factory)
+
+    res = client.put(
+        "/api/v1/timetable/entries/TTE-1",
+        json={"faculty_id": "faculty_ml"},
+        headers=_headers("faculty_ds", "FACULTY"),
+    )
+    assert res.status_code == 403, res.text
+
+
+def test_create_entry_forces_faculty_identity(api):
+    client, factory = api
+    _seed_timetable(factory)
+
+    res = client.post(
+        "/api/v1/timetable/entries",
+        json={
+            "timetable_id": "TT-TEST",
+            "day_of_week": "Tuesday",
+            "period_number": 2,
+            "start_time": "11:00",
+            "end_time": "12:00",
+            "subject_code": "DIST-SYS",
+            "room_id": "LH-101",
+            "faculty_id": "faculty_ml",
+        },
+        headers=_headers("faculty_ds", "FACULTY"),
+    )
+    assert res.status_code == 201, res.text
+    assert res.json()["faculty_id"] == "faculty_ds"
+
+
+def test_admin_can_reassign_entry(api):
+    client, factory = api
+    _seed_timetable(factory)
+
+    res = client.put(
+        "/api/v1/timetable/entries/TTE-1",
+        json={"faculty_id": "faculty_ml"},
+        headers=_headers("admin_root", "ADMIN"),
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["faculty_id"] == "faculty_ml"
