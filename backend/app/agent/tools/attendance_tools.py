@@ -249,12 +249,14 @@ def bulk_attendance_proposal_handler(
     records: List[Dict[str, Any]],
     actor_id: str = "anonymous",
     actor_role: str = "FACULTY",
+    db: Optional[Session] = None,
     **kwargs: Any,
 ) -> Dict[str, Any]:
     """Prepare a proposal card for bulk changes without applying them automatically."""
     clean_session = session_id.strip()
-    with _get_db() as db:
-        session_dict = crud.get_session(db, session_id=clean_session)
+    session_ctx = db if db is not None else _get_db()
+    with (session_ctx if db is None else nullcontext(db)) as dbs:
+        session_dict = crud.get_session(dbs, session_id=clean_session)
         if not session_dict:
             return {"success": False, "error": f"Session '{clean_session}' not found."}
 
@@ -265,7 +267,7 @@ def bulk_attendance_proposal_handler(
             email=f"{actor_id}@rollcall.internal",
             role=role_enum,
         )
-        assert_session_edit_authorized(auth_user, session_dict, db)
+        assert_session_edit_authorized(auth_user, session_dict, dbs)
 
         present = sum(1 for r in records if str(r.get("status", "")).upper() == "PRESENT")
         absent = sum(1 for r in records if str(r.get("status", "")).upper() == "ABSENT")

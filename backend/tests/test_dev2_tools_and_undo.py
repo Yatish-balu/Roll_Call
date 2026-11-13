@@ -409,7 +409,9 @@ def test_timetable_tools_registration_and_schemas():
 
 def test_create_session_with_multi_rooms_and_conflict_check(db_session):
     """Verify create_session creates allocations for multiple rooms and detects overlaps."""
-    date_str = "2026-11-20"
+    date_str = "2032-11-20"
+    db_session.query(SessionAllocation).filter(SessionAllocation.allocation_date == date_str).delete()
+    db_session.commit()
     res1 = create_session_handler(
         date=date_str,
         subject="Cloud Computing",
@@ -446,7 +448,7 @@ def test_create_session_with_multi_rooms_and_conflict_check(db_session):
 def test_get_day_schedule_detects_conflicts(db_session):
     """Verify get_day_schedule reports scheduled sessions and flags overlaps."""
     res = get_day_schedule_handler(
-        date="2026-11-20",
+        date="2032-11-20",
         actor_id="faculty_cn",
         actor_role="FACULTY",
         db=db_session,
@@ -550,6 +552,7 @@ def test_bulk_attendance_proposal_requires_confirmation(db_session):
         records=records,
         actor_id="faculty_cn",
         actor_role="FACULTY",
+        db=db_session,
     )
 
     assert proposal["requires_confirmation"] is True
