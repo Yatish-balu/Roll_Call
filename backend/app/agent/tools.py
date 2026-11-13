@@ -382,3 +382,71 @@ def create_attendance_session(
     except Exception as exc:
         db.rollback()
         return {"status": "error", "message": str(exc)}
+
+
+def update_user_profile(
+    db: Optional[Session] = None,
+    actor_id: str = "anonymous",
+    full_name: Optional[str] = None,
+    email: Optional[str] = None,
+    mobile: Optional[str] = None,
+    designation: Optional[str] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Update profile details (name, email, phone, designation) for the current user.
+
+    Args:
+        full_name: The new full name / display name (e.g. 'ramu').
+        email: New email address.
+        mobile: New phone number.
+        designation: New designation (e.g. 'Assistant Professor').
+    """
+    if db is None:
+        from app.db.connection import get_sync_session_factory
+        db = get_sync_session_factory()()
+
+    from app.routers.profile import _ensure_profile_table
+    _ensure_profile_table(db)
+
+    now_iso = datetime.now(timezone.utc).isoformat()
+    clean_name = (full_name or "").strip()
+
+    try:
+        if clean_name:
+            # Update users table
+            db.execute(
+                text("UPDATE users SET name = :n WHERE user_id = :uid"),
+                {"n": clean_name, "uid": actor_id},
+            )
+            # Update or insert into user_profiles table
+            upsert_sql = text("""
+                INSERT INTO user_profiles (user_id, full_name, updated_at)
+                VALUES (:uid, :n, :ts)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    full_name = EXCLUDED.full_name,
+                    updated_at = EXCLUDED.updated_at
+            """)
+            db.execute(upsert_sql, {"uid": actor_id, "n": clean_name, "ts": now_iso})
+
+        if email:
+            db.execute(
+                text("UPDATE users SET email = :e WHERE user_id = :uid"),
+                {"e": email.strip(), "uid": actor_id},
+            )
+            db.execute(
+                text("UPDATE user_profiles SET email = :e, updated_at = :ts WHERE user_id = :uid"),
+                {"e": email.strip(), "uid": actor_id, "ts": now_iso},
+            )
+
+        db.commit()
+        return {
+            "status": "success",
+            "user_id": actor_id,
+            "full_name": clean_name or "unchanged",
+            "message": f"Successfully updated profile for user '{actor_id}'. Name set to '{clean_name}'.",
+        }
+    except Exception as exc:
+        db.rollback()
+        logger.error("Failed to update profile for %s: %s", actor_id, exc)
+        return {"status": "error", "message": str(exc)}
+

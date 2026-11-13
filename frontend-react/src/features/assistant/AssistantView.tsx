@@ -797,7 +797,11 @@ export function AssistantView() {
           )
         );
       } catch (err: unknown) {
-        const msg = err instanceof Error ? err.message : "Confirmation failed.";
+        const anyErr = err as { message?: unknown; response?: { data?: { detail?: unknown } } };
+        const rawMsg = anyErr?.response?.data?.detail || anyErr?.message || "Confirmation failed.";
+        const msg = typeof rawMsg === "object" && rawMsg !== null
+          ? ((rawMsg as Record<string, unknown>).message as string) || JSON.stringify(rawMsg)
+          : String(rawMsg);
         setMessages((prev) =>
           prev.map((m) =>
             m.id === msgId && m.confirmationCard

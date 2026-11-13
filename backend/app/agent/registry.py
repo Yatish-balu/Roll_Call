@@ -279,6 +279,26 @@ def register_default_tools(reg: ToolRegistry) -> None:
         )
     )
 
+    reg.register(
+        ToolDefinition(
+            name="update_user_profile",
+            description="Update the current user's profile information such as full name or display name.",
+            capability_family="profile",
+            risk_tier=RiskTier.LOW_RISK_WRITE,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR", "STUDENT"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "full_name": {"type": "string", "description": "The new display name / full name (e.g. 'ramu')."},
+                    "email": {"type": "string", "description": "Optional new email address."},
+                    "mobile": {"type": "string", "description": "Optional new phone number."},
+                    "designation": {"type": "string", "description": "Optional designation."},
+                },
+            },
+            handler=tools.update_user_profile,
+        )
+    )
+
 
 # Automatically register default tools
 register_default_tools(tool_registry)
