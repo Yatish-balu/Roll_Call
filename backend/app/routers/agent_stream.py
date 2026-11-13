@@ -22,10 +22,23 @@ router = APIRouter(prefix="/agent/tasks", tags=["Agent Streaming"])
 def _run_orchestrator_background(task_id: str, actor_id: str, role: str, prompt: str) -> None:
     try:
         from app.db.connection import get_sync_session_factory
+        from app.db import crud
         factory = get_sync_session_factory()
         with factory() as db:
+            assigned_subs = []
+            try:
+                assigned_subs = crud.get_teacher_subjects(db, user_id=actor_id) or []
+            except Exception:
+                assigned_subs = []
             orchestrator = AgentOrchestrator()
-            orchestrator.execute_prompt(actor_id=actor_id, role=role, prompt=prompt, task_id=task_id, db=db)
+            orchestrator.execute_prompt(
+                actor_id=actor_id,
+                role=role,
+                prompt=prompt,
+                assigned_subjects=assigned_subs,
+                task_id=task_id,
+                db=db,
+            )
     except Exception as exc:
         logger.error("Background agent execution failed for task %s: %s", task_id, exc)
 

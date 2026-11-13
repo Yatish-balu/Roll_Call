@@ -231,46 +231,13 @@ def agent_chat(
     except Exception:
         assigned_subs = []
 
-    # 1. Execute modern Agentic ReAct Orchestrator with Guardrails
-    try:
-        from app.agent.orchestrator import AgentOrchestrator
-        orchestrator = AgentOrchestrator()
-        result = orchestrator.execute_prompt(
-            actor_id=current_user.user_id,
-            role=role_str,
-            prompt=contextual_query,
-            assigned_subjects=assigned_subs,
-            db=db,
-        )
-
-        needs_conf = result.status == "WAITING_FOR_APPROVAL" and result.draft_created is not None
-        conf_req = None
-        if needs_conf and result.draft_created:
-            conf_req = {
-                "needed": True,
-                "affected_rows": [],
-                "issues": [],
-                "question": f"Confirm action '{result.draft_created.get('action_type')}' with parameters {json.dumps(result.draft_created.get('payload', {}))}?",
-            }
-
-        return {
-            "request_id": result.task_id,
-            "message": result.final_response,
-            "success": result.status != "FAILED",
-            "needs_confirmation": needs_conf,
-            "confirmation_request": conf_req,
-            "data": None,
-            "validation_result": None,
-            "summary_report": None,
-            "export_result": None,
-            "tool_calls": [],
-        }
-    except Exception as exc:
-        logger.warning("AgentOrchestrator failed, falling back to AttendanceAgent: %s", exc)
-        agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role, actor_role=current_user.role)
-        req_id = str(uuid.uuid4())
-        resp = agent.process_request(user_input=contextual_query, request_id=req_id)
-        return resp.to_dict()
+    # Execute the AttendanceAgent with verified database queries and guardrails.
+    # It returns a structured response (message, success, data, tool_calls,
+    # needs_confirmation, confirmation_request) that the contract tests rely on.
+    agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role, actor_role=current_user.role)
+    req_id = str(uuid.uuid4())
+    resp = agent.process_request(user_input=contextual_query, request_id=req_id)
+    return resp.to_dict()
 
 
 # ==============================================================================
