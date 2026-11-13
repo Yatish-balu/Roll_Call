@@ -11,7 +11,7 @@ import { useCallback, useEffect, useState } from "react";
 
 const STORAGE_PREFIX = "rollcall.pref.";
 
-export type ThemePreference = "light" | "warm" | "dark";
+export type ThemePreference = "light" | "warm" | "dark" | "system";
 export type SidebarDensity = "comfortable" | "compact";
 
 export interface AppPreferences {
@@ -84,6 +84,9 @@ export function updatePreference<K extends keyof AppPreferences>(
 ): AppPreferences {
   const next = { ...readAll(), [key]: value };
   writeAll(next);
+  if (key === "theme") {
+    applyTheme(value as ThemePreference);
+  }
   return next;
 }
 
@@ -108,10 +111,62 @@ export function usePreference<K extends keyof AppPreferences>(
   return [value, update];
 }
 
-/** Apply the selected theme to the document root. */
+/** Apply the selected theme to the document root and persist. */
 export function applyTheme(theme: ThemePreference): void {
   if (typeof document === "undefined") return;
   const root = document.documentElement;
   root.dataset.theme = theme;
-  root.classList.toggle("rollcall-dark", theme === "dark");
+
+  let isDark = false;
+  if (theme === "dark") {
+    isDark = true;
+  } else if (theme === "system") {
+    isDark =
+      typeof window !== "undefined" &&
+      window.matchMedia &&
+      window.matchMedia("(prefers-color-scheme: dark)").matches;
+  } else {
+    isDark = false;
+  }
+
+  if (isDark) {
+    root.classList.add("dark");
+    root.classList.add("rollcall-dark");
+  } else {
+    root.classList.remove("dark");
+    root.classList.remove("rollcall-dark");
+  }
+
+  try {
+    localStorage.setItem("theme", theme);
+    localStorage.setItem(`${STORAGE_PREFIX}theme`, theme);
+  } catch {
+    // Storage quota or private browsing safety
+  }
+}
+
+if (typeof window !== "undefined" && window.matchMedia) {
+  const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+  const handleSystemThemeChange = (e: MediaQueryListEvent) => {
+    const currentTheme = readAll().theme;
+    if (currentTheme === "system") {
+      const root = document.documentElement;
+      if (e.matches) {
+        root.classList.add("dark");
+        root.classList.add("rollcall-dark");
+      } else {
+        root.classList.remove("dark");
+        root.classList.remove("rollcall-dark");
+      }
+    }
+  };
+  try {
+    mediaQuery.addEventListener("change", handleSystemThemeChange);
+  } catch {
+    try {
+      mediaQuery.addListener(handleSystemThemeChange);
+    } catch {
+      // Ignored
+    }
+  }
 }

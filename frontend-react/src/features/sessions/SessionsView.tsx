@@ -67,12 +67,15 @@ export function SessionsView() {
       : "Unable to load academic sessions."
     : null;
 
+  const [actionInitError, setActionInitError] = useState<string | null>(null);
   const initialization = initializationRes.data ?? null;
-  const initializationError = initializationRes.error
-    ? initializationRes.error instanceof Error
-      ? initializationRes.error.message
-      : "The initialization state could not be read."
-    : null;
+  const initializationError =
+    actionInitError ??
+    (initializationRes.error
+      ? initializationRes.error instanceof Error
+        ? initializationRes.error.message
+        : "The initialization state could not be read."
+      : null);
   const [isInitializing, setIsInitializing] = useState(false);
 
   // Assigned subjects for faculty (authoritative from backend)
@@ -109,7 +112,7 @@ export function SessionsView() {
     if (!isAdmin && isFaculty && codes.length > 0) {
       setSubjectCode((prev) => (prev ? prev : codes.length > 0 ? codes[0] : ""));
     }
-  }, [isAdmin, isFaculty, assignedSubjects]);
+  }, [isAdmin, isFaculty, assignedSubjects, setSubjectCode]);
 
   const allocationsBySession = useMemo(() => {
     const map = new Map<string, SessionAllocation[]>();
@@ -199,7 +202,7 @@ export function SessionsView() {
 
   const handleInitialize = async () => {
     setIsInitializing(true);
-    setInitializationError(null);
+    setActionInitError(null);
     try {
       await initializeSessions(today);
       // Only the affected keys: sessions/allocations/initialisation state here,
@@ -215,7 +218,7 @@ export function SessionsView() {
       ]);
       window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
     } catch (err: unknown) {
-      setInitializationError(
+      setActionInitError(
         err instanceof Error ? err.message : "The sessions could not be initialised."
       );
     } finally {

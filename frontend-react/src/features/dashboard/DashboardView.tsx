@@ -36,7 +36,7 @@ export function DashboardView() {
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Non-intrusive alert when API errors occur */}
-      {error && (
+      {Boolean(error) && (
         <div className="bg-[#FFF8E1] border border-[#FFE082] rounded-xl p-4 flex items-center justify-between text-xs text-[#6C5119]">
           <div className="flex items-center space-x-2.5">
             <svg className="w-5 h-5 text-[#F57F17] shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">

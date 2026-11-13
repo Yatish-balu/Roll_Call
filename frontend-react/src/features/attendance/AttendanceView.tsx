@@ -17,18 +17,59 @@ import {
   type AttendanceRecord,
   type AttendanceStatus,
 } from "@/services/api/attendance";
+import { useResource } from "@/hooks/useResource";
+import { invalidate, mutateCache } from "@/services/api/cache";
+
+const SESSIONS_LIST_KEY = "/api/v1/sessions?limit=50";
+const SESSIONS_ALLOCATIONS_KEY = "/api/v1/sessions/allocations";
 
 export function AttendanceView() {
   const [searchParams] = useSearchParams();
   const querySession = searchParams.get("session") || searchParams.get("sessionId") || "";
   const { session, isAdmin, isFaculty, isViewer, canMarkAttendance } = useAuth();
-  const [sessions, setSessions] = useState<SessionItem[]>([]);
-  // Real class slots (room / batch / time) of the sessions the caller may see.
-  const [allocations, setAllocations] = useState<SessionAllocation[]>([]);
+
+  const sessionsRes = useResource<{ items?: SessionItem[]; total?: number }>(
+    SESSIONS_LIST_KEY,
+    () => fetchSessions({ limit: 50 })
+  );
+  const allocationsRes = useResource<{ items?: SessionAllocation[]; total?: number }>(
+    SESSIONS_ALLOCATIONS_KEY,
+    () => fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 }))
+  );
+
+  const sessions = useMemo(() => sessionsRes.data?.items ?? [], [sessionsRes.data]);
+  const allocations = useMemo(() => allocationsRes.data?.items ?? [], [allocationsRes.data]);
+  const isLoadingSessions = sessionsRes.isLoading && !sessionsRes.data;
+
   const [selectedSessionId, setSelectedSessionId] = useState<string>(querySession);
+
+  // Auto-select initial session
+  useEffect(() => {
+    if (querySession) {
+      setSelectedSessionId(querySession);
+    } else if (!selectedSessionId && sessions.length > 0) {
+      setSelectedSessionId(sessions[0].session_id);
+    }
+  }, [querySession, selectedSessionId, sessions]);
+
+  const attendanceKey = selectedSessionId
+    ? `/api/v1/attendance/sessions/${selectedSessionId}`
+    : null;
+
+  const attendanceRes = useResource<AttendanceRecord[]>(
+    attendanceKey,
+    () => fetchSessionAttendance(selectedSessionId!)
+  );
+
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
-  const [isLoadingSessions, setIsLoadingSessions] = useState(true);
-  const [isLoadingAttendance, setIsLoadingAttendance] = useState(false);
+
+  useEffect(() => {
+    if (attendanceRes.data) {
+      setAttendanceRecords(attendanceRes.data);
+    }
+  }, [attendanceRes.data]);
+
+  const isLoadingAttendance = attendanceRes.isLoading && !attendanceRes.data;
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -64,71 +105,27 @@ export function AttendanceView() {
     return err instanceof Error ? err.message : "Failed to load or update attendance records.";
   };
 
-  // Load available sessions on mount
   useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (!isMounted) return;
-      Promise.all([
-        fetchSessions({ limit: 50 }),
-        fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 })),
-      ])
-        .then(([res, allocationsRes]) => {
-          if (!isMounted) return;
-          const allItems = res.items || [];
-          setSessions(allItems);
-          setAllocations(allocationsRes.items || []);
-
-          if (querySession) {
-            setSelectedSessionId(querySession);
-          } else {
-            setSelectedSessionId((prev) => prev || (allItems.length > 0 ? allItems[0].session_id : ""));
-          }
-        })
-        .catch((err: unknown) => {
-          if (!isMounted) return;
-          setStatusMessage({
-            type: "error",
-            text: formatApiError(err),
-          });
-        })
-        .finally(() => {
-          if (isMounted) setIsLoadingSessions(false);
-        });
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [querySession]);
-
-  // Load attendance whenever selected session changes
-  const loadAttendance = useCallback(async (sessionId: string) => {
-    if (!sessionId) return;
-    setIsLoadingAttendance(true);
-    setStatusMessage(null);
-    try {
-      const records = await fetchSessionAttendance(sessionId);
-      setAttendanceRecords(records || []);
-    } catch (err: unknown) {
+    if (sessionsRes.error) {
       setStatusMessage({
         type: "error",
-        text: err instanceof Error ? err.message : "Failed to load session roster.",
+        text: formatApiError(sessionsRes.error),
       });
-    } finally {
-      setIsLoadingAttendance(false);
     }
-  }, []);
+  }, [sessionsRes.error]);
 
   useEffect(() => {
-    if (!selectedSessionId) return;
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadAttendance(selectedSessionId);
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [selectedSessionId, loadAttendance]);
+    if (attendanceRes.error) {
+      setStatusMessage({
+        type: "error",
+        text: formatApiError(attendanceRes.error),
+      });
+    }
+  }, [attendanceRes.error]);
+
+  const _loadAttendance = useCallback(async (_sessionId?: string) => {
+    await attendanceRes.refresh();
+  }, [attendanceRes]);
 
   // Selected session object
   const activeSession = useMemo(() => {
@@ -265,8 +262,16 @@ export function AttendanceView() {
         type: "success",
         text: res.message || `Successfully synchronized ${payload.length} attendance marks for session '${selectedSessionId}'.`,
       });
-      // Refresh roster directly from backend to ensure authoritative display
-      await loadAttendance(selectedSessionId);
+      // Update cache immediately and invalidate dependent queries
+      if (attendanceKey) {
+        mutateCache(attendanceKey, attendanceRecords);
+      }
+      invalidate([
+        `/api/v1/attendance/sessions/${selectedSessionId}`,
+        "dashboard",
+        "calendar",
+        "analytics",
+      ]);
       // Let other views (calendar, sessions) know that the attendance changed.
       window.dispatchEvent(
         new CustomEvent("rollcall:attendance-changed", {
@@ -295,11 +300,19 @@ export function AttendanceView() {
         resolved_status: reconcileStatus,
       });
       // Update local state
-      setAttendanceRecords((prev) =>
-        prev.map((r) =>
-          r.usn === reconcileTarget.usn ? { ...r, status: reconcileStatus } : r
-        )
+      const updated = attendanceRecords.map((r) =>
+        r.usn === reconcileTarget.usn ? { ...r, status: reconcileStatus } : r
       );
+      setAttendanceRecords(updated);
+      if (attendanceKey) {
+        mutateCache(attendanceKey, updated);
+      }
+      invalidate([
+        `/api/v1/attendance/sessions/${selectedSessionId}`,
+        "dashboard",
+        "calendar",
+        "analytics",
+      ]);
       setReconcileTarget(null);
       setStatusMessage({
         type: "success",

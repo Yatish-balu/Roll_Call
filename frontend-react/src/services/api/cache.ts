@@ -172,11 +172,13 @@ export function mutateCache<T>(key: string, value: T | ((prev: T | undefined) =>
 export function invalidate(
   matchers: string | string[] | ((key: string) => boolean)
 ): void {
-  const list = Array.isArray(matchers) ? matchers : [matchers];
-  const predicate =
+  const predicate: (key: string) => boolean =
     typeof matchers === "function"
       ? matchers
-      : (key: string) => list.some((prefix) => key.startsWith(prefix));
+      : (key: string) => {
+          const list = Array.isArray(matchers) ? matchers : [matchers];
+          return list.some((prefix) => key.startsWith(prefix));
+        };
 
   const keys = [...store.keys()].filter(predicate);
   for (const key of keys) {

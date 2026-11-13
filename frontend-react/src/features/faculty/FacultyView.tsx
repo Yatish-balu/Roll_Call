@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { Link } from "react-router-dom";
 import {
   fetchTeacherSubjects,
@@ -11,6 +11,10 @@ import {
   AVAILABLE_FACULTY,
 } from "@/services/api/faculty";
 import { useAuth } from "@/hooks/useAuth";
+import { useResource } from "@/hooks/useResource";
+import { invalidate } from "@/services/api/cache";
+
+const FACULTY_SUBJECTS_KEY = "/api/v1/faculty/subjects";
 
 interface DepartmentInfo {
   code: string;
@@ -60,9 +64,24 @@ const DEPARTMENTS: DepartmentInfo[] = [
 
 export function FacultyView() {
   const { isAdmin } = useAuth();
-  const [mappings, setMappings] = useState<TeacherSubjectMapping[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+
+  const mappingsRes = useResource<{ items?: TeacherSubjectMapping[] }>(
+    isAdmin ? FACULTY_SUBJECTS_KEY : null,
+    () => fetchTeacherSubjects()
+  );
+
+  const mappings = useMemo(() => mappingsRes.data?.items ?? [], [mappingsRes.data]);
+  const isLoading = mappingsRes.isLoading && !mappingsRes.data;
+  const error = mappingsRes.error
+    ? mappingsRes.error instanceof Error
+      ? mappingsRes.error.message
+      : "Unable to load faculty subject assignments."
+    : null;
+
+  const loadMappings = useCallback(async () => {
+    await mappingsRes.refresh();
+  }, [mappingsRes]);
+
   const [feedbackMessage, setFeedbackMessage] = useState<{ type: "success" | "error" | "info"; text: string } | null>(null);
 
   // Active Tab
@@ -82,37 +101,6 @@ export function FacultyView() {
   // Confirmation Modal for Removal
   const [pendingRemoval, setPendingRemoval] = useState<TeacherSubjectMapping | null>(null);
   const [isRemoving, setIsRemoving] = useState(false);
-
-  const loadMappings = useCallback(async () => {
-    if (!isAdmin) {
-      setIsLoading(false);
-      return;
-    }
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetchTeacherSubjects();
-      setMappings(res.items || []);
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Unable to load faculty subject assignments.");
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, [isAdmin]);
-
-  useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadMappings();
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadMappings]);
 
   // Enrich mappings with subject name, semester, branch, and teacher name
   const enrichedMappings = useMemo(() => {
@@ -164,7 +152,7 @@ export function FacultyView() {
       setIsAssignOpen(false);
       setCustomTeacherId("");
       setCustomSubjectCode("");
-      await loadMappings();
+      invalidate([FACULTY_SUBJECTS_KEY, "/api/v1/sessions"]);
     } catch (err: unknown) {
       if (err instanceof Error) {
         setFormError(err.message);
@@ -198,7 +186,7 @@ export function FacultyView() {
         });
       }
       setPendingRemoval(null);
-      await loadMappings();
+      invalidate([FACULTY_SUBJECTS_KEY, "/api/v1/sessions"]);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Failed to remove mapping.";
       setFeedbackMessage({

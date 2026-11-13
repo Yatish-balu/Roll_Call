@@ -2,6 +2,10 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import "./index.css";
 import App from "./App";
+import { applyTheme, getPreferences } from "./lib/preferences";
+
+// Apply persisted theme immediately before render
+applyTheme(getPreferences().theme);
 
 const rootElement = document.getElementById("root");
 if (!rootElement) {

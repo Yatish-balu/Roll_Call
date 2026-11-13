@@ -5,8 +5,29 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RollCall AI — Attendance, Simplified</title>
+    <script>
+      (function() {
+        try {
+          var pref = null;
+          var raw = localStorage.getItem("rollcall.pref.all");
+          if (raw) {
+            try { pref = JSON.parse(raw).theme; } catch (e) {}
+          }
+          if (!pref) {
+            pref = localStorage.getItem("theme") || localStorage.getItem("rollcall.pref.theme") || "warm";
+          }
+          document.documentElement.dataset.theme = pref;
+          var isDark = pref === "dark" || (pref === "system" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          if (isDark) {
+            document.documentElement.classList.add("dark", "rollcall-dark");
+          } else {
+            document.documentElement.classList.remove("dark", "rollcall-dark");
+          }
+        } catch (e) {}
+      })();
+    </script>
   </head>
-  <body class="bg-[#F2EDE0] text-[#24251C] antialiased">
+  <body class="bg-[#F2EDE0] text-[#24251C] dark:bg-[#11120D] dark:text-[#EDE8D8] antialiased">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

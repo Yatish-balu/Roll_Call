@@ -1,14 +1,31 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useMemo } from "react";
+import React, { useState, useCallback, useMemo } from "react";
 import { fetchRooms, createRoom, type Room } from "@/services/api/rooms";
 import { useAuth } from "@/hooks/useAuth";
+import { useResource } from "@/hooks/useResource";
+import { invalidate } from "@/services/api/cache";
+
+const ROOMS_LIST_KEY = "/api/v1/rooms?limit=100";
 
 export function RoomsView() {
   const { isAdmin } = useAuth();
-  const [rooms, setRooms] = useState<Room[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const roomsRes = useResource<{ items?: Room[]; total?: number }>(
+    ROOMS_LIST_KEY,
+    () => fetchRooms({ limit: 100 })
+  );
+
+  const rooms = useMemo(() => roomsRes.data?.items ?? [], [roomsRes.data]);
+  const isLoading = roomsRes.isLoading && !roomsRes.data;
+  const error = roomsRes.error
+    ? roomsRes.error instanceof Error
+      ? roomsRes.error.message
+      : "Unable to load room allocations."
+    : null;
+
+  const loadRooms = useCallback(async () => {
+    await roomsRes.refresh();
+  }, [roomsRes]);
 
   // Search & Filter
   const [searchQuery, setSearchQuery] = useState("");
@@ -20,33 +37,6 @@ export function RoomsView() {
   const [roomName, setRoomName] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
-
-  const loadRooms = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetchRooms({ limit: 100 });
-      setRooms(res.items || []);
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Unable to load room allocations.");
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadRooms();
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadRooms]);
 
   const filteredRooms = useMemo(() => {
     return rooms.filter((r) => {
@@ -78,7 +68,7 @@ export function RoomsView() {
       setIsCreateOpen(false);
       setRoomId("");
       setRoomName("");
-      await loadRooms();
+      invalidate([ROOMS_LIST_KEY, "/api/v1/sessions"]);
     } catch (err: unknown) {
       if (err instanceof Error) {
         setFormError(err.message);

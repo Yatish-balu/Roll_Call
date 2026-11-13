@@ -12,7 +12,7 @@ import {
   downloadStudentRosterPdf,
   fetchStudentRosterFilters,
 } from "@/services/api/reports";
-import { invalidate } from "@/services/api/cache";
+import { invalidate, mutateCache } from "@/services/api/cache";
 import { useResource } from "@/hooks/useResource";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -185,8 +185,11 @@ export function StudentsView() {
         name: newName.trim(),
         branch: newBranch.trim(),
       });
-      setStudents((prev) => [created, ...prev]);
-      setTotalCount((prev) => prev + 1);
+      mutateCache<{ items?: Student[]; total?: number }>(listKey, (prev) => ({
+        items: [created, ...(prev?.items ?? [])],
+        total: (prev?.total ?? 0) + 1,
+      }));
+      invalidate("/api/v1/students");
       setIsAddModalOpen(false);
       setNewUsn("");
       setNewName("");
@@ -344,7 +347,7 @@ export function StudentsView() {
           <div className="p-10 text-center">
             <p className="text-sm text-rose-600 mb-3">{error}</p>
             <button
-              onClick={() => void loadStudents()}
+              onClick={() => void listRes.refresh()}
               className="px-4 py-1.5 bg-[#3F451F] text-[#FBF8F0] text-xs font-semibold rounded-lg hover:bg-[#323719] cursor-pointer"
             >
               Retry

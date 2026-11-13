@@ -10,6 +10,8 @@ import {
   type FacultyProfile,
   type ProfileStorage,
 } from "@/services/api/profile";
+import { useResource } from "@/hooks/useResource";
+import { invalidate, mutateCache } from "@/services/api/cache";
 
 type TagInput = "expertise" | "masteredSubjects";
 
@@ -17,12 +19,32 @@ export function MyProfileView() {
   const { session, isAdmin } = useAuth();
   const userId = session?.userId || "anonymous";
 
+  const profileKey = `profile:${userId}`;
+  const profileRes = useResource<{ profile: FacultyProfile; storage: ProfileStorage; notice: string | null }>(
+    userId ? profileKey : null,
+    () => loadFacultyProfile(userId)
+  );
+
   const [profile, setProfile] = useState<FacultyProfile | null>(null);
   const [storage, setStorage] = useState<ProfileStorage>("device");
   const [notice, setNotice] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    if (profileRes.data) {
+      setProfile(profileRes.data.profile);
+      setStorage(profileRes.data.storage);
+      setNotice(profileRes.data.notice);
+    }
+  }, [profileRes.data]);
+
+  const isLoading = profileRes.isLoading && !profile;
+  const loadError = profileRes.error
+    ? profileRes.error instanceof Error
+      ? profileRes.error.message
+      : "The faculty profile could not be loaded."
+    : null;
+
   const [isSaving, setIsSaving] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [tagDraft, setTagDraft] = useState<Record<TagInput, string>>({
@@ -32,25 +54,8 @@ export function MyProfileView() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const loadProfile = useCallback(async () => {
-    setIsLoading(true);
-    setLoadError(null);
-    try {
-      const result = await loadFacultyProfile(userId);
-      setProfile(result.profile);
-      setStorage(result.storage);
-      setNotice(result.notice);
-    } catch (err: unknown) {
-      setLoadError(
-        err instanceof Error ? err.message : "The faculty profile could not be loaded."
-      );
-    } finally {
-      setIsLoading(false);
-    }
-  }, [userId]);
-
-  useEffect(() => {
-    void loadProfile();
-  }, [loadProfile]);
+    await profileRes.refresh();
+  }, [profileRes]);
 
   const assignedSubjects = useMemo(() => session?.subjectCodes ?? [], [session?.subjectCodes]);
 
@@ -111,6 +116,12 @@ export function MyProfileView() {
         // The server-confirmed profile is authoritative (normalisation, email
         // casing) - adopt it so the form never drifts from the database.
         setProfile(result.profile);
+        const nextNotice =
+          result.storage === "server"
+            ? null
+            : "Profile saved on this device. The backend could not be reached, so the changes were not confirmed on the server.";
+        mutateCache(profileKey, { profile: result.profile, storage: result.storage, notice: nextNotice });
+        invalidate(profileKey);
       }
       // Surface the new display name in the auth context immediately; after
       // re-login the backend returns it from the persisted profile.
