@@ -297,3 +297,4 @@ def execute_undo(
         "current_status": reverted_status,
         "new_version": new_version,
     }
+
