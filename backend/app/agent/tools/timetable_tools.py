@@ -27,6 +27,7 @@ from app.db.models import (
     Subject,
     TeacherSubject,
     TimetableEntry,
+    User,
 )
 from app.services.attendance_edits import _utcnow_iso
 from app.services.undo_service import create_undo_token
@@ -245,6 +246,22 @@ def create_session_handler(
         clean_code = (subject_code or clean_subject).strip().upper()
         session_id = f"sess_{uuid.uuid4().hex[:12]}"
         created_iso = _utcnow_iso()
+
+        # Ensure teacher exists to satisfy foreign key constraint on sessions.teacher_id
+        if actor_id and actor_id != "anonymous":
+            teacher_user = dbs.get(User, actor_id)
+            if not teacher_user:
+                dbs.add(
+                    User(
+                        user_id=actor_id,
+                        name=actor_id,
+                        email=f"{actor_id}@rollcall.edu",
+                        role=actor_role or "FACULTY",
+                        is_active=1,
+                        created_at=created_iso,
+                    )
+                )
+                dbs.flush()
 
         new_session = DbSession(
             session_id=session_id,

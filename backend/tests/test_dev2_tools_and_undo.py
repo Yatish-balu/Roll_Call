@@ -55,10 +55,28 @@ from app.services.undo_service import (
 
 @pytest.fixture
 def db_session():
-    """Yield a database session for test isolation."""
+    """Yield a database session for test isolation with seeded test users and rooms."""
+    from app.db.models import Room, User
     factory = get_sync_session_factory()
     session = factory()
     try:
+        # Seed test faculty users so foreign key constraints on sessions.teacher_id succeed
+        for u_id in ("faculty_cn", "other_faculty", "faculty_b", "teacher_jane"):
+            if session.get(User, u_id) is None:
+                session.add(
+                    User(
+                        user_id=u_id,
+                        name=f"Prof. {u_id}",
+                        email=f"{u_id}@rollcall.edu",
+                        role="FACULTY",
+                        is_active=1,
+                        created_at="2026-11-13T10:00:00Z",
+                    )
+                )
+        for r_id in ("LH-101", "LH-102", "Lab A", "Lab B"):
+            if session.get(Room, r_id) is None:
+                session.add(Room(room_id=r_id, name=r_id, capacity=60))
+        session.commit()
         yield session
     finally:
         session.close()
