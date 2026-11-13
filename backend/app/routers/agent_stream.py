@@ -23,19 +23,60 @@ def _run_orchestrator_background(task_id: str, actor_id: str, role: str, prompt:
     try:
         from app.db.connection import get_sync_session_factory
         from app.db import crud
+        from app.db.models import User
+        from datetime import date
         factory = get_sync_session_factory()
         with factory() as db:
             assigned_subs = []
+            teacher_name = actor_id
+            teacher_email = ""
+            today_schedule_summary = ""
+            pending_summary = ""
             try:
                 assigned_subs = crud.get_teacher_subjects(db, user_id=actor_id) or []
-            except Exception:
-                assigned_subs = []
+                user = db.query(User).filter(User.user_id == actor_id).first()
+                if user:
+                    teacher_name = user.name or actor_id
+                    teacher_email = user.email or ""
+
+                # Fast fetch of today's sessions for this teacher
+                today_str = date.today().isoformat()
+                today_sessions = crud.get_sessions_by_date(db, date=today_str)
+                my_today = [
+                    s for s in today_sessions
+                    if (isinstance(s, dict) and (s.get("teacher_id") == actor_id or s.get("subject_code") in assigned_subs))
+                    or (hasattr(s, "teacher_id") and (s.teacher_id == actor_id or s.subject_code in assigned_subs))
+                ]
+                if my_today:
+                    session_descs = []
+                    for s in my_today:
+                        s_id = s["session_id"] if isinstance(s, dict) else s.session_id
+                        sub = s["subject_code"] if isinstance(s, dict) else s.subject_code
+                        room = (s.get("room_id") if isinstance(s, dict) else getattr(s, "room_id", None)) or "—"
+                        session_descs.append(f"{sub} ({s_id}, Room: {room})")
+                    today_schedule_summary = f"{len(my_today)} session(s) scheduled for today ({today_str}): " + ", ".join(session_descs)
+                else:
+                    today_schedule_summary = f"No active sessions scheduled for today ({today_str}) for your assigned subjects ({', '.join(assigned_subs) if assigned_subs else 'None'})."
+
+                # Check pending sessions for this teacher's subjects
+                all_pending = crud.get_pending_unreviewed_sessions(db, subject=assigned_subs[0] if assigned_subs else None)
+                if all_pending:
+                    pending_summary = f"{len(all_pending)} session(s) with pending/unreviewed attendance."
+                else:
+                    pending_summary = "All session attendance records are fully reviewed."
+            except Exception as e:
+                logger.debug("Teacher snapshot pre-fetch encountered: %s", e)
+
             orchestrator = AgentOrchestrator()
             orchestrator.execute_prompt(
                 actor_id=actor_id,
                 role=role,
                 prompt=prompt,
                 assigned_subjects=assigned_subs,
+                actor_name=teacher_name,
+                actor_email=teacher_email,
+                today_schedule_summary=today_schedule_summary,
+                pending_sessions_summary=pending_summary,
                 task_id=task_id,
                 db=db,
             )

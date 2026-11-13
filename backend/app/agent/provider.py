@@ -166,6 +166,7 @@ class GeminiProvider(LLMProvider):
                         else:
                             config_kwargs["tools"] = func_decls
 
+                config_kwargs["temperature"] = 0.2
                 config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
 
                 start_t = time.time()

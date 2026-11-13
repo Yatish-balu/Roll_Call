@@ -33,15 +33,43 @@ class ConversationContext:
         actor_id: str,
         role: str,
         assigned_subjects: Optional[List[str]] = None,
+        actor_name: Optional[str] = None,
+        actor_email: Optional[str] = None,
+        today_schedule_summary: Optional[str] = None,
+        pending_sessions_summary: Optional[str] = None,
         max_history_turns: int = 20,
     ):
         self.actor_id = actor_id
         self.role = role.upper()
         self.assigned_subjects = assigned_subjects or []
+        self.actor_name = actor_name or ""
+        self.actor_email = actor_email or ""
+        self.today_schedule_summary = today_schedule_summary or ""
+        self.pending_sessions_summary = pending_sessions_summary or ""
         self.max_history_turns = max_history_turns
         self.messages: List[Dict[str, Any]] = []
         self.drafts: Dict[str, ActionDraft] = {}
         self.scratchpad: Dict[str, Any] = {}
+
+    def update_teacher_snapshot(
+        self,
+        name: Optional[str] = None,
+        email: Optional[str] = None,
+        assigned_subjects: Optional[List[str]] = None,
+        today_schedule_summary: Optional[str] = None,
+        pending_sessions_summary: Optional[str] = None,
+    ) -> None:
+        """Update live teacher context attributes without losing conversation message history."""
+        if name:
+            self.actor_name = name
+        if email:
+            self.actor_email = email
+        if assigned_subjects is not None:
+            self.assigned_subjects = assigned_subjects
+        if today_schedule_summary is not None:
+            self.today_schedule_summary = today_schedule_summary
+        if pending_sessions_summary is not None:
+            self.pending_sessions_summary = pending_sessions_summary
 
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})
@@ -86,14 +114,26 @@ class ConversationContext:
         """Synthesize the complete message list including authoritative system instructions."""
         now = datetime.now(timezone.utc)
         now_str = now.strftime("%Y-%m-%d %H:%M:%S UTC (Day: %A)")
+        name_str = self.actor_name or self.actor_id
+        subs_str = ", ".join(self.assigned_subjects) if self.assigned_subjects else "None"
+        sched_str = self.today_schedule_summary or "No active sessions scheduled for today."
+        pend_str = self.pending_sessions_summary or "All session attendance records are fully reviewed."
 
         system_instruction = (
-            f"You are Antigravity RollCall AI, an autonomous agentic academic assistant.\n"
-            f"CURRENT TIME: {now_str}\n"
-            f"ACTOR IDENTITY:\n"
-            f"- User ID: {self.actor_id}\n"
+            f"You are Antigravity RollCall AI, an autonomous, lightning-fast academic assistant for RollCall AI.\n"
+            f"CURRENT TIME: {now_str}\n\n"
+            f"LOGGED-IN TEACHER PROFILE & LIVE ACADEMIC SNAPSHOT:\n"
+            f"- Teacher Name: {name_str}\n"
+            f"- Teacher User ID: {self.actor_id}\n"
+            f"- Email: {self.actor_email or 'Not configured'}\n"
             f"- Role: {self.role}\n"
-            f"- Assigned Subjects: {', '.join(self.assigned_subjects) if self.assigned_subjects else 'None'}\n\n"
+            f"- Assigned Subjects: {subs_str}\n"
+            f"- Today's Class Schedule: {sched_str}\n"
+            f"- Pending Attendance Reviews: {pend_str}\n\n"
+            f"SPEED & EFFICIENCY DIRECTIVES (SUB-SECOND LATENCY):\n"
+            f"1. Zero-Latency Answers: For questions about your identity, teacher name, assigned subjects, or today's schedule, answer IMMEDIATELY using the live snapshot above without making redundant database tool calls.\n"
+            f"2. Swift Action Execution: If the teacher asks to perform any action (e.g. modify attendance, create a session, update their profile name, or find vacant rooms), invoke the corresponding tool immediately in step 1.\n"
+            f"3. Teacher Empowerment: Whatever this teacher requests within RollCall AI's domain for their subjects/classes, assist them thoroughly and proactively.\n\n"
             f"OPERATIONAL SCOPE & STRICT DOMAIN BOUNDARY:\n"
             f"You are strictly and exclusively an academic attendance, class session, timetable, and classroom management assistant for the institutional RollCall AI system.\n"
             f"ALLOWED DOMAIN OPERATIONS:\n"
@@ -114,7 +154,7 @@ class ConversationContext:
             f"1. Goal-Driven & Autonomous: Proactively resolve in-domain user requests using available tools.\n"
             f"2. Strict RBAC Enforcement: Never attempt actions unauthorized for {self.role}. If {self.role} == 'FACULTY', you can only create/modify sessions for their assigned subjects.\n"
             f"3. Confirmation for Destructive Actions: Modifying attendance records or bulk deleting sessions requires explicit user confirmation via a draft.\n"
-            f"4. Truthfulness: Never invent data or numerical figures; ground all facts in database tool outputs.\n"
+            f"4. Truthfulness: Never invent data or numerical figures; ground all facts in database tool outputs or the authoritative live snapshot.\n"
             f"5. Conciseness: Be precise, structured, and helpful. Format tables and lists cleanly in markdown.\n"
         )
 
@@ -132,12 +172,29 @@ class ContextManager:
         actor_id: str,
         role: str,
         assigned_subjects: Optional[List[str]] = None,
+        actor_name: Optional[str] = None,
+        actor_email: Optional[str] = None,
+        today_schedule_summary: Optional[str] = None,
+        pending_sessions_summary: Optional[str] = None,
     ) -> ConversationContext:
         if actor_id not in self._contexts:
             self._contexts[actor_id] = ConversationContext(
                 actor_id=actor_id,
                 role=role,
                 assigned_subjects=assigned_subjects,
+                actor_name=actor_name,
+                actor_email=actor_email,
+                today_schedule_summary=today_schedule_summary,
+                pending_sessions_summary=pending_sessions_summary,
+            )
+        else:
+            ctx = self._contexts[actor_id]
+            ctx.update_teacher_snapshot(
+                name=actor_name,
+                email=actor_email,
+                assigned_subjects=assigned_subjects,
+                today_schedule_summary=today_schedule_summary,
+                pending_sessions_summary=pending_sessions_summary,
             )
         return self._contexts[actor_id]
 

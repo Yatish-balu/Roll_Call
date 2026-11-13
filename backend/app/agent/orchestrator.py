@@ -73,6 +73,10 @@ class AgentOrchestrator:
         role: str,
         prompt: str,
         assigned_subjects: Optional[List[str]] = None,
+        actor_name: Optional[str] = None,
+        actor_email: Optional[str] = None,
+        today_schedule_summary: Optional[str] = None,
+        pending_sessions_summary: Optional[str] = None,
         task_id: Optional[str] = None,
         db: Optional[Any] = None,
     ) -> OrchestratorResult:
@@ -111,11 +115,15 @@ class AgentOrchestrator:
                 status="FAILED",
             )
 
-        # 3. Retrieve conversation context
+        # 3. Retrieve conversation context with authoritative teacher snapshot
         ctx: ConversationContext = context_manager.get_or_create(
             actor_id=actor_id,
             role=role,
             assigned_subjects=assigned_subjects,
+            actor_name=actor_name,
+            actor_email=actor_email,
+            today_schedule_summary=today_schedule_summary,
+            pending_sessions_summary=pending_sessions_summary,
         )
         ctx.add_user_message(prompt)
 
