@@ -133,3 +133,4 @@ def test_orchestrator_confirms_destructive_actions_via_draft():
     assert task.state == TaskState.WAITING_FOR_APPROVAL
     event_types = [e.event_type for e in task.events]
     assert "approval.required" in event_types
+

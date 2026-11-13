@@ -163,3 +163,124 @@ class ToolRegistry:
 registry = ToolRegistry()
 tool_registry = registry
 
+
+def register_default_tools(reg: ToolRegistry) -> None:
+    """Populate registry with production database-backed tools."""
+    from app.agent import tools
+
+    reg.register(
+        ToolDefinition(
+            name="summarize_attendance",
+            description="Summarize attendance metrics (total students, present, absent, pending, unreviewed, and percentage rate) from the database.",
+            capability_family="attendance",
+            risk_tier=RiskTier.READ,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR", "STUDENT", "VIEWER"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "date_str": {"type": "string", "description": "Date to query in 'YYYY-MM-DD' or 'today' or 'all'."},
+                    "subject": {"type": "string", "description": "Subject code or name (e.g. 'CN')."},
+                    "session_id": {"type": "string", "description": "Specific session ID if querying a single session."},
+                },
+            },
+            handler=tools.summarize_attendance,
+        )
+    )
+
+    reg.register(
+        ToolDefinition(
+            name="get_pending_unreviewed_sessions",
+            description="Find class sessions that have pending or unreviewed attendance records requiring teacher review.",
+            capability_family="attendance",
+            risk_tier=RiskTier.READ,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "Subject code or name filter."},
+                },
+            },
+            handler=tools.get_pending_unreviewed_sessions,
+        )
+    )
+
+    reg.register(
+        ToolDefinition(
+            name="get_class_schedule",
+            description="Retrieve scheduled academic sessions and timetable for today or a specific date.",
+            capability_family="schedule",
+            risk_tier=RiskTier.READ,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR", "STUDENT", "VIEWER"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "date_str": {"type": "string", "description": "Date in 'YYYY-MM-DD' or 'today' or 'all'."},
+                    "subject": {"type": "string", "description": "Subject filter."},
+                },
+            },
+            handler=tools.get_class_schedule,
+        )
+    )
+
+    reg.register(
+        ToolDefinition(
+            name="find_vacant_classrooms",
+            description="Find vacant or unoccupied classrooms for a given date and period.",
+            capability_family="schedule",
+            risk_tier=RiskTier.READ,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR", "STUDENT"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "date_str": {"type": "string", "description": "Target date or 'today'."},
+                    "period": {"type": "integer", "description": "Period number (1 to 8)."},
+                },
+            },
+            handler=tools.find_vacant_classrooms,
+        )
+    )
+
+    reg.register(
+        ToolDefinition(
+            name="query_student_attendance_record",
+            description="Look up student attendance history and attendance percentage by USN.",
+            capability_family="attendance",
+            risk_tier=RiskTier.READ,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "usn": {"type": "string", "description": "Student USN (e.g. '1MS21CS001')."},
+                    "subject": {"type": "string", "description": "Optional subject filter."},
+                },
+                "required": ["usn"],
+            },
+            handler=tools.query_student_attendance_record,
+        )
+    )
+
+    reg.register(
+        ToolDefinition(
+            name="create_attendance_session",
+            description="Create a new class attendance session in the database for an assigned subject.",
+            capability_family="schedule",
+            risk_tier=RiskTier.LOW_RISK_WRITE,
+            allowed_roles={"ADMIN", "FACULTY"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "subject": {"type": "string", "description": "Subject code (e.g. 'CN')."},
+                    "date_str": {"type": "string", "description": "Date in 'YYYY-MM-DD' format."},
+                    "session_id": {"type": "string", "description": "Optional custom session ID."},
+                },
+                "required": ["subject", "date_str"],
+            },
+            handler=tools.create_attendance_session,
+        )
+    )
+
+
+# Automatically register default tools
+register_default_tools(tool_registry)
+
+

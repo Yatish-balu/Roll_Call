@@ -6,6 +6,7 @@ for deterministic testing without consuming quota.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -84,67 +85,134 @@ class MockProvider(LLMProvider):
 
 
 class GeminiProvider(LLMProvider):
-    """Production provider calling Google Gemini 1.5 Flash."""
+    """Production provider calling Google Gemini via the official google.genai SDK with automatic tool dispatch and quota resilience."""
 
-    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-1.5-flash"):
+    FALLBACK_MODELS = ["gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]
+
+    def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-3.5-flash-lite"):
         self.api_key = (api_key or os.getenv("GEMINI_API_KEY") or "").strip()
         self.model_name = model_name
         self._client = None
 
-        if self.api_key:
+        if self.api_key and not self.api_key.startswith("your_"):
             try:
-                import google.generativeai as genai
-                genai.configure(api_key=self.api_key)
-                self._client = genai.GenerativeModel(model_name=self.model_name)
+                from google import genai
+                self._client = genai.Client(api_key=self.api_key)
             except Exception as exc:
-                logger.warning("Could not initialize google.generativeai client: %s", exc)
+                logger.warning("Could not initialize google.genai client: %s", exc)
 
     def generate(
         self,
         messages: List[Dict[str, str]],
-        tools: Optional[List[Dict[str, Any]]] = None,
+        tools: Optional[Any] = None,
         system_instruction: Optional[str] = None,
     ) -> ModelResponse:
         if not self._client or not self.api_key:
             return ModelResponse(
-                content="Gemini API is not configured on the server. Please check GEMINI_API_KEY.",
+                content="Gemini API is not configured on the server. Please check GEMINI_API_KEY in .env.",
                 tool_calls=[],
                 tokens_used=0,
             )
 
-        try:
-            # Format prompt from message history
-            history_prompt = ""
-            if system_instruction:
-                history_prompt += f"System: {system_instruction}\n"
-            for m in messages:
-                history_prompt += f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}\n"
+        # Build prompt or history
+        history_prompt = ""
+        sys_inst = system_instruction
+        for m in messages:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            if role == "system" and not sys_inst:
+                sys_inst = content
+                continue
+            if role == "tool":
+                tool_name = m.get("name", "tool")
+                history_prompt += f"Observation from {tool_name}: {content}\n"
+            elif role == "assistant":
+                tc_info = m.get("tool_calls")
+                if tc_info:
+                    history_prompt += f"Assistant Action: Call tools {json.dumps(tc_info)}\n"
+                if content:
+                    history_prompt += f"Assistant: {content}\n"
+            else:
+                if content:
+                    history_prompt += f"User: {content}\n"
 
-            # Execute model call with timeout and quota catch
-            start_t = time.time()
-            response = self._client.generate_content(history_prompt)
-            duration = time.time() - start_t
-            logger.info("Gemini call completed in %.2fs", duration)
+        # Determine model candidates (primary model first, then fallbacks)
+        candidates = [self.model_name] + [m for m in self.FALLBACK_MODELS if m != self.model_name]
+        last_error: Optional[Exception] = None
 
-            text_resp = getattr(response, "text", "") or ""
-            return ModelResponse(
-                content=text_resp,
-                tool_calls=[],
-                raw_response=response,
-                tokens_used=getattr(response.usage_metadata, "total_token_count", 50) if hasattr(response, "usage_metadata") else 50,
-            )
-        except Exception as exc:
-            err_str = str(exc)
-            if "429" in err_str or "Quota" in err_str:
-                logger.error("Gemini 15 RPM quota limit reached: %s", exc)
-                return ModelResponse(
-                    content="Gemini API quota momentarily exceeded. Pausing for safe backoff.",
-                    tool_calls=[],
-                    quota_exceeded=True,
+        for model_cand in candidates:
+            try:
+                from google.genai import types
+
+                config_kwargs: Dict[str, Any] = {}
+                if sys_inst:
+                    config_kwargs["system_instruction"] = sys_inst
+                if tools:
+                    # Convert dict schemas into types.Tool
+                    func_decls = []
+                    for t in tools:
+                        if isinstance(t, dict) and "name" in t:
+                            fd = types.FunctionDeclaration(
+                                name=t["name"],
+                                description=t.get("description", ""),
+                                parameters=t.get("parameters", {}),
+                            )
+                            func_decls.append(fd)
+                        elif hasattr(t, "__call__"):
+                            func_decls.append(t)
+                    if func_decls:
+                        if all(isinstance(f, types.FunctionDeclaration) for f in func_decls):
+                            config_kwargs["tools"] = [types.Tool(function_declarations=func_decls)]
+                        else:
+                            config_kwargs["tools"] = func_decls
+
+                config = types.GenerateContentConfig(**config_kwargs) if config_kwargs else None
+
+                start_t = time.time()
+                response = self._client.models.generate_content(
+                    model=model_cand,
+                    contents=history_prompt or "Hello",
+                    config=config,
                 )
-            logger.error("Gemini invocation failed: %s", exc)
-            return ModelResponse(
-                content=f"LLM generation failed: {exc}",
-                tool_calls=[],
-            )
+                duration = time.time() - start_t
+                logger.info("Gemini (%s) completed in %.2fs", model_cand, duration)
+
+                text_resp = getattr(response, "text", "") or ""
+                tool_calls: List[ToolCallRequest] = []
+
+                # Check if unexecuted function calls remain
+                fn_calls = getattr(response, "function_calls", None)
+                if fn_calls:
+                    for idx, fc in enumerate(fn_calls):
+                        call_id = f"call_{int(time.time())}_{idx}"
+                        tool_calls.append(
+                            ToolCallRequest(
+                                id=call_id,
+                                name=fc.name,
+                                arguments=dict(fc.args) if fc.args else {},
+                            )
+                        )
+
+                return ModelResponse(
+                    content=text_resp.strip(),
+                    tool_calls=tool_calls,
+                    raw_response=response,
+                    tokens_used=50,
+                )
+            except Exception as exc:
+                err_str = str(exc)
+                last_error = exc
+                if "429" in err_str or "503" in err_str or "Quota" in err_str or "high demand" in err_str or "NOT_FOUND" in err_str:
+                    logger.warning("Gemini model %s hit rate-limit/outage: %s. Trying fallback candidate...", model_cand, exc)
+                    continue
+                else:
+                    logger.error("Gemini invocation failed with %s: %s", model_cand, exc)
+                    break
+
+        # If all candidates exhausted
+        logger.error("All Gemini model candidates exhausted. Last error: %s", last_error)
+        return ModelResponse(
+            content=f"Attendance Assistant is momentarily unable to contact LLM provider: {last_error}",
+            tool_calls=[],
+        )
 

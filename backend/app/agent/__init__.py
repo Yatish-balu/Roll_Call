@@ -10,6 +10,9 @@ from app.agent.registry import ToolDefinition, ToolRegistry, RiskTier, registry,
 from app.agent.stream import AgentTaskManager, TaskState, AgentEvent, task_manager
 from app.agent.context import ConversationContext, ContextManager, ActionDraft, context_manager
 from app.agent.orchestrator import AgentOrchestrator, OrchestratorResult
+from app.agent.guardrails import PromptInjectionGuard, ScopeGuard, OutputSanitizer
+from app.agent.evaluator import GoalEvaluator
+from app.agent.audit import AgentAuditLogger
 
 __all__ = [  # noqa: F405
     "AttendanceAgent",
@@ -34,4 +37,9 @@ __all__ = [  # noqa: F405
     "context_manager",
     "AgentOrchestrator",
     "OrchestratorResult",
+    "PromptInjectionGuard",
+    "ScopeGuard",
+    "OutputSanitizer",
+    "GoalEvaluator",
+    "AgentAuditLogger",
 ]

@@ -332,7 +332,7 @@ export function AssistantView() {
       const assistantMsg: ChatMessage = {
         id: nextMsgId("a"),
         sender: "assistant",
-        text: res.message || "I've analyzed the attendance database for your query.",
+        text: res.message || "No records or information matched your request.",
         timestamp: getFormattedTime(),
         toolCalls: res.tool_calls,
         confirmation: res.confirmation_request,

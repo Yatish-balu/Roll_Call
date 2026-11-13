@@ -243,4 +243,108 @@ export async function confirmAgentRecords(data: {
   return apiClient.post<AgentResponse>("/api/v1/agent/confirm", data);
 }
 
+// ---------------------------------------------------------------------------
+// Phase 1: Real-time Autonomous Agent SSE Streaming Tasks & Approvals
+// ---------------------------------------------------------------------------
+
+export interface CreateTaskPayload {
+  prompt: string;
+}
+
+export interface CreateTaskResponse {
+  task_id: string;
+  stream_url: string;
+  status: string;
+}
+
+export interface AgentTaskStatus {
+  task_id: string;
+  actor_id: string;
+  status: string;
+  prompt: string;
+  event_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AgentSSEEvent {
+  task_id: string;
+  message: string;
+  data: Record<string, unknown>;
+  timestamp: string;
+  event_type?: string;
+}
+
+export interface ActionDraft {
+  draft_id: string;
+  action_type: string;
+  payload: Record<string, unknown>;
+  status: string;
+}
+
+/**
+ * Submit a prompt to start an autonomous agent task.
+ */
+export async function createAgentStreamingTask(prompt: string): Promise<CreateTaskResponse> {
+  return apiClient.post<CreateTaskResponse>("/api/v1/agent/tasks", { prompt });
+}
+
+/**
+ * Fetch task status.
+ */
+export async function getAgentStreamingTaskStatus(taskId: string): Promise<AgentTaskStatus> {
+  return apiClient.get<AgentTaskStatus>(`/api/v1/agent/tasks/${taskId}`);
+}
+
+/**
+ * Subscribe to SSE streaming events for a task.
+ * Returns an unsubscribe callback.
+ */
+export function subscribeToAgentTaskStream(
+  taskId: string,
+  onEvent: (eventType: string, data: AgentSSEEvent) => void,
+  onError?: (error: Event) => void,
+  onComplete?: () => void
+): () => void {
+  const url = `/api/v1/agent/tasks/${taskId}/events`;
+  const eventSource = new EventSource(url, { withCredentials: true });
+
+  const handleMessage = (eventType: string) => (e: MessageEvent) => {
+    try {
+      const parsed: AgentSSEEvent = JSON.parse(e.data);
+      parsed.event_type = eventType;
+      onEvent(eventType, parsed);
+      if (eventType === "task.completed" || eventType === "task.failed") {
+        eventSource.close();
+        if (onComplete) onComplete();
+      }
+    } catch (err) {
+      console.error("Failed to parse SSE event data:", err);
+    }
+  };
+
+  const eventTypes = [
+    "task.started",
+    "step.started",
+    "tool.started",
+    "tool.completed",
+    "approval.required",
+    "task.completed",
+    "task.failed",
+  ];
+
+  eventTypes.forEach((type) => {
+    eventSource.addEventListener(type, handleMessage(type));
+  });
+
+  eventSource.onerror = (err) => {
+    if (onError) onError(err);
+    eventSource.close();
+  };
+
+  return () => {
+    eventSource.close();
+  };
+}
+
 
