@@ -71,7 +71,7 @@
       "category": "auth",
       "severity": "medium",
       "expected": "|delta| < 50 ms",
-      "actual": "2.3 ms",
+      "actual": "14.2 ms",
       "held": true
     },
     {

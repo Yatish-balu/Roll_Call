@@ -249,3 +249,4 @@ def update_profile(
         "masteredSubjects": payload.masteredSubjects or [],
         "photoUrl": payload.photoUrl or "",
     }
+

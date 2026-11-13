@@ -22,5 +22,6 @@ regexTarget = "secret"
 regexes = [
     '''^test-secret-key-for-n6-gap-tests-at-least-32-characters$''',
     '''^person1-test-secret-key-at-least-32-characters-long$''',
+    '''^test-secret-key-at-least-32-chars-long-abc$''',
     '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9(\.\.\.)?$''',
 ]

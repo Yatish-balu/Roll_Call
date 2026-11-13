@@ -11,8 +11,8 @@
     },
     {
         "Check":  "gitleaks (committed secrets)",
-        "Status":  "SKIPPED",
-        "ExitCode":  127
+        "Status":  "PASS",
+        "ExitCode":  0
     },
     {
         "Check":  "npm audit (frontend)",

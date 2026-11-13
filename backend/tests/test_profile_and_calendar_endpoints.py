@@ -29,7 +29,7 @@ def engine():
 
 @pytest.fixture
 def client(engine, monkeypatch):
-    test_secret = "test-secret-key-at-least-32-chars-long-abc"
+    test_secret = "test-secret-key-at-least-32-chars-long-abc"  # gitleaks:allow - dummy test key
     monkeypatch.setenv("JWT_SECRET", test_secret)
     monkeypatch.setenv("JWT_SECRET_KEY", test_secret)
     factory = sessionmaker(bind=engine, class_=OrmSession, expire_on_commit=False)
@@ -84,7 +84,7 @@ def _auth_header(user_id: str, role: str) -> dict:
     import jwt
     from datetime import datetime, timedelta, timezone
 
-    secret = "test-secret-key-at-least-32-chars-long-abc"
+    secret = "test-secret-key-at-least-32-chars-long-abc"  # gitleaks:allow - dummy test key
     now = datetime.now(timezone.utc)
     token = jwt.encode(
         {
@@ -171,3 +171,4 @@ def test_export_calendar_ics(client):
     assert "BEGIN:VEVENT" in content
     assert "SUMMARY:CN - RollCall Session" in content
     assert "END:VCALENDAR" in content
+
