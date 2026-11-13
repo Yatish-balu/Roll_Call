@@ -91,7 +91,7 @@ def test_sse_streaming_task_endpoints():
     assert status_res.status_code == 200
     st_data = status_res.json()
     assert st_data["actor_id"] == "faculty_cn"
-    assert st_data["status"] == "CREATED"
+    assert st_data["status"] in ("CREATED", "PLANNING", "RUNNING", "COMPLETED")
     assert st_data["event_count"] >= 1
 
     # 3. Stream event replay test (mark task completed so SSE generator terminates)

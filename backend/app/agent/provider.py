@@ -22,6 +22,13 @@ class ToolCallRequest:
     name: str
     arguments: Dict[str, Any]
     call_id: Optional[str] = None
+    id: Optional[str] = None
+
+    def __post_init__(self):
+        if not self.call_id and self.id:
+            self.call_id = self.id
+        elif not self.id and self.call_id:
+            self.id = self.call_id
 
 
 @dataclass
@@ -140,3 +147,4 @@ class GeminiProvider(LLMProvider):
                 content=f"LLM generation failed: {exc}",
                 tool_calls=[],
             )
+

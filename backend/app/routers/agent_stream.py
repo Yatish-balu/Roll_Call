@@ -5,10 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Request, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
+from app.agent.orchestrator import AgentOrchestrator
 from app.agent.stream import task_manager, TaskState
 from app.auth import get_current_user
 from app.schemas.auth import AuthenticatedUser
@@ -16,6 +17,14 @@ from app.schemas.auth import AuthenticatedUser
 logger = logging.getLogger("rollcall.routers.agent_stream")
 
 router = APIRouter(prefix="/agent/tasks", tags=["Agent Streaming"])
+
+
+def _run_orchestrator_background(task_id: str, actor_id: str, role: str, prompt: str) -> None:
+    try:
+        orchestrator = AgentOrchestrator()
+        orchestrator.execute_prompt(actor_id=actor_id, role=role, prompt=prompt, task_id=task_id)
+    except Exception as exc:
+        logger.error("Background agent execution failed for task %s: %s", task_id, exc)
 
 
 class CreateTaskRequest(BaseModel):
@@ -46,6 +55,7 @@ class TaskStatusResponse(BaseModel):
 )
 def create_agent_task(
     payload: CreateTaskRequest,
+    background_tasks: BackgroundTasks,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ) -> Dict[str, Any]:
     clean_prompt = payload.prompt.strip()
@@ -58,6 +68,15 @@ def create_agent_task(
     task = task_manager.create_task(
         actor_id=current_user.user_id,
         prompt=clean_prompt,
+    )
+
+    role_str = getattr(current_user.role, "value", str(current_user.role))
+    background_tasks.add_task(
+        _run_orchestrator_background,
+        task.task_id,
+        current_user.user_id,
+        role_str,
+        clean_prompt,
     )
 
     return {
@@ -132,3 +151,4 @@ def get_task_status(
         "created_at": task.created_at,
         "updated_at": task.updated_at,
     }
+

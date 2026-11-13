@@ -1,0 +1,208 @@
+"""Agent Orchestrator executing the autonomous ReAct cycle.
+
+Integrates:
+- LLMProvider (Gemini / Mock)
+- ToolRegistry (Dynamic RBAC tool discovery & execution)
+- ConversationContext (Multi-turn state & draft memory)
+- AgentTaskManager (SSE step streaming & reconnection resilience)
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from app.agent.context import ConversationContext, context_manager
+from app.agent.provider import LLMProvider, MockProvider, ModelResponse, ToolCallRequest
+from app.agent.registry import RiskTier, ToolRegistry, tool_registry
+from app.agent.stream import AgentTaskManager, TaskState, task_manager
+
+logger = logging.getLogger("rollcall.agent.orchestrator")
+
+
+@dataclass
+class OrchestratorResult:
+    task_id: str
+    final_response: str
+    steps_executed: int
+    draft_created: Optional[Dict[str, Any]] = None
+    status: str = "COMPLETED"
+
+
+class AgentOrchestrator:
+    """Core autonomous agent executor with multi-step reasoning, tool dispatch, and SSE streaming."""
+
+    def __init__(
+        self,
+        provider: Optional[LLMProvider] = None,
+        registry: Optional[ToolRegistry] = None,
+        manager: Optional[AgentTaskManager] = None,
+        max_steps: int = 8,
+    ):
+        self.provider = provider or MockProvider()
+        self.registry = registry or tool_registry
+        self.manager = manager or task_manager
+        self.max_steps = max_steps
+
+    def execute_prompt(
+        self,
+        actor_id: str,
+        role: str,
+        prompt: str,
+        assigned_subjects: Optional[List[str]] = None,
+        task_id: Optional[str] = None,
+    ) -> OrchestratorResult:
+        """Run an autonomous goal-directed ReAct loop for the given user prompt."""
+        # 1. Initialize task in stream manager
+        task = self.manager.get_task(task_id) if task_id else None
+        if not task:
+            task = self.manager.create_task(actor_id=actor_id, prompt=prompt)
+        tid = task.task_id
+
+        # 2. Retrieve conversation context
+        ctx: ConversationContext = context_manager.get_or_create(
+            actor_id=actor_id,
+            role=role,
+            assigned_subjects=assigned_subjects,
+        )
+        ctx.add_user_message(prompt)
+
+        # Update task state to PLANNING
+        self.manager.update_status(tid, TaskState.PLANNING, message="Planning resolution strategy.")
+
+        # 3. Available tools filtered by actor role
+        available_tools = self.registry.get_tools_schema_for_role(role)
+
+        steps_executed = 0
+        final_answer = ""
+        pending_draft: Optional[Dict[str, Any]] = None
+
+        self.manager.update_status(tid, TaskState.RUNNING, message="Executing reasoning steps.")
+
+        while steps_executed < self.max_steps:
+            steps_executed += 1
+            messages = ctx.build_prompt_messages()
+
+            self.manager.emit_event(
+                tid,
+                event_type="step.started",
+                message=f"Agent reasoning step {steps_executed}.",
+                data={"step": steps_executed},
+            )
+
+            # Call LLM Provider
+            try:
+                response: ModelResponse = self.provider.generate(
+                    messages=messages,
+                    tools=available_tools if available_tools else None,
+                )
+            except Exception as exc:
+                err_msg = f"LLM generation failed: {exc}"
+                logger.error(err_msg)
+                self.manager.update_status(tid, TaskState.FAILED, message=err_msg)
+                return OrchestratorResult(
+                    task_id=tid,
+                    final_response=err_msg,
+                    steps_executed=steps_executed,
+                    status="FAILED",
+                )
+
+            # Case A: Model wants to call tools
+            if response.tool_calls:
+                ctx.add_assistant_message(
+                    content=response.content,
+                    tool_calls=[
+                        {"id": tc.id, "name": tc.name, "arguments": tc.arguments}
+                        for tc in response.tool_calls
+                    ],
+                )
+
+                for tc in response.tool_calls:
+                    tool_def = self.registry.get_tool(tc.name)
+                    if not tool_def:
+                        err_res = {"error": f"Tool '{tc.name}' is not registered."}
+                        ctx.add_tool_response(tc.id, tc.name, err_res)
+                        continue
+
+                    # If tool requires explicit approval, draft it and suspend execution
+                    if tool_def.risk_tier == RiskTier.CONFIRM_REQUIRED:
+                        draft_id = f"draft_{tid}_{steps_executed}"
+                        draft = ctx.create_draft(
+                            draft_id=draft_id,
+                            action_type=tc.name,
+                            payload=tc.arguments,
+                        )
+                        pending_draft = {
+                            "draft_id": draft.draft_id,
+                            "action_type": draft.action_type,
+                            "payload": draft.payload,
+                            "status": "WAITING_APPROVAL",
+                        }
+                        self.manager.emit_event(
+                            tid,
+                            event_type="approval.required",
+                            message=f"Action '{tc.name}' requires confirmation before proceeding.",
+                            data=pending_draft,
+                        )
+                        self.manager.update_status(
+                            tid,
+                            TaskState.WAITING_FOR_APPROVAL,
+                            message=f"Waiting for confirmation of {tc.name}.",
+                        )
+                        return OrchestratorResult(
+                            task_id=tid,
+                            final_response=f"I have prepared a draft for '{tc.name}'. Please confirm to proceed.",
+                            steps_executed=steps_executed,
+                            draft_created=pending_draft,
+                            status="WAITING_FOR_APPROVAL",
+                        )
+
+                    # Execute tool
+                    self.manager.emit_event(
+                        tid,
+                        event_type="tool.started",
+                        message=f"Executing tool '{tc.name}'.",
+                        data={"tool": tc.name, "args": tc.arguments},
+                    )
+
+                    exec_res = self.registry.execute(
+                        tool_name=tc.name,
+                        arguments=tc.arguments,
+                        actor_id=actor_id,
+                        role=role,
+                    )
+
+                    self.manager.emit_event(
+                        tid,
+                        event_type="tool.completed",
+                        message=f"Tool '{tc.name}' completed.",
+                        data={"tool": tc.name, "success": exec_res.get("error") is None},
+                    )
+
+                    ctx.add_tool_response(tc.id, tc.name, exec_res)
+
+                # Next iteration in while loop to let LLM observe tool output
+                continue
+
+            # Case B: Model returned text response without tool calls (Final Answer)
+            final_answer = response.content or ""
+            ctx.add_assistant_message(content=final_answer)
+            break
+
+        # Finished loop
+        self.manager.update_status(tid, TaskState.COMPLETED, message="Task completed successfully.")
+        self.manager.emit_event(
+            tid,
+            event_type="task.completed",
+            message=final_answer,
+            data={"final_response": final_answer},
+        )
+
+        return OrchestratorResult(
+            task_id=tid,
+            final_response=final_answer,
+            steps_executed=steps_executed,
+            draft_created=pending_draft,
+            status="COMPLETED",
+        )
