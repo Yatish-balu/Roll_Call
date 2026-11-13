@@ -41,6 +41,7 @@ os.environ["SQLITE_PATH"] = str(_ISOLATED_DB)
 os.environ["DATABASE_PATH"] = str(_ISOLATED_DB)
 # Tests run against the SQLite backend, never against Supabase.
 os.environ["DB_BACKEND"] = "sqlite"
+os.environ["SESSION_AUTO_INIT"] = "0"
 
 # Bring the isolated copy (or fresh CI database) to the current schema head so
 # that the application models and the database agree. The live database is only
