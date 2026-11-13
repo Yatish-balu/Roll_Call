@@ -88,6 +88,12 @@ async def lifespan(app: FastAPI):
     except Exception as exc:
         logger.warning("Could not auto-create profile table at startup: %s", exc)
 
+    try:
+        from app.agent.tools import register_all_tools
+        register_all_tools()
+    except Exception as exc:
+        logger.warning("Could not register agent tools at startup: %s", exc)
+
     # Password reset only works if a reset link can be delivered. Report the
     # missing provider at startup instead of discovering it on the first reset.
     if env == "production":
@@ -121,11 +127,14 @@ async def lifespan(app: FastAPI):
 
     from app.services.session_initialization import run_daily_initialization
 
-    auto_init_enabled = os.getenv("SESSION_AUTO_INIT", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    auto_init_enabled = (
+        os.getenv("SESSION_AUTO_INIT", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        and "pytest" not in sys.modules
     )
 
     async def _session_initialisation_worker() -> None:

@@ -10,6 +10,10 @@ from app.agent.registry import ToolDefinition, ToolRegistry, RiskTier, registry,
 from app.agent.stream import AgentTaskManager, TaskState, AgentEvent, task_manager
 from app.agent.context import ConversationContext, ContextManager, ActionDraft, context_manager
 from app.agent.orchestrator import AgentOrchestrator, OrchestratorResult
+from app.agent.tools import register_all_tools
+
+# Auto-register all tools into global tool_registry
+register_all_tools(tool_registry)
 
 __all__ = [  # noqa: F405
     "AttendanceAgent",

@@ -1,27 +1,26 @@
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-pydantic>=2.0.0
-pandas
-openpyxl
-reportlab
-pytest
-python-dotenv
-streamlit
+fastapi>=0.115.0,<1.0.0
+uvicorn[standard]>=0.30.0,<1.0.0
+python-multipart>=0.0.9
+pydantic>=2.0.0,<3.0.0
+pandas>=2.2.0,<3.0.0
+openpyxl>=3.1.0,<4.0.0
+reportlab>=4.0.0,<5.0.0
+python-dotenv>=1.0.0,<2.0.0
 
 # Database & Migration Foundation (SQLite & PostgreSQL / Supabase)
 SQLAlchemy>=2.0.38,<2.1.0
 alembic>=1.14.0,<1.19.0
-asyncpg>=0.30.0
-psycopg[binary]>=3.2.0
-psycopg2-binary
-aiosqlite>=0.21.0
-greenlet>=3.1.0
+asyncpg>=0.30.0,<1.0.0
+psycopg[binary]>=3.2.0,<4.0.0
+psycopg2-binary>=2.9.0,<3.0.0
+aiosqlite>=0.21.0,<1.0.0
+greenlet>=3.1.0,<4.0.0
 
 # Authentication & Security
-PyJWT>=2.8.0
-cryptography>=42.0.0
-passlib[bcrypt]>=1.7.4
-bcrypt>=4.0.0
+PyJWT>=2.8.0,<3.0.0
+cryptography>=50.0.0
+passlib[bcrypt]>=1.7.4,<2.0.0
+bcrypt>=4.0.0,<5.0.0
 # Optional shared counter store for multi-instance deployments. The limiter
 # falls back to the shared database counters when REDIS_URL is unset.
 redis>=5.0,<8
@@ -31,12 +30,9 @@ redis>=5.0,<8
 # app/security/uploads.py imports PIL, so these are runtime dependencies of the
 # backend (not just test dependencies). The headless OpenCV build is used
 # because CI and servers have no display/GL stack.
-numpy>=1.26.0
-opencv-python-headless>=4.8.0
-Pillow>=10.0.0
+numpy>=1.26.0,<3.0.0
+opencv-python-headless>=4.8.0,<5.0.0
+Pillow>=13.0.0
 
-# Test runner support
-# httpx is required by fastapi.testclient.TestClient; pytest-timeout provides
-# the --timeout flag used by the CI test command.
-httpx>=0.27.0
-pytest-timeout>=2.3.0
+# Test-only dependencies live in requirements-dev.txt (pytest, httpx,
+# pytest-timeout, streamlit) so they are not installed in production images.
