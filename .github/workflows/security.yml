@@ -269,7 +269,7 @@ jobs:
           from alembic.config import Config
           from alembic.script import ScriptDirectory
 
-          EXPECTED_HEAD = "0017_consolidate_subjects"
+          EXPECTED_HEAD = "0019_user_profiles"
 
           config = Config("alembic.ini")
           # ``command.heads()`` only prints and returns None, so read the heads

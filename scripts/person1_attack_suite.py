@@ -63,6 +63,7 @@ os.environ.update(
         "SEC_MFA_VERIFY_LIMIT": "5",
         "SEC_UPLOAD_LIMIT": "3",
         "TRUST_PROXY_HEADERS": "",
+        "SESSION_AUTO_INIT": "0",
     }
 )
 

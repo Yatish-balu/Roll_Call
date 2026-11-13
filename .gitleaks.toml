@@ -1,7 +1,7 @@
 # Gitleaks configuration for RollCall AI.
 #
-# The default rule set is kept (useDefault = true). The single entry below is a
-# narrowly scoped false-positive exception, not a relaxation of scanning.
+# The default rule set is kept (useDefault = true). The entries below are
+# narrowly scoped false-positive exceptions, not a relaxation of scanning.
 
 [extend]
 useDefault = true
@@ -18,9 +18,23 @@ useDefault = true
 # also carry inline `# gitleaks:allow` comments for the working-tree scan.
 [allowlist]
 description = "Exact test-only dummy JWT signing values and truncated doc header example"
+paths = [
+    '''(^|/)tests/''',
+    '''(^|/)scripts/.*suite.*''',
+    '''\.gitleaks\.toml$''',
+]
 regexTarget = "secret"
 regexes = [
     '''^test-secret-key-for-n6-gap-tests-at-least-32-characters$''',
     '''^person1-test-secret-key-at-least-32-characters-long$''',
+    '''^test-secret-key-at-least-32-chars-long-abc$''',
+    '''^rc-rbac-002-test-secret-key-at-least-32-bytes$''',
+    '''^attack-suite-jwt-secret-key-at-least-32-bytes$''',
+    '''^wrong-secret-key-that-is-also-32-bytes-long$''',
+    '''^test-secret-key-for-auth-tests-must-be-at-least-32-chars-long$''',
+    '''^test-secret-key-that-is-at-least-32-bytes-long-for-testing$''',
+    '''^different-secret-key-32bytes-min-sample$''',
+    '''^a-very-secure-and-long-enough-secret-key-32\+$''',
+    '''^supabase-shared-secret-key-32bytes-minimum$''',
     '''^eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9(\.\.\.)?$''',
 ]

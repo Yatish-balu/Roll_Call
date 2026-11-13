@@ -72,6 +72,33 @@ try:
         command.stamp(_alembic_cfg, "0001_initial_schema")
 
     command.upgrade(_alembic_cfg, "head")
+
+    # Seed canonical test users into the isolated test database so CI runs
+    # (where data/attendance.db is absent) have real users for foreign key and JWT checks.
+    _conn = sqlite3.connect(str(_ISOLATED_DB))
+    try:
+        _now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _cols = [c[1] for c in _conn.execute("PRAGMA table_info(users)").fetchall()]
+        if "name" not in _cols:
+            _conn.execute("ALTER TABLE users ADD COLUMN name TEXT")
+
+        test_users = [
+            ("00000000-0000-0000-0000-000000000001", "admin@rollcall.edu", "ADMIN", "Test Admin"),
+            ("faculty_cn", "faculty_cn@rollcall.edu", "FACULTY", "Prof. Computer Networks"),
+            ("other_faculty", "other_faculty@rollcall.edu", "FACULTY", "Prof. Other"),
+            ("faculty_b", "faculty_b@rollcall.edu", "FACULTY", "Prof. B"),
+            ("teacher_jane", "teacher_jane@rollcall.edu", "FACULTY", "Prof. Jane"),
+        ]
+        for u_id, email, role, name in test_users:
+            _exists = _conn.execute("SELECT 1 FROM users WHERE user_id = ?", (u_id,)).fetchone()
+            if not _exists:
+                _conn.execute(
+                    "INSERT INTO users (user_id, email, role, is_active, created_at, name) VALUES (?, ?, ?, 1, ?, ?)",
+                    (u_id, email, role, _now, name),
+                )
+        _conn.commit()
+    finally:
+        _conn.close()
 except Exception as _migration_error:  # pragma: no cover - surfaced in the logs
     print(
         f"WARNING: the isolated test database could not be migrated to head: {_migration_error}"
