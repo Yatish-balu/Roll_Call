@@ -339,6 +339,13 @@ class ToolRegistry:
         def _clean(d: Dict[str, Any]) -> Dict[str, Any]:
             return {k: v for k, v in d.items() if k != "request_id"}
 
+        def _resolve_tool(tool_name: str, fallback: Any) -> Any:
+            import sys
+            mod = sys.modules.get("app.agent")
+            if mod and hasattr(mod, tool_name):
+                return getattr(mod, tool_name)
+            return fallback
+
         # 1. read_csv_tool
         self.register(
             ToolDefinition(
@@ -351,7 +358,7 @@ class ToolRegistry:
                     },
                     "required": ["source"],
                 },
-                handler=lambda source, **kw: read_csv_tool(source=source, **_clean(kw)),
+                handler=lambda source, **kw: _resolve_tool("read_csv_tool", read_csv_tool)(source=source, **_clean(kw)),
             )
         )
 
@@ -369,7 +376,7 @@ class ToolRegistry:
                     },
                     "required": ["image_path"],
                 },
-                handler=lambda image_path, **kw: read_photo_tool(image_path=image_path, **_clean(kw)),
+                handler=lambda image_path, **kw: _resolve_tool("read_photo_tool", read_photo_tool)(image_path=image_path, **_clean(kw)),
             )
         )
 
@@ -387,7 +394,7 @@ class ToolRegistry:
                     },
                     "required": ["data"],
                 },
-                handler=lambda data, **kw: validate_tool(data=data, **_clean(kw)),
+                handler=lambda data, **kw: _resolve_tool("validate_tool", validate_tool)(data=data, **_clean(kw)),
             )
         )
 
@@ -403,7 +410,7 @@ class ToolRegistry:
                     },
                     "required": ["data"],
                 },
-                handler=lambda data, **kw: summary_tool(data=data, **_clean(kw)),
+                handler=lambda data, **kw: _resolve_tool("summary_tool", summary_tool)(data=data, **_clean(kw)),
             )
         )
 
@@ -427,7 +434,7 @@ class ToolRegistry:
                     },
                     "required": ["query_type"],
                 },
-                handler=lambda query_type, **kw: query_tool(
+                handler=lambda query_type, **kw: _resolve_tool("query_tool", query_tool)(
                     query_type=query_type, scope=self.scope, **_clean(kw)
                 ),
             )
@@ -448,7 +455,7 @@ class ToolRegistry:
                     },
                     "required": ["data"],
                 },
-                handler=lambda data, **kw: export_tool(data=data, **_clean(kw)),
+                handler=lambda data, **kw: _resolve_tool("export_tool", export_tool)(data=data, **_clean(kw)),
             )
         )
 

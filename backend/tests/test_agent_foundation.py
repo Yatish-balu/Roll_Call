@@ -77,6 +77,23 @@ def test_sse_streaming_task_endpoints():
     from app.auth.dependencies import get_current_user
     from app.schemas.auth import AuthenticatedUser
     from app.auth.roles import Role
+    from app.db.connection import get_sync_session_factory
+    from app.db.models import User
+
+    factory = get_sync_session_factory()
+    with factory() as session:
+        if session.get(User, "faculty_cn") is None:
+            session.add(
+                User(
+                    user_id="faculty_cn",
+                    name="Prof. Computer Networks",
+                    email="faculty_cn@rollcall.internal",
+                    role="FACULTY",
+                    is_active=1,
+                    created_at="2026-11-13T10:00:00Z",
+                )
+            )
+            session.commit()
 
     app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
         user_id="faculty_cn",

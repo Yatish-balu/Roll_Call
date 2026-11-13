@@ -457,3 +457,49 @@ def test_reconciliation_explicit_manual_resolutions(seeded_client):
     assert sess_records[0]["status"] == "PRESENT"
     assert "prof_smith" in sess_records[0]["source"]
 
+
+# ==============================================================================
+# 5. Fast-Path Attendance Correction & 60-Second Undo API Tests
+# ==============================================================================
+
+def test_attendance_correction_and_undo_endpoints(seeded_client):
+    """Verify POST /api/v1/attendance/{record_id}/corrections and /undo endpoints."""
+    # 1. Create initial attendance record
+    create_res = seeded_client.post(
+        "/api/v1/attendance/sessions/SESS-001/record",
+        json={"usn": "1MS21CS001", "room_id": "LH-101", "status": "ABSENT"},
+    )
+    assert create_res.status_code == 201, create_res.text
+    record_id = create_res.json()["attendance_id"]
+
+    # 2. Fast-path single record correction
+    corr_res = seeded_client.post(
+        f"/api/v1/attendance/{record_id}/corrections",
+        json={"new_status": "PRESENT", "reason": "Teacher correction test"},
+    )
+    assert corr_res.status_code == 200, corr_res.text
+    corr_data = corr_res.json()
+    assert corr_data["new_status"] == "PRESENT"
+    assert corr_data["previous_status"] == "ABSENT"
+    undo_token = corr_data["undo_token"]
+    assert undo_token is not None
+
+    # Verify updated in database
+    sess_records = seeded_client.get("/api/v1/attendance/sessions/SESS-001").json()
+    assert sess_records[0]["status"] == "PRESENT"
+
+    # 3. Compensating 60-second undo
+    undo_res = seeded_client.post(
+        f"/api/v1/attendance/{record_id}/undo",
+        json={"undo_token": undo_token},
+    )
+    assert undo_res.status_code == 200, undo_res.text
+    undo_data = undo_res.json()
+    assert undo_data["current_status"] == "ABSENT"
+    assert undo_data["previous_status"] == "PRESENT"
+
+    # Verify status reverted in database
+    reverted_records = seeded_client.get("/api/v1/attendance/sessions/SESS-001").json()
+    assert reverted_records[0]["status"] == "ABSENT"
+
+
