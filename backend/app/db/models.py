@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Float,
+    Text,
     UniqueConstraint,
     event,
     text,
@@ -96,6 +97,11 @@ class User(Base):
         primaryjoin="Session.coordinator_faculty_id == User.user_id",
         back_populates="coordinator",
     )
+    profile: Mapped[Optional["UserProfile"]] = relationship(
+        "UserProfile",
+        primaryjoin="UserProfile.user_id == User.user_id",
+        viewonly=True,
+    )
 
     def __repr__(self) -> str:
         return f"<User(user_id={self.user_id!r}, email={self.email!r}, role={self.role!r})>"
@@ -104,6 +110,42 @@ class User(Base):
     def display_name(self) -> str:
         """Human-readable display name, falling back to email prefix or user_id."""
         return self.name or (self.email.split("@")[0] if self.email else self.user_id)
+
+
+class UserProfile(Base):
+    """Descriptive faculty/staff profile, 1:1 with ``users``.
+
+    Identity fields (user_id, role, hashed password, display name ``name`` and
+    email) live on ``users``; this table holds the descriptive details edited
+    through the Profile Settings UI. Text-list fields (expertise tags,
+    mastered subjects) are stored as JSON strings.
+    """
+
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    # Mirrors of the identity fields: users.name / users.email remain
+    # authoritative for login and refresh responses; these copies keep the
+    # profile row self-contained for the Profile Settings UI.
+    full_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    mobile: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    branch: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    designation: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    experience_years: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    qualifications: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    specialization: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    expertise: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mastered_subjects: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    photo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    user: Mapped["User"] = relationship("User", back_populates="profile", viewonly=True)
+
+    def __repr__(self) -> str:
+        return f"<UserProfile(user_id={self.user_id!r}, designation={self.designation!r})>"
 
 
 class FacultySubject(Base):
@@ -539,6 +581,12 @@ class Session(Base):
     __table_args__ = (
         Index("idx_sessions_teacher_created", "teacher_id", "created_at"),
         Index("idx_sessions_lifecycle", "lifecycle_status"),
+        # Dashboard/report queries filter and sort on the session date.
+        Index("idx_sessions_date", "date"),
+        # Attendance report filtering by subject code (D8 proxy selector).
+        Index("idx_sessions_subject_code", "subject_code"),
+        # Session visibility scoping resolves coordinator-owned sessions.
+        Index("idx_sessions_coordinator_faculty", "coordinator_faculty_id"),
     )
 
     def __repr__(self) -> str:

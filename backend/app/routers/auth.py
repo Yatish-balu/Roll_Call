@@ -388,7 +388,17 @@ def login(request: Request, payload: LoginRequest):
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                     return generic_401
 
-                if not hmac.compare_digest(payload.admin_key.strip(), configured_admin_key.strip()):
+                # compare_digest() on str raises TypeError for non-ASCII input;
+                # compare UTF-8 bytes instead so any key value fails closed
+                # with 401 rather than crashing with a 500.
+                try:
+                    admin_key_matches = hmac.compare_digest(
+                        payload.admin_key.strip().encode("utf-8"),
+                        configured_admin_key.strip().encode("utf-8"),
+                    )
+                except Exception:
+                    admin_key_matches = False
+                if not admin_key_matches:
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                     return generic_401
 
@@ -551,7 +561,7 @@ def login(request: Request, payload: LoginRequest):
             content={
                 "token": token,
                 "role": user.role,
-                "name": user.email.split("@")[0] if user.email else user.user_id,
+                "name": getattr(user, "name", None) or (user.email.split("@")[0] if user.email else user.user_id),
                 "subject_codes": subject_codes,
                 "expires_at_utc": exp_iso,
             },
@@ -782,7 +792,7 @@ def refresh(request: Request):
             content={
                 "token": new_access_token,
                 "role": user.role,
-                "name": user.email.split("@")[0] if user.email else user.user_id,
+                "name": getattr(user, "name", None) or (user.email.split("@")[0] if user.email else user.user_id),
                 "subject_codes": subject_codes,
                 "expires_at_utc": exp_iso,
             },
@@ -898,8 +908,8 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
             is_active=db_user.is_active,
             subject_codes=subject_codes,
         )
-# -- Password Lifecycle Helpers --
 
+# -- Password Lifecycle Helpers --
 def _validate_password_strength(password: str) -> None:
     """Validate password meets complexity requirements.
 

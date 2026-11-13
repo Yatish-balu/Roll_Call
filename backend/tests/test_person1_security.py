@@ -781,10 +781,11 @@ def test_alembic_has_a_single_head_and_migrates_on_a_disposable_database():
         tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         revision = conn.execute("SELECT version_num FROM alembic_version").fetchone()[0]
         conn.close()
-        assert revision == "0017_consolidate_subjects", revision
+        assert revision == "0019_user_profiles", revision
         assert "security_rate_limits" in tables
         assert "audit_chain_head" in tables
         assert "security_decoys" in tables
+        assert "user_profiles" in tables
 
 
 # ---------------------------------------------------------------------------

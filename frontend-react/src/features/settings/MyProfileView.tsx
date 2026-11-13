@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { updateSessionProfile } from "@/services/auth";
 import {
   DESIGNATIONS,
   EXPERTISE_SUGGESTIONS,
@@ -106,12 +107,22 @@ export function MyProfileView() {
     setSaveError(null);
     try {
       const result = await saveFacultyProfile(userId, profile);
+      if (result.profile) {
+        // The server-confirmed profile is authoritative (normalisation, email
+        // casing) - adopt it so the form never drifts from the database.
+        setProfile(result.profile);
+      }
+      // Surface the new display name in the auth context immediately; after
+      // re-login the backend returns it from the persisted profile.
+      if (result.profile?.fullName && result.profile.fullName !== session?.name) {
+        updateSessionProfile({ name: result.profile.fullName });
+      }
       setStorage(result.storage);
       setSaveMessage(result.message);
       setNotice(
         result.storage === "server"
           ? null
-          : "Profile saved on this device. The backend has no profile write endpoint yet."
+          : "Profile saved on this device. The backend could not be reached, so the changes were not confirmed on the server."
       );
     } catch (err: unknown) {
       setSaveError(err instanceof Error ? err.message : "The profile could not be saved.");

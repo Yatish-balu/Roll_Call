@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Generator, Optional, Union
@@ -146,6 +147,36 @@ def _sqlite_enabled() -> bool:
 def _supabase_url() -> str:
     """Return the authoritative synchronous PostgreSQL URL, if configured."""
     return (os.getenv("DATABASE_URL_SYNC") or DATABASE_URL_SYNC or "").strip()
+
+
+# Shared engine / sessionmaker for the request path. One engine means one
+# connection pool: requests reuse warm SSL connections instead of paying the
+# TLS handshake to the Supabase pooler on every call.
+_SYNC_ENGINE: Optional[Engine] = None
+_SYNC_SESSION_FACTORY: Optional[sessionmaker[Session]] = None
+# RLock: get_sync_session_factory() holds it while _default_sync_engine()
+# re-acquires it to create (and cache) the shared engine.
+_SYNC_ENGINE_LOCK = threading.RLock()
+
+
+def _default_sync_engine() -> Engine:
+    """Return (lazily creating) the process-wide shared engine."""
+    global _SYNC_ENGINE
+    if _SYNC_ENGINE is None:
+        with _SYNC_ENGINE_LOCK:
+            if _SYNC_ENGINE is None:  # double-checked locking
+                _SYNC_ENGINE = create_sync_engine()
+    return _SYNC_ENGINE
+
+
+def reset_sync_engine() -> None:
+    """Dispose the shared engine/sessionmaker (used by tests and after env changes)."""
+    global _SYNC_ENGINE, _SYNC_SESSION_FACTORY
+    with _SYNC_ENGINE_LOCK:
+        if _SYNC_ENGINE is not None:
+            _SYNC_ENGINE.dispose()
+        _SYNC_ENGINE = None
+        _SYNC_SESSION_FACTORY = None
 
 
 def get_backend() -> str:
@@ -311,14 +342,23 @@ def create_sync_engine(
         }
     else:
         # PostgreSQL (Supabase) production configuration.
-        # psycopg driver uses sslmode=require via connect_args.
+        # QueuePool (SQLAlchemy default) + pool_pre_ping keeps a warm set of
+        # SSL connections; pool_recycle rotates them before the pooler's idle
+        # timeout. Libpq TCP keepalives detect dead pooler connections early.
         engine_kwargs = {
             "echo": echo,
             "pool_pre_ping": True,
             "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
             "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
             "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
-            "connect_args": {"sslmode": "require"},
+            "connect_args": {
+                "sslmode": "require",
+                "application_name": "rollcall-api",
+                "keepalives": 1,
+                "keepalives_idle": 60,
+                "keepalives_interval": 10,
+                "keepalives_count": 5,
+            },
             **kwargs,
         }
     return create_engine(target_url, **engine_kwargs)
@@ -375,9 +415,24 @@ def create_async_engine_instance(
 
 
 def get_sync_session_factory(engine: Optional[Engine] = None) -> sessionmaker[Session]:
-    """Return a synchronous sessionmaker bound to the given or default engine."""
-    eng = engine or create_sync_engine()
-    return sessionmaker(bind=eng, class_=Session, expire_on_commit=False)
+    """Return a synchronous sessionmaker bound to the given or shared engine.
+
+    When no engine is passed, the process-wide shared engine is used so the
+    SQLAlchemy connection pool persists across requests. Creating a fresh
+    engine per request (the previous behaviour) opened a new SSL TCP
+    connection to Supabase for every API call, which dominated response
+    latency on the remote pooler.
+    """
+    global _SYNC_SESSION_FACTORY
+    if engine is not None:
+        return sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
+    if _SYNC_SESSION_FACTORY is None:
+        with _SYNC_ENGINE_LOCK:
+            if _SYNC_SESSION_FACTORY is None:
+                _SYNC_SESSION_FACTORY = sessionmaker(
+                    bind=_default_sync_engine(), class_=Session, expire_on_commit=False
+                )
+    return _SYNC_SESSION_FACTORY
 
 
 def get_async_session_factory(async_engine: Optional[AsyncEngine] = None) -> async_sessionmaker[AsyncSession]:
@@ -400,8 +455,9 @@ def verify_database_connectivity() -> None:
     if backend == "sqlite":
         return
 
-    # Attempt an actual connection so failures are visible at startup.
-    engine = create_sync_engine()
+    # Warm the process-wide shared engine so the pool is ready before the
+    # first request arrives (and failures are still visible at startup).
+    engine = _default_sync_engine()
     try:
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
@@ -417,5 +473,4 @@ def verify_database_connectivity() -> None:
             "  - ensure no stale DATABASE_URL_SYNC environment variable is "
             "overriding .env."
         ) from exc
-    finally:
-        engine.dispose()
+    # Intentionally no dispose(): the warmed pool stays in service.

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   createSession,
@@ -13,27 +13,79 @@ import {
   type SessionItem,
 } from "@/services/api/sessions";
 import { fetchMySubjects } from "@/services/api/faculty";
+import { invalidate, mutateCache } from "@/services/api/cache";
+import { useResource } from "@/hooks/useResource";
 import { useAuth } from "@/hooks/useAuth";
 import { formatIsoDate, todayIso } from "@/lib/schedule";
+
+// Shared cache keys (module scope so mutation handlers and other views can
+// invalidate/mutate the exact same entries without duplicating key logic).
+export const SESSIONS_LIST_KEY = "/api/v1/sessions?limit=100";
+const SESSIONS_ALLOCATIONS_KEY = "/api/v1/sessions/allocations";
+const INITIALIZATION_KEY = (date: string) => `/api/v1/sessions/initialization/today?date=${date}`;
+const MY_SUBJECTS_KEY = "/api/v1/me/subjects";
+
+interface SessionsListResponse {
+  items?: SessionItem[];
+  total?: number;
+}
 
 export function SessionsView() {
   const navigate = useNavigate();
   const { session, isAdmin, isFaculty, isViewer, canScheduleSessions } = useAuth();
   const today = todayIso();
 
-  const [sessions, setSessions] = useState<SessionItem[]>([]);
-  const [allocations, setAllocations] = useState<SessionAllocation[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  // Cached reads: instant render on tab re-entry, background revalidation
+  // when older than the stale time.
+  const sessionsRes = useResource<SessionsListResponse>(
+    SESSIONS_LIST_KEY,
+    () => fetchSessions({ limit: 100 })
+  );
+  const allocationsRes = useResource<{ items?: SessionAllocation[]; total?: number }>(
+    SESSIONS_ALLOCATIONS_KEY,
+    () =>
+      fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 }))
+  );
+  const initializationRes = useResource<InitializationState>(
+    INITIALIZATION_KEY(today),
+    () => fetchInitializationState(today)
+  );
+  const subjectsRes = useResource<{ subject_codes?: string[] }>(
+    isFaculty && !isAdmin ? MY_SUBJECTS_KEY : null,
+    () => fetchMySubjects()
+  );
 
-  // Session initialisation (server side)
-  const [initialization, setInitialization] = useState<InitializationState | null>(null);
-  const [initializationError, setInitializationError] = useState<string | null>(null);
+  const sessions = useMemo(() => sessionsRes.data?.items ?? [], [sessionsRes.data]);
+  const allocations = useMemo(
+    () => allocationsRes.data?.items ?? [],
+    [allocationsRes.data]
+  );
+  const isLoading = sessionsRes.isLoading;
+  const error = sessionsRes.error
+    ? sessionsRes.error instanceof Error
+      ? sessionsRes.error.message
+      : "Unable to load academic sessions."
+    : null;
+
+  const initialization = initializationRes.data ?? null;
+  const initializationError = initializationRes.error
+    ? initializationRes.error instanceof Error
+      ? initializationRes.error.message
+      : "The initialization state could not be read."
+    : null;
   const [isInitializing, setIsInitializing] = useState(false);
 
   // Assigned subjects for faculty (authoritative from backend)
-  const [assignedSubjects, setAssignedSubjects] = useState<string[]>([]);
-  const [isLoadingSubjects, setIsLoadingSubjects] = useState(false);
+  const assignedSubjects = useMemo(
+    () => subjectsRes.data?.subject_codes ?? [],
+    [subjectsRes.data]
+  );
+  const isLoadingSubjects = subjectsRes.isLoading;
+
+  const [subjectCodeChoice, setSubjectCodeChoice] = useState<string | null>(null);
+  const subjectCodeFromSession = (!isAdmin && isFaculty && session.subjectCodes?.[0]) || "";
+  const subjectCode = subjectCodeChoice ?? (assignedSubjects.length === 1 ? assignedSubjects[0] : subjectCodeFromSession);
+  const setSubjectCode = setSubjectCodeChoice;
 
   // Search & filter
   const [searchQuery, setSearchQuery] = useState("");
@@ -44,9 +96,7 @@ export function SessionsView() {
   const [sessionId, setSessionId] = useState("");
   const [sessionDate, setSessionDate] = useState(today);
   const [subject, setSubject] = useState("");
-  const [subjectCode, setSubjectCode] = useState(
-    () => (!isAdmin && isFaculty && session.subjectCodes?.[0]) || ""
-  );
+
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -54,66 +104,12 @@ export function SessionsView() {
   const [viewSession, setViewSession] = useState<SessionItem | null>(null);
 
   useEffect(() => {
-    let isMounted = true;
-    if (isFaculty && !isAdmin) {
-      setIsLoadingSubjects(true);
-      fetchMySubjects()
-        .then((res) => {
-          if (!isMounted) return;
-          const codes = res.subject_codes || [];
-          setAssignedSubjects(codes);
-          setSubjectCode((prev) =>
-            codes.length === 1 ? codes[0] : prev || (codes.length > 1 ? codes[0] : "")
-          );
-        })
-        .catch(() => {
-          if (!isMounted) return;
-          const codes = session.subjectCodes || [];
-          setAssignedSubjects(codes);
-          setSubjectCode((prev) => (codes.length === 1 ? codes[0] : prev));
-        })
-        .finally(() => {
-          if (isMounted) setIsLoadingSubjects(false);
-        });
+    // Preselect the subject code once the authoritative list arrives.
+    const codes = assignedSubjects;
+    if (!isAdmin && isFaculty && codes.length > 0) {
+      setSubjectCode((prev) => (prev ? prev : codes.length > 0 ? codes[0] : ""));
     }
-    return () => {
-      isMounted = false;
-    };
-  }, [isFaculty, isAdmin, session.subjectCodes]);
-
-  const loadSessions = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const [sessionsRes, allocationsRes] = await Promise.all([
-        fetchSessions({ limit: 100 }),
-        fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 })),
-      ]);
-      setSessions(sessionsRes.items || []);
-      setAllocations(allocationsRes.items || []);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Unable to load academic sessions.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  const loadInitialization = useCallback(async () => {
-    setInitializationError(null);
-    try {
-      const state = await fetchInitializationState(today);
-      setInitialization(state);
-    } catch (err: unknown) {
-      setInitializationError(
-        err instanceof Error ? err.message : "The initialization state could not be read."
-      );
-    }
-  }, [today]);
-
-  useEffect(() => {
-    void loadSessions();
-    void loadInitialization();
-  }, [loadSessions, loadInitialization]);
+  }, [isAdmin, isFaculty, assignedSubjects]);
 
   const allocationsBySession = useMemo(() => {
     const map = new Map<string, SessionAllocation[]>();
@@ -180,7 +176,15 @@ export function SessionsView() {
         subject: subject.trim(),
         subject_code: subjectCode.trim().toUpperCase() || undefined,
       });
-      setSessions((prev) => [created, ...prev]);
+      // Optimistic cache update instead of a full refetch: the new session is
+      // prepended to the shared cached list and dependent keys are refreshed
+      // in the background by whoever has them mounted.
+      mutateCache<SessionsListResponse>(SESSIONS_LIST_KEY, (prev) => ({
+        ...(prev ?? { items: [], total: 0 }),
+        items: [created, ...(prev?.items ?? [])],
+        total: (prev?.total ?? 0) + 1,
+      }));
+      invalidate(["dashboard", "calendar-month", "analytics"]);
       setIsCreateOpen(false);
       setSessionId("");
       setSubject("");
@@ -198,8 +202,17 @@ export function SessionsView() {
     setInitializationError(null);
     try {
       await initializeSessions(today);
-      await loadInitialization();
-      await loadSessions();
+      // Only the affected keys: sessions/allocations/initialisation state here,
+      // plus the dashboards/calendars that derive from them (refetched by the
+      // hooks that currently have them mounted).
+      invalidate([
+        SESSIONS_LIST_KEY,
+        SESSIONS_ALLOCATIONS_KEY,
+        INITIALIZATION_KEY(today),
+        "dashboard",
+        "calendar-month",
+        "analytics",
+      ]);
       window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
     } catch (err: unknown) {
       setInitializationError(
@@ -340,7 +353,7 @@ export function SessionsView() {
           <span>{error}</span>
           <button
             type="button"
-            onClick={() => void loadSessions()}
+            onClick={sessionsRes.refresh}
             className="font-bold underline hover:text-[#24251C] transition-colors ml-4 cursor-pointer"
           >
             Retry

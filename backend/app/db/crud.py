@@ -338,17 +338,18 @@ def get_students_paginated(
         if scope_condition is not None:
             conditions.append(scope_condition)
 
-        count_stmt = select(func.count(Student.usn))
-        if conditions:
-            count_stmt = count_stmt.where(and_(*conditions))
-        total = target.scalar(count_stmt) or 0
-
-        stmt = select(Student)
+        # Single round trip: count(*) OVER () piggybacks the filtered total on
+        # the page query instead of paying a separate COUNT query per request
+        # (one full RTT to the Supabase pooler each).
+        total_col = func.count(Student.usn).over().label("_total_count")
+        stmt = select(total_col, Student)
         if conditions:
             stmt = stmt.where(and_(*conditions))
         stmt = stmt.order_by(Student.usn.asc()).limit(limit_val).offset(offset_val)
-        rows = target.scalars(stmt).all()
-        return _rows_to_dicts(list(rows)), total
+        rows = target.execute(stmt).all()
+        total = rows[0][0] if rows else 0
+        students = [row[1] for row in rows]
+        return _rows_to_dicts(students), total
 
     where_clauses = []
     params: List[Any] = []
@@ -756,17 +757,16 @@ def get_sessions_paginated(
                 )
             )
 
-        count_stmt = select(func.count(DbSession.session_id))
-        if conditions:
-            count_stmt = count_stmt.where(and_(*conditions))
-        total = target.scalar(count_stmt) or 0
-
-        stmt = select(DbSession)
+        # Single round trip: the filtered total piggybacks on the page query.
+        total_col = func.count(DbSession.session_id).over().label("_total_count")
+        stmt = select(total_col, DbSession)
         if conditions:
             stmt = stmt.where(and_(*conditions))
         stmt = stmt.order_by(DbSession.date.desc(), DbSession.session_id.asc()).limit(limit_val).offset(offset_val)
-        rows = target.scalars(stmt).all()
-        return _rows_to_dicts(list(rows)), total
+        rows = target.execute(stmt).all()
+        total = rows[0][0] if rows else 0
+        sessions = [row[1] for row in rows]
+        return _rows_to_dicts(sessions), total
 
     where_clauses = []
     params: List[Any] = []

@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   fetchStudents,
   createStudent,
@@ -12,26 +12,60 @@ import {
   downloadStudentRosterPdf,
   fetchStudentRosterFilters,
 } from "@/services/api/reports";
+import { invalidate } from "@/services/api/cache";
+import { useResource } from "@/hooks/useResource";
 import { useAuth } from "@/hooks/useAuth";
 
 const SEMESTERS = [1, 2, 3, 4, 5, 6, 7, 8];
 
+// Shared cache keys: the student directory is re-entered across tabs often,
+// so the list (per filter combination) is served from cache on tab switch
+// with background revalidation; roster filters are long-lived.
+const ROSTER_FILTERS_KEY = "/api/v1/reports/students/filters";
+
+function studentsListKey(branch: string, semester: number | "ALL", search: string): string {
+  const params = new URLSearchParams();
+  params.set("limit", "100");
+  if (branch !== "ALL") params.set("branch", branch);
+  if (semester !== "ALL") params.set("semester", String(semester));
+  if (search) params.set("search", search);
+  return `/api/v1/students?${params.toString()}`;
+}
+
 export function StudentsView() {
   const { canManageStudents } = useAuth();
-  const [students, setStudents] = useState<Student[]>([]);
-  const [totalCount, setTotalCount] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   // Search & Filter state
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [selectedBranch, setSelectedBranch] = useState("ALL");
   const [selectedSemester, setSelectedSemester] = useState<number | "ALL">("ALL");
-  const [branchOptions, setBranchOptions] = useState<string[]>([]);
   const [isExporting, setIsExporting] = useState(false);
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
+
+  // Cached directory read keyed by the active filter combination: tab
+  // re-entry renders the cached list instantly and revalidates in the
+  // background only when it is older than the stale time.
+  const listKey = studentsListKey(selectedBranch, selectedSemester, debouncedQuery);
+  const listRes = useResource<{ items?: Student[]; total?: number }>(
+    listKey,
+    () =>
+      fetchStudents({
+        limit: 100,
+        branch: selectedBranch !== "ALL" ? selectedBranch : undefined,
+        semester: selectedSemester !== "ALL" ? selectedSemester : undefined,
+        search: debouncedQuery || undefined,
+      })
+  );
+  const students = listRes.data?.items ?? [];
+  const totalCount = listRes.data?.total ?? 0;
+  const isLoading = listRes.isLoading;
+  const error = listRes.error
+    ? listRes.error instanceof Error
+      ? listRes.error.message
+      : "Unable to load student directory from server."
+    : null;
 
   // Selected Student & Ledger State (F8 - N12)
   const [selectedStudentUsn, setSelectedStudentUsn] = useState<string | null>(null);
@@ -64,44 +98,12 @@ export function StudentsView() {
     };
   }, []);
 
-  const loadStudents = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetchStudents({
-        limit: 100,
-        branch: selectedBranch !== "ALL" ? selectedBranch : undefined,
-        semester: selectedSemester !== "ALL" ? selectedSemester : undefined,
-        search: debouncedQuery || undefined,
-      });
-      setStudents(res.items || []);
-      setTotalCount(res.total || 0);
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Unable to load student directory from server.");
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, [selectedBranch, selectedSemester, debouncedQuery]);
-
   // Branch options come from the backend (authorised roster), never hardcoded.
-  useEffect(() => {
-    let isMounted = true;
+  // Cached: shared with DefaultersView's filter dropdowns.
+  const filtersRes = useResource<{ branches?: string[] }>(ROSTER_FILTERS_KEY, () =>
     fetchStudentRosterFilters()
-      .then((filters) => {
-        if (!isMounted) return;
-        setBranchOptions(filters.branches || []);
-      })
-      .catch(() => {
-        if (isMounted) setBranchOptions([]);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+  );
+  const branchOptions = filtersRes.data?.branches ?? [];
 
   const handleExportPdf = async () => {
     setIsExporting(true);
@@ -145,16 +147,6 @@ export function StudentsView() {
     setSearchQuery("");
     setDebouncedQuery("");
   };
-
-  useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadStudents();
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadStudents]);
 
   // Load Individual Student Ledger (F8 - N12)
   const handleSelectStudent = async (usn: string) => {

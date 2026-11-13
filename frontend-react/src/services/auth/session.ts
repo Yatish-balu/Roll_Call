@@ -12,6 +12,7 @@
 
 import axios from "axios";
 import { apiClient } from "@/services/api/client";
+import { clearApiCache } from "@/services/api/cache";
 
 export interface AuthSession {
   token: string | null;
@@ -114,10 +115,23 @@ export function applyAuthResponse(res: AuthApiResponse, explicitUserId?: string)
 }
 
 /**
+ * Applies profile changes confirmed by the server to the live session so the
+ * auth context (and every subscriber) reflects the new display name without
+ * waiting for the next token refresh.
+ */
+export function updateSessionProfile(patch: { name?: string | null }): void {
+  currentSession = { ...currentSession, name: patch.name ?? currentSession.name };
+  notifyListeners();
+}
+
+/**
  * Clears in-memory authentication state and redirects to /login if needed.
  */
 export function clearAuthSession(shouldRedirect = false): void {
   apiClient.setAccessToken(null);
+  // Cached API data belongs to the previous session's user; drop it so it can
+  // never be rendered after logout or an account switch.
+  clearApiCache();
 
   currentSession = {
     token: null,

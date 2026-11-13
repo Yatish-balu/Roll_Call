@@ -65,6 +65,24 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TEXT NOT NULL
 );
 
+-- Descriptive profile (mirrors migration 0019). One row per user.
+CREATE TABLE IF NOT EXISTS user_profiles (
+    user_id TEXT PRIMARY KEY,
+    full_name TEXT,
+    mobile TEXT,
+    email TEXT,
+    branch TEXT,
+    designation TEXT,
+    experience_years INTEGER,
+    qualifications TEXT,
+    specialization TEXT,
+    expertise TEXT,
+    mastered_subjects TEXT,
+    photo_url TEXT,
+    updated_at TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS audit_log (
     log_id INTEGER PRIMARY KEY AUTOINCREMENT,
     actor_id TEXT NOT NULL,

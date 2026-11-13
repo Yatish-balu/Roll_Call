@@ -25,7 +25,7 @@ export function LoginView() {
       await login({
         userId: userId.trim(),
         password,
-        adminKey: showAdminKey && adminKey.trim() ? adminKey.trim() : undefined,
+        adminKey: adminKey.trim() ? adminKey.trim() : undefined,
       });
       navigate("/");
     } catch (err: unknown) {
