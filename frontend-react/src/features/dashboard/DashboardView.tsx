@@ -37,26 +37,32 @@ export function DashboardView() {
 
   useEffect(() => {
     let isMounted = true;
-    fetchDashboardData(todayIso(), { includeTeacherMappings: isAdmin })
-      .then((result) => {
-        if (isMounted) {
-          setData(result);
-          setIsLoading(false);
-        }
-      })
-      .catch((err: unknown) => {
-        if (isMounted) {
-          if (err instanceof Error) {
-            setError(err.message);
-          } else {
-            setError("Unable to retrieve dashboard metrics from server.");
+    const reload = () => {
+      fetchDashboardData(todayIso(), { includeTeacherMappings: isAdmin })
+        .then((result) => {
+          if (isMounted) {
+            setData(result);
+            setIsLoading(false);
           }
-          setIsLoading(false);
-        }
-      });
+        })
+        .catch((err: unknown) => {
+          if (isMounted) {
+            if (err instanceof Error) {
+              setError(err.message);
+            } else {
+              setError("Unable to retrieve dashboard metrics from server.");
+            }
+            setIsLoading(false);
+          }
+        });
+    };
+
+    reload();
+    window.addEventListener("rollcall-attendance-updated", reload);
 
     return () => {
       isMounted = false;
+      window.removeEventListener("rollcall-attendance-updated", reload);
     };
   }, [isAdmin]);
 

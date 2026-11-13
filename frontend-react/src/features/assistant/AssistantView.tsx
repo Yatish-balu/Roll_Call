@@ -478,6 +478,14 @@ export function AssistantView() {
       };
       setMessages((prev) => [...prev, assistantMsg]);
 
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("rollcall-attendance-updated", {
+            detail: { sessionId: activeSessionId || res.session_id },
+          })
+        );
+      }
+
       if (res.needs_confirmation && res.confirmation_request) {
         setPendingConfirmation({
           request: res.confirmation_request,

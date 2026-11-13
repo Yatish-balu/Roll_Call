@@ -519,7 +519,20 @@ async def agent_process_file(
         master_usns = [s["usn"] for s in all_students] if all_students else None
         master_rooms = [r["room_id"] for r in all_rooms] if all_rooms else None
 
-        req_text = f"Process attendance for session {session_id}" if session_id else "Process attendance file"
+        # Resolve target session if not explicitly provided
+        target_session = session_id
+        assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
+        if not target_session:
+            from datetime import date
+            today_str = date.today().isoformat()
+            today_sessions = crud.get_sessions_by_date(db, date=today_str)
+            for s in today_sessions:
+                s_dict = dict(s) if isinstance(s, dict) else s.__dict__
+                if s_dict.get("teacher_id") == current_user.user_id or s_dict.get("subject_code") in assigned_subs:
+                    target_session = s_dict.get("session_id")
+                    break
+
+        req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
 
         resp = agent.process_request(
             user_input=req_text,
@@ -529,6 +542,29 @@ async def agent_process_file(
             default_room=default_room,
             default_branch=default_branch,
         )
+
+        # If file was validated with 100% confidence and 0 issues, commit to database
+        if target_session and resp.success and not resp.needs_confirmation and resp.data:
+            formatted_records = [
+                {
+                    "session_id": target_session,
+                    "usn": str(r.get("usn", "")).strip().upper(),
+                    "room_id": str(r.get("room_id", default_room or "LH-101")).strip(),
+                    "status": r.get("status", "PRESENT"),
+                    "source": "AGENT_VERIFIED_ROSTER",
+                    "confidence": float(r.get("confidence", 1.0)),
+                }
+                for r in resp.data
+            ]
+            try:
+                committed_cnt = crud.insert_attendance_bulk(db, records=formatted_records, upsert=True)
+                db.commit()
+                resp.message = f"Successfully processed and committed {committed_cnt} attendance records to session '{target_session}' in database."
+                logger.info("Auto-committed %d attendance records to session %s", committed_cnt, target_session)
+            except Exception as e:
+                db.rollback()
+                logger.warning("Could not auto-commit attendance to session %s: %s", target_session, e)
+
         if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             _log_embedded_instruction(
                 json.dumps(resp.data or [], ensure_ascii=False, default=str),
@@ -537,7 +573,10 @@ async def agent_process_file(
                 filename=safe_filename,
                 source="ocr_output",
             )
-        return resp.to_dict()
+        res_dict = resp.to_dict()
+        if target_session:
+            res_dict["session_id"] = target_session
+        return res_dict
     finally:
         try:
             if os.path.exists(temp_path):

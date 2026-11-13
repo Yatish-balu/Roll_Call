@@ -21,6 +21,7 @@ export interface ConfirmationRequest {
 
 export interface AgentResponse {
   request_id: string;
+  session_id?: string;
   message: string;
   success: boolean;
   needs_confirmation: boolean;

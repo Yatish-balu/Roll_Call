@@ -50,6 +50,13 @@ export function AiAssistantCard() {
       const resp = await uploadAttendanceFile(file);
       setLastResponse(resp);
       setStatusNote(`Processed ${file.name} successfully.`);
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(
+          new CustomEvent("rollcall-attendance-updated", {
+            detail: { file: file.name, session_id: resp.session_id },
+          })
+        );
+      }
     } catch (err: unknown) {
       if (err instanceof Error) {
         setErrorMessage(`Upload Error: ${err.message}. Backend attendance parser is unavailable.`);
