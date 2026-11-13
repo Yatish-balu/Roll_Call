@@ -76,6 +76,23 @@ def test_tool_registry_rbac_and_execution():
 
 
 def test_sse_streaming_task_endpoints():
+    from app.db.connection import get_sync_session_factory
+    from app.db.models import User
+    factory = get_sync_session_factory()
+    with factory() as session:
+        if session.get(User, "faculty_cn") is None:
+            session.add(
+                User(
+                    user_id="faculty_cn",
+                    name="Prof. Computer Networks",
+                    email="faculty_cn@rollcall.internal",
+                    role="FACULTY",
+                    is_active=1,
+                    created_at="2026-11-13T10:00:00Z",
+                )
+            )
+            session.commit()
+
     client = TestClient(app)
     headers = _auth_header("faculty_cn", "FACULTY")
 
