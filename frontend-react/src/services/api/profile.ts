@@ -132,8 +132,6 @@ export async function fetchAuthenticatedProfile(): Promise<AuthenticatedProfile>
  * Cached capability flag: the server profile endpoint is probed once per
  * session so the UI does not repeat a failing request on every render.
  */
-let serverProfileSupported: boolean | null = null;
-
 export async function loadFacultyProfile(userId: string): Promise<ProfileLoadResult> {
   let authoritative: AuthenticatedProfile | null = null;
   let notice: string | null = null;
@@ -148,31 +146,28 @@ export async function loadFacultyProfile(userId: string): Promise<ProfileLoadRes
   }
 
   let serverProfile: Partial<FacultyProfile> | null = null;
-  if (serverProfileSupported !== false) {
-    try {
-      serverProfile = await apiClient.get<Partial<FacultyProfile>>("/api/v1/profile");
-      serverProfileSupported = true;
-    } catch {
-      serverProfileSupported = false;
-      serverProfile = null;
+  try {
+    serverProfile = await apiClient.get<Partial<FacultyProfile>>("/api/v1/profile");
+  } catch (err: unknown) {
+    serverProfile = null;
+    if (!notice) {
+      notice =
+        "Could not sync with RollCall AI server. Showing device-cached profile. Please verify your backend server is running.";
     }
   }
 
   const local = readLocalProfile(userId);
 
   if (serverProfile) {
+    // Keep local cache updated with latest server state
+    const merged: FacultyProfile = { ...EMPTY_PROFILE, ...local, ...serverProfile };
+    writeLocalProfile(userId, merged);
     return {
       authoritative,
-      profile: { ...EMPTY_PROFILE, ...local, ...serverProfile },
+      profile: merged,
       storage: "server",
-      notice,
+      notice: null, // Clear notice on successful server response
     };
-  }
-
-  if (!notice) {
-    notice =
-      "Designation, experience, qualifications, specialisation and expertise are stored on this device. " +
-      "The RollCall AI backend does not expose a profile write endpoint yet.";
   }
 
   return {
@@ -194,37 +189,26 @@ export interface ProfileSaveResult {
 }
 
 /**
- * Persist the faculty profile. The server contract is attempted first; when
- * the backend does not implement it the profile is stored on the device and the
- * caller is told which storage was used.
+ * Persist the faculty profile. Attempts the authoritative server endpoint first,
+ * updating local cache on success. If offline, stores locally and notifies the user.
  */
 export async function saveFacultyProfile(
   userId: string,
   profile: FacultyProfile
 ): Promise<ProfileSaveResult> {
-  if (serverProfileSupported === false) {
-    writeLocalProfile(userId, profile);
-    return {
-      storage: "device",
-      message:
-        "Profile saved on this device. The backend has no profile write endpoint yet, so the details were not sent to the server.",
-    };
-  }
-
   try {
     await apiClient.put<unknown>("/api/v1/profile", profile);
-    serverProfileSupported = true;
-    return {
-      storage: "server",
-      message: "Profile saved on the RollCall AI server.",
-    };
-  } catch {
-    serverProfileSupported = false;
     writeLocalProfile(userId, profile);
     return {
+      storage: "server",
+      message: "Profile saved successfully on the RollCall AI server and database.",
+    };
+  } catch (err: unknown) {
+    writeLocalProfile(userId, profile);
+    const detail = err instanceof Error ? err.message : "Backend unreachable";
+    return {
       storage: "device",
-      message:
-        "Profile saved on this device. The backend has no profile write endpoint yet, so the details were not sent to the server.",
+      message: `Profile saved locally on this device (${detail}). Start your backend server to sync to database.`,
     };
   }
 }

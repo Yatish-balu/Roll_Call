@@ -14,6 +14,7 @@ from app.routers.meta import router as meta_router
 from app.routers.admin import router as admin_router
 from app.routers.profile import router as profile_router
 from app.routers.calendar import router as calendar_router
+from app.routers.agent_stream import router as agent_stream_router
 
 __all__ = [
     "students_router",
@@ -24,6 +25,7 @@ __all__ = [
     "analytics_router",
     "reports_router",
     "agent_router",
+    "agent_stream_router",
     "auth_router",
     "me_router",
     "meta_router",

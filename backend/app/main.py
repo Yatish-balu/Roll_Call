@@ -43,6 +43,7 @@ from app.routers import (
     timetable_router,
     profile_router,
     calendar_router,
+    agent_stream_router,
 )
 
 
@@ -523,6 +524,7 @@ app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(agent_stream_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
 
@@ -539,6 +541,7 @@ app.include_router(attendance_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+app.include_router(agent_stream_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(calendar_router, prefix="/api")
 
