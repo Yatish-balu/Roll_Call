@@ -531,6 +531,13 @@ async def agent_process_file(
             except Exception as e:
                 db.rollback()
                 logger.warning("Could not auto-commit attendance to session %s: %s", target_session, e)
+        elif not target_session and resp.success and resp.data:
+            # Extraction only: no session was resolved, so nothing was written.
+            # Say so explicitly - the extraction message alone reads like a save.
+            resp.message = (
+                f"{resp.message or 'Attendance sheet processed.'} No records were saved: "
+                "open Attendance and choose a session to apply them."
+            )
 
         if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             _log_embedded_instruction(

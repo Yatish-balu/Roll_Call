@@ -49,7 +49,13 @@ export function AiAssistantCard() {
     try {
       const resp = await uploadAttendanceFile(file);
       setLastResponse(resp);
-      setStatusNote(`Processed ${file.name} successfully.`);
+      // Only claim success when the backend actually succeeded; otherwise show
+      // its reason (e.g. a photo with no readable rows).
+      setStatusNote(
+        resp.success
+          ? `Processed ${file.name}.`
+          : resp.message || `${file.name} could not be processed.`
+      );
       if (typeof window !== "undefined") {
         window.dispatchEvent(
           new CustomEvent("rollcall-attendance-updated", {

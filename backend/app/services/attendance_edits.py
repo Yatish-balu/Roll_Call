@@ -165,6 +165,11 @@ def capture_attendance_statuses(
     try:
         records = crud.get_attendance_by_session(db, session_id=session_id)
     except Exception:
+        # Never leave the request's transaction aborted: a swallowed database
+        # error here used to poison the connection, so the attendance audit
+        # insert that follows failed with InFailedSqlTransaction (HTTP 500).
+        if isinstance(db, Session):
+            db.rollback()
         records = []
     for record in records:
         usn = str(record.get("usn") or "").strip().upper()

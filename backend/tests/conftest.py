@@ -33,6 +33,19 @@ if str(_BACKEND_DIR) not in sys.path:
 _REPO_ROOT = _BACKEND_DIR.parent
 _LIVE_DB = _REPO_ROOT / "data" / "attendance.db"
 
+# Load local .env if available so environment variables are present during test runs
+try:
+    from dotenv import dotenv_values
+    _env_file = _REPO_ROOT / ".env"
+    if _env_file.exists():
+        _vals = dotenv_values(_env_file)
+        # Load database variables for backend tests without overriding AI mock expectations
+        for _k in ("DATABASE_URL", "DATABASE_URL_SYNC", "READONLY_DATABASE_URL", "DB_BACKEND"):
+            if _k in _vals and _k not in os.environ:
+                os.environ[_k] = _vals[_k]
+except ImportError:
+    pass
+
 _ISOLATED_DIR = tempfile.mkdtemp(prefix="rollcall_test_db_")
 _ISOLATED_DB = Path(_ISOLATED_DIR) / "attendance.db"
 if _LIVE_DB.exists():

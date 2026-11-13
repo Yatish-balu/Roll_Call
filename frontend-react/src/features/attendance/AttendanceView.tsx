@@ -102,10 +102,12 @@ export function AttendanceView() {
   }, [querySession]);
 
   // Load attendance whenever selected session changes
-  const loadAttendance = useCallback(async (sessionId: string) => {
+  const loadAttendance = useCallback(async (sessionId: string, clearMessage = true) => {
     if (!sessionId) return;
     setIsLoadingAttendance(true);
-    setStatusMessage(null);
+    // Keep the save confirmation visible: a silent refresh after a successful
+    // save used to wipe the "Saved" banner before the teacher could read it.
+    if (clearMessage) setStatusMessage(null);
     try {
       const records = await fetchSessionAttendance(sessionId);
       setAttendanceRecords(records || []);
@@ -266,7 +268,7 @@ export function AttendanceView() {
         text: res.message || `Successfully synchronized ${payload.length} attendance marks for session '${selectedSessionId}'.`,
       });
       // Refresh roster directly from backend to ensure authoritative display
-      await loadAttendance(selectedSessionId);
+      await loadAttendance(selectedSessionId, false);
       // Let other views (calendar, sessions) know that the attendance changed.
       window.dispatchEvent(
         new CustomEvent("rollcall:attendance-changed", {

@@ -50,3 +50,4 @@ def test_orchestrator_refusal_response_handling():
     assert res.status == "COMPLETED"
     assert res.final_response == expected_refusal
     assert res.steps_executed == 1
+

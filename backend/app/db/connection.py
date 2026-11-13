@@ -156,6 +156,24 @@ def _supabase_url() -> str:
     return (os.getenv("DATABASE_URL_SYNC") or DATABASE_URL_SYNC or "").strip()
 
 
+def _psycopg_connect_args() -> dict:
+    """Connection arguments for the psycopg (v3) driver against Supabase.
+
+    Supabase exposes PostgreSQL through PgBouncer in transaction-pooling mode,
+    which does not support server-side prepared statements. psycopg 3 prepares
+    statements automatically after a few executions, and when a pooled server
+    session outlives the client connection the next prepare fails with
+    ``DuplicatePreparedStatement: prepared statement "_pg3_0" already exists``.
+    That error aborts the server transaction, so a later write in the same
+    request (e.g. the attendance audit insert) fails with
+    ``InFailedSqlTransaction`` and the endpoint returns a 500.
+
+    Disabling the client-side prepare cache keeps every statement simple-query
+    based and works with transaction-mode pooling.
+    """
+    return {"sslmode": "require", "prepare_threshold": None}
+
+
 def get_backend() -> str:
     """Return the active backend: 'supabase' (default) or 'sqlite'.
 
@@ -198,7 +216,7 @@ def get_engine(backend: Optional[str] = None, db_url: Optional[str] = None):
         # Sync psycopg driver: sslmode=require via connect_args.
         engine_kwargs = {"pool_pre_ping": True}
         if url.startswith("postgresql"):
-            engine_kwargs["connect_args"] = {"sslmode": "require"}
+            engine_kwargs["connect_args"] = _psycopg_connect_args()
 
         return create_engine(url, **engine_kwargs)
 
@@ -326,7 +344,7 @@ def create_sync_engine(
             "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
             "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
             "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
-            "connect_args": {"sslmode": "require"},
+            "connect_args": _psycopg_connect_args(),
             **kwargs,
         }
     return create_engine(target_url, **engine_kwargs)
@@ -376,7 +394,11 @@ def create_async_engine_instance(
             "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "1800")),
             "pool_size": int(os.getenv("DB_POOL_SIZE", "5")),
             "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
-            "connect_args": {"ssl": "require"},
+            "connect_args": {
+                "ssl": "require",
+                # PgBouncer transaction pooling: keep the asyncpg cache off too.
+                "statement_cache_size": 0,
+            },
             **kwargs,
         }
     return create_async_engine(target_url, **engine_kwargs)

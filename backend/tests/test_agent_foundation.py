@@ -9,8 +9,6 @@ from app.agent.stream import task_manager, TaskState
 from app.auth import create_access_token
 from app.main import app
 
-pytestmark = pytest.mark.no_auth_override
-
 
 def _auth_header(user_id: str, role: str) -> dict:
     token = create_access_token(
@@ -76,28 +74,40 @@ def test_tool_registry_rbac_and_execution():
 
 
 def test_sse_streaming_task_endpoints():
-    client = TestClient(app)
-    headers = _auth_header("faculty_cn", "FACULTY")
+    from app.auth.dependencies import get_current_user
+    from app.schemas.auth import AuthenticatedUser
+    from app.auth.roles import Role
 
-    # 1. Create task
-    res = client.post("/api/v1/agent/tasks", json={"prompt": "Create session for tomorrow"}, headers=headers)
-    assert res.status_code == 201, res.text
-    data = res.json()
-    task_id = data["task_id"]
-    assert task_id.startswith("task_")
+    app.dependency_overrides[get_current_user] = lambda: AuthenticatedUser(
+        user_id="faculty_cn",
+        role=Role.FACULTY,
+        email="faculty_cn@rollcall.internal",
+    )
+    try:
+        client = TestClient(app)
+        headers = _auth_header("faculty_cn", "FACULTY")
 
-    # 2. Get task status
-    status_res = client.get(f"/api/v1/agent/tasks/{task_id}", headers=headers)
-    assert status_res.status_code == 200
-    st_data = status_res.json()
-    assert st_data["actor_id"] == "faculty_cn"
-    assert st_data["status"] in ("CREATED", "PLANNING", "RUNNING", "COMPLETED")
-    assert st_data["event_count"] >= 1
+        # 1. Create task
+        res = client.post("/api/v1/agent/tasks", json={"prompt": "Create session for tomorrow"}, headers=headers)
+        assert res.status_code == 201, res.text
+        data = res.json()
+        task_id = data["task_id"]
+        assert task_id.startswith("task_")
 
-    # 3. Stream event replay test (mark task completed so SSE generator terminates)
-    task_manager.update_status(task_id, TaskState.COMPLETED)
-    stream_res = client.get(f"/api/v1/agent/tasks/{task_id}/events", headers=headers)
-    assert stream_res.status_code == 200
-    assert "text/event-stream" in stream_res.headers["content-type"]
-    assert "event: task.started" in stream_res.text
-    assert "event: task.completed" in stream_res.text
+        # 2. Get task status
+        status_res = client.get(f"/api/v1/agent/tasks/{task_id}", headers=headers)
+        assert status_res.status_code == 200
+        st_data = status_res.json()
+        assert st_data["actor_id"] == "faculty_cn"
+        assert st_data["status"] in ("CREATED", "PLANNING", "RUNNING", "COMPLETED")
+        assert st_data["event_count"] >= 1
+
+        # 3. Stream event replay test (mark task completed so SSE generator terminates)
+        task_manager.update_status(task_id, TaskState.COMPLETED)
+        stream_res = client.get(f"/api/v1/agent/tasks/{task_id}/events", headers=headers)
+        assert stream_res.status_code == 200
+        assert "text/event-stream" in stream_res.headers["content-type"]
+        assert "event: task.started" in stream_res.text
+        assert "event: task.completed" in stream_res.text
+    finally:
+        app.dependency_overrides.pop(get_current_user, None)

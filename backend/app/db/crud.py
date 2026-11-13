@@ -463,6 +463,47 @@ def get_room(
         return _row_to_dict(cursor.fetchone())
 
 
+def get_existing_student_usns(
+    target: Union[sqlite3.Connection, Session],
+    usns: Sequence[str],
+) -> Set[str]:
+    """Return the USNs that exist, using one query for the whole roster.
+
+    Validating a 45-student save one USN at a time cost 45 remote round trips.
+    """
+    clean = {str(u).strip().upper() for u in usns if str(u).strip()}
+    if not clean:
+        return set()
+    if isinstance(target, Session):
+        rows = target.scalars(select(Student.usn).where(Student.usn.in_(clean))).all()
+        return {str(r).strip().upper() for r in rows}
+    placeholders = ",".join("?" for _ in clean)
+    with _get_conn(target) as conn:
+        rows = conn.execute(
+            f"SELECT usn FROM students WHERE usn IN ({placeholders})", tuple(clean)
+        ).fetchall()
+        return {str(r[0]).strip().upper() for r in rows}
+
+
+def get_existing_room_ids(
+    target: Union[sqlite3.Connection, Session],
+    room_ids: Sequence[str],
+) -> Set[str]:
+    """Return the room IDs that exist, using one query for the whole roster."""
+    clean = {str(r).strip() for r in room_ids if str(r).strip()}
+    if not clean:
+        return set()
+    if isinstance(target, Session):
+        rows = target.scalars(select(Room.room_id).where(Room.room_id.in_(clean))).all()
+        return {str(r).strip() for r in rows}
+    placeholders = ",".join("?" for _ in clean)
+    with _get_conn(target) as conn:
+        rows = conn.execute(
+            f"SELECT room_id FROM rooms WHERE room_id IN ({placeholders})", tuple(clean)
+        ).fetchall()
+        return {str(r[0]).strip() for r in rows}
+
+
 def get_all_rooms(
     target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
 ) -> List[Dict[str, Any]]:
@@ -1550,15 +1591,6 @@ def replace_session_attendance(
             "recorded_at": _utcnow_iso(),
         })
 
-    def _match_clause(rec: Dict[str, Any]):
-        if rec["allocation_id"]:
-            return (Attendance.allocation_id == rec["allocation_id"], Attendance.usn == rec["usn"])
-        return (
-            Attendance.session_id == clean_id,
-            Attendance.usn == rec["usn"],
-            Attendance.allocation_id.is_(None),
-        )
-
     if isinstance(target, Session):
         # Transaction safety: execute within nested transaction if one exists, or rely on caller session
         # Use a SAVEPOINT if in an outer transaction so partial failure rolls back cleanly
@@ -1567,9 +1599,27 @@ def replace_session_attendance(
             # UPDATE-first so an existing row keeps its surrogate attendance_id;
             # pending_edits.attendance_id is ON DELETE CASCADE and must survive a
             # re-upload of the same session roster.
+            #
+            # One SELECT for the whole session instead of one per record: the
+            # previous per-row lookup turned a 45-student save into ~90 remote
+            # round trips (34 s against Supabase), which left the UI spinning.
+            existing_rows = target.execute(
+                select(Attendance).where(Attendance.session_id == clean_id)
+            ).scalars().all()
+            by_key: Dict[tuple, Attendance] = {}
+            for row in existing_rows:
+                if row.allocation_id:
+                    by_key[("alloc", str(row.allocation_id), row.usn)] = row
+                else:
+                    by_key[("plain", row.usn)] = row
+
             kept_ids: Set[str] = set()
             for rec in validated_records:
-                existing = target.execute(select(Attendance).where(*_match_clause(rec))).scalars().first()
+                if rec["allocation_id"]:
+                    key = ("alloc", str(rec["allocation_id"]), rec["usn"])
+                else:
+                    key = ("plain", rec["usn"])
+                existing = by_key.get(key)
                 if existing is not None:
                     existing.room_id = rec["room_id"]
                     existing.status = rec["status"]
@@ -1582,10 +1632,11 @@ def replace_session_attendance(
                     kept_ids.add(rec["attendance_id"])
 
             # Only rows no longer present in the payload are removed.
-            stale_stmt = select(Attendance.attendance_id).where(Attendance.session_id == clean_id)
-            if kept_ids:
-                stale_stmt = stale_stmt.where(Attendance.attendance_id.notin_(kept_ids))
-            stale_ids = [row[0] for row in target.execute(stale_stmt).all()]
+            stale_ids = [
+                row.attendance_id
+                for row in existing_rows
+                if row.attendance_id not in kept_ids
+            ]
             if stale_ids:
                 blocked = target.scalars(
                     select(PendingEdit.usn)

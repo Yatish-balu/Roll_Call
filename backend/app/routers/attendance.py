@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.exc import IntegrityError
@@ -90,6 +90,31 @@ def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
             detail=f"Room with ID '{clean_id}' not found.",
         )
     return room
+
+
+def _verify_roster_references(db: Session, records: Sequence[Any]) -> None:
+    """Validate every USN and room of a roster with a single query each.
+
+    The per-record checks issued two remote round trips per student, which made
+    a 45-student save take roughly half a minute against Supabase.
+    """
+    usns = {str(r.usn).strip().upper() for r in records}
+    known_usns = crud.get_existing_student_usns(db, usns)
+    missing_usns = sorted(usns - known_usns)
+    if missing_usns:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{missing_usns[0]}' not found.",
+        )
+
+    room_ids = {str(r.room_id).strip() for r in records}
+    known_rooms = crud.get_existing_room_ids(db, room_ids)
+    missing_rooms = sorted(room_ids - known_rooms)
+    if missing_rooms:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Room with ID '{missing_rooms[0]}' not found.",
+        )
 
 
 # ==============================================================================
@@ -247,11 +272,9 @@ def bulk_record_attendance(
             detail="Bulk insert payload contains duplicate student USNs.",
         )
 
-    # Validate foreign keys
+    # Validate foreign keys in two queries instead of two per record.
+    _verify_roster_references(db, payload.records)
     for r in payload.records:
-        clean_usn = r.usn.strip().upper()
-        _verify_student_exists(db, clean_usn)
-        _verify_room_exists(db, r.room_id)
         if r.session_id and r.session_id.strip() != session_id.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -361,11 +384,8 @@ def replace_attendance(
             detail="Payload contains duplicate student USNs.",
         )
 
-    # Validate foreign keys
-    for r in payload.records:
-        clean_usn = r.usn.strip().upper()
-        _verify_student_exists(db, clean_usn)
-        _verify_room_exists(db, r.room_id)
+    # Validate foreign keys in two queries instead of two per record.
+    _verify_roster_references(db, payload.records)
 
     formatted_records = [
         {
@@ -393,6 +413,9 @@ def replace_attendance(
             r["usn"]: crud.normalize_attendance_status(r["status"])
             for r in formatted_records
         }
+        # Audit only rows that actually changed (added, edited or removed).
+        # Auditing untouched students wrote one INSERT per row - 45 extra
+        # round trips on a full roster - and buried the real edits.
         changes: List[AttendanceChange] = [
             AttendanceChange(
                 usn=usn,
@@ -400,6 +423,7 @@ def replace_attendance(
                 new_status=new_by_usn.get(usn),
             )
             for usn in sorted(set(previous_statuses) | set(new_by_usn))
+            if previous_statuses.get(usn) != new_by_usn.get(usn)
         ]
         write_attendance_audit(
             db,

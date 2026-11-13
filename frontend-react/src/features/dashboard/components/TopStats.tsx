@@ -13,12 +13,16 @@ interface TopStatsProps {
 export function TopStats({ sessions, overallReport, todayReport, isLoading }: TopStatsProps) {
   // Live attendance metrics from backend
   const overallPercentage = overallReport?.overall?.percentage ?? null;
-  const todayPercentage = todayReport?.overall?.percentage ?? null;
+  // A date with no attendance recorded has no rate. Showing 0% would claim
+  // every student was absent, so fall back to the "no sessions" state.
+  const todayTotal = todayReport?.overall?.total ?? 0;
+  const todayPercentage = todayTotal > 0 ? todayReport?.overall?.percentage ?? null : null;
   const sessionsCount = sessions?.total ?? sessions?.items?.length ?? 0;
 
-  // Rate for circular progress
-  const hasRate = todayPercentage !== null || overallPercentage !== null;
-  const displayRate = todayPercentage !== null ? Math.round(todayPercentage) : (overallPercentage !== null ? Math.round(overallPercentage) : null);
+  // Rate for circular progress. This ring belongs to the Today's Attendance
+  // panel, so it must never borrow the all-time rate when today has no data.
+  const hasRate = todayPercentage !== null;
+  const displayRate = todayPercentage !== null ? Math.round(todayPercentage) : null;
   const strokeDash = displayRate !== null ? Math.min(100, Math.max(0, displayRate)) : 0;
   const circumference = 2 * Math.PI * 28; // radius 28 -> 175.93
   const strokeOffset = circumference - (strokeDash / 100) * circumference;
@@ -41,15 +45,15 @@ export function TopStats({ sessions, overallReport, todayReport, isLoading }: To
               <h2 className="text-2xl sm:text-3xl font-extrabold text-[#24251C]">
                 {isLoading
                   ? "..."
-                  : todayReport?.overall?.total
-                  ? `${todayReport.overall.confirmed} / ${todayReport.overall.total}`
+                  : todayTotal > 0 && todayReport?.overall
+                  ? `${todayReport.overall.confirmed} / ${todayTotal}`
                   : sessionsCount > 0
-                  ? `${sessionsCount} Sessions`
+                  ? `${sessionsCount} ${sessionsCount === 1 ? "Session" : "Sessions"}`
                   : "—"}
               </h2>
             </div>
             <p className="text-xs text-[#77735F] font-medium mt-0.5">
-              {todayReport?.overall?.total
+              {todayTotal > 0
                 ? "Recorded Marks"
                 : sessionsCount > 0
                 ? "Active Timetable Sessions"
