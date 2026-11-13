@@ -1,0 +1,23 @@
+{
+  "health_samples": 86,
+  "down_samples": [],
+  "down_count": 0,
+  "pageerrors": [],
+  "console_errors": [
+    "1794584232 [error] Failed to load resource: the server responded with a status of 401 (Unauthorized)"
+  ],
+  "bad_pages": [],
+  "route_len": {
+    "/": 1674,
+    "/students": 6319,
+    "/attendance": 4739,
+    "/timetable": 666,
+    "/calendar": 1343,
+    "/sessions": 1106,
+    "/defaulters": 2133,
+    "/reports": 1371,
+    "/assistant": 932,
+    "/settings": 12838,
+    "/profile": 1378
+  }
+}
