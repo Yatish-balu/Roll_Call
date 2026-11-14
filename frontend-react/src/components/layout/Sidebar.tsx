@@ -185,9 +185,25 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     return groups;
   }, [isAdmin]);
 
-  const displayName = session?.name || session?.userId || "User";
+  const formatDisplayName = (name?: string | null, userId?: string | null) => {
+    if (name && name.trim()) return name.trim();
+    if (!userId) return "Faculty User";
+    return userId
+      .split(/[._-]/)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+      .join(" ");
+  };
+
+  const displayName = formatDisplayName(session?.name, session?.userId);
   const userInitial = displayName.charAt(0).toUpperCase();
   const roleLabel = isAdmin ? "ADMIN" : session?.role || "FACULTY";
+
+  // Subtitle in profile footer: role or department rather than duplicate username
+  const profileSubtitle = isAdmin
+    ? "System Admin"
+    : session?.subjectCodes && session.subjectCodes.length > 0
+    ? `${session.subjectCodes.join(", ")} Dept`
+    : "Faculty Member";
 
   const handleSignOut = async () => {
     await logout();
@@ -246,16 +262,16 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       {/* Navigation */}
       <nav
         aria-label="Primary"
-        className={`flex-1 overflow-y-auto pb-4 ${compact ? "px-2" : "px-3"}`}
+        className={`flex-1 overflow-y-auto sidebar-scrollbar py-2 ${compact ? "px-2" : "px-3"}`}
       >
         {groups.map((group) => (
-          <div key={group.label} className="mb-5 last:mb-0">
+          <div key={group.label} className="mb-3.5 last:mb-0">
             {!compact && (
-              <p className="px-3 pb-2 text-[10px] font-black uppercase tracking-[0.14em] text-[#8C926F]">
+              <p className="px-3 pb-1 text-[10px] font-black uppercase tracking-[0.14em] text-[#8C926F]">
                 {group.label}
               </p>
             )}
-            <ul className="space-y-1">
+            <ul className="space-y-0.5">
               {group.items.map((item) => {
                 const active = isLinkActive(item.href);
                 return (
@@ -267,7 +283,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
                       }}
                       title={compact ? item.name : undefined}
                       aria-current={active ? "page" : undefined}
-                      className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-all duration-150 ${
+                      className={`group flex items-center gap-3 rounded-xl px-3 py-1.5 text-sm font-semibold transition-all duration-150 ${
                         compact ? "justify-center px-0" : ""
                       } ${
                         active
@@ -340,8 +356,8 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
           {!compact && (
             <div className="min-w-0 flex-1">
               <p className="truncate text-xs font-bold text-[#FBF8F0]">{displayName}</p>
-              <p className="truncate font-mono text-[10px] text-[#8C926F]">
-                {session?.userId || "—"}
+              <p className="truncate text-[10px] text-[#A9AE8C] font-medium">
+                {profileSubtitle}
               </p>
             </div>
           )}

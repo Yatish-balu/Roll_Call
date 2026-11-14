@@ -279,7 +279,7 @@ export function SessionsView() {
       </div>
 
       {/* Initialisation panel */}
-      <section className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs space-y-3">
+      <section className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs space-y-3">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
             <h2 className="text-base font-bold text-[#24251C]">Today's academic sessions</h2>
@@ -300,7 +300,7 @@ export function SessionsView() {
               type="button"
               onClick={() => void handleInitialize()}
               disabled={isInitializing}
-              className="px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors disabled:opacity-50 cursor-pointer"
+              className="px-3.5 py-1.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors disabled:opacity-50 cursor-pointer shadow-2xs"
               title="Ask the backend to prepare today's sessions from the timetable (idempotent)"
             >
               {isInitializing ? "Initialising…" : "Initialise today"}
@@ -309,26 +309,26 @@ export function SessionsView() {
         </div>
 
         {initialization && (
-          <div className="grid grid-cols-3 gap-3 text-center">
-            <div className="p-2.5 rounded-xl bg-white border border-[#E4DDCA]">
-              <p className="text-[10px] font-black uppercase tracking-wider text-[#77735F]">
-                Scheduled
-              </p>
-              <p className="text-lg font-black text-[#24251C]">{initialization.scheduled_slots}</p>
+          <div className="flex items-center gap-2 p-2 rounded-xl bg-white border border-[#E4DDCA] text-xs">
+            <div className="flex-1 flex items-center justify-center space-x-2 py-1 px-3 border-r border-[#E4DDCA] last:border-r-0">
+              <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">
+                Scheduled:
+              </span>
+              <span className="text-sm font-black text-[#24251C]">{initialization.scheduled_slots}</span>
             </div>
-            <div className="p-2.5 rounded-xl bg-white border border-[#E4DDCA]">
-              <p className="text-[10px] font-black uppercase tracking-wider text-[#77735F]">
-                Initialised
-              </p>
-              <p className="text-lg font-black text-emerald-700">
+            <div className="flex-1 flex items-center justify-center space-x-2 py-1 px-3 border-r border-[#E4DDCA] last:border-r-0">
+              <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">
+                Initialised:
+              </span>
+              <span className="text-sm font-black text-emerald-700">
                 {initialization.initialized_sessions}
-              </p>
+              </span>
             </div>
-            <div className="p-2.5 rounded-xl bg-white border border-[#E4DDCA]">
-              <p className="text-[10px] font-black uppercase tracking-wider text-[#77735F]">
-                Pending
-              </p>
-              <p className="text-lg font-black text-amber-700">{initialization.pending_sessions}</p>
+            <div className="flex-1 flex items-center justify-center space-x-2 py-1 px-3">
+              <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">
+                Pending:
+              </span>
+              <span className="text-sm font-black text-amber-700">{initialization.pending_sessions}</span>
             </div>
           </div>
         )}
@@ -419,11 +419,11 @@ export function SessionsView() {
             return (
               <div
                 key={sess.session_id}
-                className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs hover:border-[#6C5119]/40 transition-all flex flex-col justify-between space-y-4"
+                className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs hover:border-[#6C5119]/50 transition-all flex flex-col justify-between space-y-3.5 h-full"
               >
-                <div className="space-y-3">
-                  <div className="flex items-start justify-between gap-2">
-                    <span className="px-2.5 py-1 rounded-md text-xs font-black bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
+                <div className="space-y-2.5">
+                  <div className="flex items-center justify-between gap-2 pb-1 border-b border-[#E4DDCA]/50">
+                    <span className="px-2 py-0.5 rounded-md text-xs font-black bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
                       {code}
                     </span>
                     <span className="text-xs font-semibold text-[#77735F]">
@@ -441,15 +441,16 @@ export function SessionsView() {
                     >
                       {sess.subject}
                     </h3>
-                    <div className="flex items-center space-x-2 text-xs text-[#77735F] mt-0.5 flex-wrap">
-                      <span>
-                        ID: <span className="font-mono text-[#24251C]">{sess.session_id}</span>
+                    <div className="flex items-center space-x-2 text-xs text-[#77735F] mt-1 flex-wrap">
+                      <span className="inline-flex items-center space-x-1">
+                        <span className="text-[#A9AE8C]">#</span>
+                        <span className="font-mono text-[#24251C]">{sess.session_id}</span>
                       </span>
                       {sess.teacher_id && (
                         <>
                           <span>•</span>
-                          <span>
-                            Faculty:{" "}
+                          <span className="inline-flex items-center space-x-1">
+                            <span>👤</span>
                             <span className="font-semibold text-[#24251C]">{sess.teacher_id}</span>
                           </span>
                         </>
@@ -458,7 +459,7 @@ export function SessionsView() {
                   </div>
 
                   {/* Real class slot information */}
-                  <div className="pt-1 flex flex-wrap gap-1.5 text-[11px]">
+                  <div className="pt-0.5 flex flex-wrap gap-1.5 text-[11px]">
                     {first ? (
                       <>
                         <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/70 text-[#24251C] font-medium border border-[#E4DDCA]">
@@ -474,7 +475,7 @@ export function SessionsView() {
                         </span>
                       </>
                     ) : (
-                      <span className="px-2 py-0.5 rounded-md bg-[#EDE8D8]/40 text-[#77735F] font-medium border border-dashed border-[#E4DDCA]">
+                      <span className="px-2 py-0.5 rounded-md text-[#77735F] font-medium border border-dashed border-[#E4DDCA] bg-[#EDE8D8]/20">
                         No class slot allocated
                       </span>
                     )}
@@ -486,11 +487,11 @@ export function SessionsView() {
                   </div>
                 </div>
 
-                <div className="pt-3 border-t border-[#E4DDCA]/60 flex items-center justify-between">
+                <div className="pt-3 border-t border-[#E4DDCA]/60 flex items-center justify-between gap-2">
                   <button
                     type="button"
                     onClick={() => setViewSession(sess)}
-                    className="text-xs font-bold text-[#77735F] hover:text-[#24251C] transition-colors cursor-pointer"
+                    className="px-3 py-1.5 rounded-xl border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
                   >
                     Session details
                   </button>

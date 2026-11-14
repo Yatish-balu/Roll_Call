@@ -16,7 +16,7 @@ export function TodaysSummary({ summary, isLoading }: TodaysSummaryProps) {
   const unreviewedCount = hasData ? summary.unreviewed : "—";
 
   return (
-    <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs space-y-4">
+    <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs space-y-4">
       {/* Card Header */}
       <div className="flex items-center justify-between pb-1">
         <div className="flex items-center space-x-2.5">

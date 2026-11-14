@@ -26,39 +26,39 @@ export function TodaysClasses({ sessions, isLoading }: TodaysClassesProps) {
   };
 
   return (
-    <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs space-y-4">
+    <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs space-y-3.5">
       {/* Header */}
-      <div className="flex items-center justify-between pb-1">
-        <div className="flex items-center space-x-2.5">
+      <div className="flex items-center justify-between pb-0.5">
+        <div className="flex items-center space-x-2">
           <svg className="w-5 h-5 text-[#24251C]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
           </svg>
-          <h2 className="text-lg font-bold text-[#24251C] tracking-tight">
+          <h2 className="text-base sm:text-lg font-bold text-[#24251C] tracking-tight">
             Today&apos;s Classes
           </h2>
         </div>
-        <span className="px-3 py-1 rounded-full text-xs font-semibold bg-[#EDE8D8] text-[#24251C] border border-[#E4DDCA]">
+        <span className="text-xs font-semibold text-[#77735F]">
           {isLoading ? "..." : `${sessions.length} ${sessions.length === 1 ? "Class" : "Classes"}`}
         </span>
       </div>
 
       {/* Loading Skeleton */}
       {isLoading && (
-        <div className="space-y-3 py-2">
+        <div className="space-y-2.5 py-1">
           {[1, 2, 3].map((i) => (
-            <div key={i} className="h-16 rounded-xl bg-[#EDE8D8]/50 animate-pulse" />
+            <div key={i} className="h-14 rounded-xl bg-[#EDE8D8]/50 animate-pulse" />
           ))}
         </div>
       )}
 
       {/* Empty State when no classes exist in backend */}
       {!isLoading && sessions.length === 0 && (
-        <div className="py-10 text-center space-y-2 border border-dashed border-[#E4DDCA] rounded-xl bg-[#F2EDE0]/40">
-          <svg className="w-10 h-10 text-[#77735F] mx-auto opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <div className="py-6 px-4 text-center space-y-1.5 border border-dashed border-[#E4DDCA] rounded-xl bg-[#F2EDE0]/40">
+          <svg className="w-8 h-8 text-[#77735F] mx-auto opacity-60" fill="none" viewBox="0 0 24 24" stroke="currentColor">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
           </svg>
-          <p className="text-sm font-semibold text-[#24251C]">No Classes Scheduled Today</p>
-          <p className="text-xs text-[#77735F]">Active timetable allocations and sessions will appear here once registered.</p>
+          <p className="text-xs sm:text-sm font-semibold text-[#24251C]">No Classes Scheduled Today</p>
+          <p className="text-[11px] text-[#77735F] max-w-sm mx-auto">Active timetable allocations and sessions will appear here once registered.</p>
         </div>
       )}
 
@@ -88,19 +88,20 @@ export function TodaysClasses({ sessions, isLoading }: TodaysClassesProps) {
                   </p>
                 </div>
 
-                {/* Center: Room & Date metadata (honest API values) */}
-                <div className="flex items-center space-x-3 my-2 sm:my-0 pl-2 sm:pl-0 text-xs text-[#24251C]">
-                  {/* Room indicator: Displays Unallocated if backend does not provide room_id */}
-                  <span className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-md bg-[#EDE8D8]/70 border border-[#E4DDCA] font-medium text-[#77735F]">
+                {/* Center: Room & Date metadata (clean inline icon + text pairs) */}
+                <div className="flex items-center space-x-3 my-2 sm:my-0 pl-2 sm:pl-0 text-xs text-[#77735F]">
+                  <span className="inline-flex items-center space-x-1 text-[#77735F]">
                     <svg className="w-3.5 h-3.5 text-[#77735F]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5" />
                     </svg>
                     <span>Room: —</span>
                   </span>
 
+                  <span className="text-[#E4DDCA]">/</span>
+
                   {/* Scheduled Date */}
-                  <span className="inline-flex items-center space-x-1 font-medium text-[#77735F]">
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <span className="inline-flex items-center space-x-1 font-semibold text-[#24251C]">
+                    <svg className="w-3.5 h-3.5 text-[#77735F]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
                     </svg>
                     <span>{sessionDate}</span>

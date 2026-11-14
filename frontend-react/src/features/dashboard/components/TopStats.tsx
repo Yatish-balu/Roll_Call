@@ -26,19 +26,19 @@ export function TopStats({ sessions, overallReport, todayReport, isLoading }: To
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
       {/* 1. Today's Attendance Panel */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <div className="w-13 h-13 rounded-2xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]/60">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs flex items-center justify-between">
+        <div className="flex items-center space-x-3.5">
+          <div className="w-11 h-11 rounded-xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]/60">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
             </svg>
           </div>
           <div>
-            <p className="text-xs font-bold text-[#77735F] uppercase tracking-wider">
+            <p className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">
               Today&apos;s Attendance
             </p>
-            <div className="flex items-baseline space-x-2 mt-1">
-              <h2 className="text-2xl sm:text-3xl font-extrabold text-[#24251C]">
+            <div className="flex items-baseline space-x-2 mt-0.5">
+              <h2 className="text-xl sm:text-2xl font-extrabold text-[#24251C]">
                 {isLoading
                   ? "..."
                   : todayReport?.overall?.total
@@ -48,7 +48,7 @@ export function TopStats({ sessions, overallReport, todayReport, isLoading }: To
                   : "—"}
               </h2>
             </div>
-            <p className="text-xs text-[#77735F] font-medium mt-0.5">
+            <p className="text-[11px] text-[#77735F] font-medium">
               {todayReport?.overall?.total
                 ? "Recorded Marks"
                 : sessionsCount > 0
@@ -59,7 +59,7 @@ export function TopStats({ sessions, overallReport, todayReport, isLoading }: To
         </div>
 
         {/* Circular SVG Progress Ring */}
-        <div className="relative w-18 h-18 shrink-0 flex items-center justify-center">
+        <div className="relative w-15 h-15 shrink-0 flex items-center justify-center">
           <svg className="w-full h-full -rotate-90" viewBox="0 0 68 68">
             <circle
               cx="34"
@@ -91,10 +91,10 @@ export function TopStats({ sessions, overallReport, todayReport, isLoading }: To
       </div>
 
       {/* 2. Overall Attendance Panel */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs flex items-center justify-between relative overflow-hidden">
-        <div className="flex items-center space-x-4 z-10">
-          <div className="w-13 h-13 rounded-2xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]/60">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+      <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs flex items-center justify-between relative overflow-hidden">
+        <div className="flex items-center space-x-3.5 z-10">
+          <div className="w-11 h-11 rounded-xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]/60">
+            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
             </svg>
           </div>

@@ -62,12 +62,30 @@ export function AttendanceView() {
   );
 
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
+  const [initialAttendanceRecords, setInitialAttendanceRecords] = useState<AttendanceRecord[]>([]);
 
   useEffect(() => {
     if (attendanceRes.data) {
       setAttendanceRecords(attendanceRes.data);
+      setInitialAttendanceRecords(attendanceRes.data);
     }
   }, [attendanceRes.data]);
+
+  // Dirty count computation for smart save state
+  const dirtyCount = useMemo(() => {
+    if (initialAttendanceRecords.length === 0 && attendanceRecords.length > 0) {
+      return attendanceRecords.length;
+    }
+    const initialMap = new Map<string, string>();
+    initialAttendanceRecords.forEach((r) => initialMap.set(r.usn, r.status));
+    let changed = 0;
+    attendanceRecords.forEach((r) => {
+      if (initialMap.get(r.usn) !== r.status) {
+        changed++;
+      }
+    });
+    return changed;
+  }, [attendanceRecords, initialAttendanceRecords]);
 
   const isLoadingAttendance = attendanceRes.isLoading && !attendanceRes.data;
   const [isSaving, setIsSaving] = useState(false);
@@ -262,6 +280,7 @@ export function AttendanceView() {
         type: "success",
         text: res.message || `Successfully synchronized ${payload.length} attendance marks for session '${selectedSessionId}'.`,
       });
+      setInitialAttendanceRecords([...attendanceRecords]);
       // Update cache immediately and invalidate dependent queries
       if (attendanceKey) {
         mutateCache(attendanceKey, attendanceRecords);
@@ -382,8 +401,12 @@ export function AttendanceView() {
             </button>
             <button
               onClick={() => void handleSaveChanges()}
-              disabled={attendanceRecords.length === 0 || isSaving || isLoadingAttendance}
-              className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+              disabled={attendanceRecords.length === 0 || isSaving || isLoadingAttendance || dirtyCount === 0}
+              className={`inline-flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-2xs ${
+                dirtyCount > 0
+                  ? "bg-[#6C5119] hover:bg-[#594214] text-white cursor-pointer ring-2 ring-[#B6892C]/40"
+                  : "bg-[#EDE8D8] text-[#77735F] border border-[#E4DDCA] cursor-not-allowed opacity-60"
+              }`}
             >
               {isSaving ? (
                 <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -392,7 +415,7 @@ export function AttendanceView() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M5 13l4 4L19 7" />
                 </svg>
               )}
-              <span>{isSaving ? "Saving..." : "Save Changes"}</span>
+              <span>{isSaving ? "Saving..." : dirtyCount > 0 ? `Save Changes (${dirtyCount})` : "Save Changes"}</span>
             </button>
           </div>
         ) : (
@@ -421,19 +444,19 @@ export function AttendanceView() {
         </div>
       )}
 
-      {/* Session Selection & Allocation Metadata Card */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs space-y-4">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+      {/* Compact Session Selection & Metadata Toolbar */}
+      <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-3.5 sm:p-4 shadow-2xs">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
           {/* Session Selector */}
-          <div className="w-full lg:w-96">
-            <label className="block text-xs font-bold text-[#77735F] uppercase tracking-wider mb-1.5">
-              Select Attendance Session
-            </label>
+          <div className="flex items-center space-x-2.5 w-full lg:w-auto flex-1 max-w-xl">
+            <span className="text-xs font-bold text-[#77735F] uppercase tracking-wider shrink-0">
+              Session:
+            </span>
             <select
               value={selectedSessionId}
               onChange={(e) => setSelectedSessionId(e.target.value)}
               disabled={isLoadingSessions}
-              className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm font-semibold text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
+              className="w-full px-3 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm font-semibold text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
             >
               {isLoadingSessions && <option>Loading sessions...</option>}
               {!isLoadingSessions && sessions.length === 0 && (
@@ -448,96 +471,159 @@ export function AttendanceView() {
             </select>
           </div>
 
-          {/* Allocation Chips */}
+          {/* Clean Inline Metadata Pairs */}
           {activeSession && (
-            <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#24251C] font-semibold border border-[#E4DDCA]">
-                Subject: {activeSession.subject}
+            <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-xs text-[#77735F] lg:border-l lg:border-[#E4DDCA] lg:pl-4">
+              <span className="inline-flex items-center space-x-1 font-bold text-[#24251C]">
+                <span>📚</span>
+                <span>{activeSession.subject}</span>
               </span>
-              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#24251C] font-semibold border border-[#E4DDCA]">
-                Date: {activeSession.date}
+              <span>•</span>
+              <span className="inline-flex items-center space-x-1 font-medium">
+                <span>📅</span>
+                <span>{activeSession.date}</span>
               </span>
-              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
-                Room: {sessionRooms.length > 0 ? sessionRooms.join(", ") : "Not allocated"}
+              <span>•</span>
+              <span className="inline-flex items-center space-x-1 font-medium">
+                <span>🏛️</span>
+                <span>{sessionRooms.length > 0 ? sessionRooms.join(", ") : "Not allocated"}</span>
               </span>
-              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
-                Time:{" "}
-                {sessionSlot
-                  ? `${sessionSlot.start_time} - ${sessionSlot.end_time}`
-                  : "Not scheduled"}
-                {sessionBatches.length > 0 ? ` (Batch ${sessionBatches.join(", ")})` : ""}
+              <span>•</span>
+              <span className="inline-flex items-center space-x-1 font-medium">
+                <span>🕒</span>
+                <span>
+                  {sessionSlot
+                    ? `${sessionSlot.start_time} - ${sessionSlot.end_time}`
+                    : "Not scheduled"}
+                  {sessionBatches.length > 0 ? ` (Batch ${sessionBatches.join(", ")})` : ""}
+                </span>
               </span>
             </div>
           )}
         </div>
-
-        {/* 4 Attendance State Quick Counters */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
-          {/* PRESENT */}
-          <div className="bg-[#E8F5E9] border border-[#C8E6C9] rounded-xl p-3 text-center">
-            <span className="text-[11px] font-bold text-[#2E7D32] uppercase">Present</span>
-            <p className="text-xl sm:text-2xl font-black text-[#1B5E20]">{counts.present}</p>
-          </div>
-
-          {/* ABSENT */}
-          <div className="bg-[#FFEBEE] border border-[#FFCDD2] rounded-xl p-3 text-center">
-            <span className="text-[11px] font-bold text-[#C62828] uppercase">Absent</span>
-            <p className="text-xl sm:text-2xl font-black text-[#B71C1C]">{counts.absent}</p>
-          </div>
-
-          {/* PENDING */}
-          <div className="bg-[#FFF8E1] border border-[#FFE082] rounded-xl p-3 text-center">
-            <span className="text-[11px] font-bold text-[#F57F17] uppercase">Pending</span>
-            <p className="text-xl sm:text-2xl font-black text-[#E65100]">{counts.pending}</p>
-          </div>
-
-          {/* UNREVIEWED */}
-          <div className="bg-[#EDE8D8] border border-[#DCD5BE] rounded-xl p-3 text-center">
-            <span className="text-[11px] font-bold text-[#72785E] uppercase">Unreviewed</span>
-            <p className="text-xl sm:text-2xl font-black text-[#3F451F]">{counts.unreviewed}</p>
-          </div>
-        </div>
       </div>
 
-      {/* Filter and Search Bar */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3">
-        <div className="relative w-full sm:w-80">
-          <input
-            type="text"
-            value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Filter roster by USN or student name..."
-            className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
-          />
-        </div>
+      {/* Interactive KPI Filter Cards (56px Sleek Stat Cards with active ring) */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        {/* PRESENT */}
+        <button
+          type="button"
+          onClick={() => setStatusFilter((prev) => (prev === "PRESENT" ? "ALL" : "PRESENT"))}
+          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
+            statusFilter === "PRESENT"
+              ? "bg-[#E8F5E9] border-[#2E7D32] ring-2 ring-[#2E7D32]/30 shadow-xs"
+              : "bg-[#E8F5E9]/60 hover:bg-[#E8F5E9] border-[#C8E6C9]"
+          }`}
+        >
+          <div className="flex items-center space-x-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#2E7D32]" />
+            <span className="text-xs font-bold text-[#2E7D32] uppercase">Present</span>
+          </div>
+          <p className="text-xl font-black text-[#1B5E20]">{counts.present}</p>
+        </button>
 
-        <div className="flex items-center space-x-2.5 w-full sm:w-auto">
-          <span className="text-xs font-semibold text-[#77735F]">Status Filter:</span>
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-medium text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
-          >
-            <option value="ALL">All States ({attendanceRecords.length})</option>
-            <option value="PRESENT">Present ({counts.present})</option>
-            <option value="ABSENT">Absent ({counts.absent})</option>
-            <option value="PENDING">Pending ({counts.pending})</option>
-            <option value="UNREVIEWED">Unreviewed ({counts.unreviewed})</option>
-          </select>
-        </div>
+        {/* ABSENT */}
+        <button
+          type="button"
+          onClick={() => setStatusFilter((prev) => (prev === "ABSENT" ? "ALL" : "ABSENT"))}
+          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
+            statusFilter === "ABSENT"
+              ? "bg-[#FFEBEE] border-[#C62828] ring-2 ring-[#C62828]/30 shadow-xs"
+              : "bg-[#FFEBEE]/60 hover:bg-[#FFEBEE] border-[#FFCDD2]"
+          }`}
+        >
+          <div className="flex items-center space-x-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#C62828]" />
+            <span className="text-xs font-bold text-[#C62828] uppercase">Absent</span>
+          </div>
+          <p className="text-xl font-black text-[#B71C1C]">{counts.absent}</p>
+        </button>
+
+        {/* PENDING */}
+        <button
+          type="button"
+          onClick={() => setStatusFilter((prev) => (prev === "PENDING" ? "ALL" : "PENDING"))}
+          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
+            statusFilter === "PENDING"
+              ? "bg-[#FFF8E1] border-[#F57F17] ring-2 ring-[#F57F17]/30 shadow-xs"
+              : "bg-[#FFF8E1]/60 hover:bg-[#FFF8E1] border-[#FFE082]"
+          }`}
+        >
+          <div className="flex items-center space-x-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#F57F17]" />
+            <span className="text-xs font-bold text-[#F57F17] uppercase">Pending</span>
+          </div>
+          <p className="text-xl font-black text-[#E65100]">{counts.pending}</p>
+        </button>
+
+        {/* UNREVIEWED */}
+        <button
+          type="button"
+          onClick={() => setStatusFilter((prev) => (prev === "UNREVIEWED" ? "ALL" : "UNREVIEWED"))}
+          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
+            statusFilter === "UNREVIEWED"
+              ? "bg-[#EDE8D8] border-[#72785E] ring-2 ring-[#72785E]/30 shadow-xs"
+              : "bg-[#EDE8D8]/60 hover:bg-[#EDE8D8] border-[#DCD5BE]"
+          }`}
+        >
+          <div className="flex items-center space-x-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-[#72785E]" />
+            <span className="text-xs font-bold text-[#72785E] uppercase">Unreviewed</span>
+          </div>
+          <p className="text-xl font-black text-[#3F451F]">{counts.unreviewed}</p>
+        </button>
       </div>
 
-      {/* Student Roster Table */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
+      {/* Student Roster Table Card with Embedded Search */}
+      <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
+        {/* Card Header Toolbar with Embedded Search */}
+        <div className="p-3.5 sm:p-4 border-b border-[#E4DDCA] bg-[#EDE8D8]/30 flex flex-col sm:flex-row items-center justify-between gap-3">
+          <div className="flex items-center space-x-2 w-full sm:w-auto">
+            <span className="text-xs font-bold text-[#24251C] uppercase tracking-wider">
+              Student Roster
+            </span>
+            <span className="text-xs font-semibold text-[#77735F]">
+              ({filteredRecords.length} of {attendanceRecords.length})
+            </span>
+            {statusFilter !== "ALL" && (
+              <button
+                type="button"
+                onClick={() => setStatusFilter("ALL")}
+                className="ml-2 text-[11px] font-bold text-[#6C5119] hover:underline cursor-pointer"
+              >
+                Clear filter
+              </button>
+            )}
+          </div>
+
+          <div className="relative w-full sm:w-80">
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Filter roster by USN or student name..."
+              className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm text-[#24251C] placeholder-[#77735F]/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+            />
+            <svg
+              className="w-4 h-4 text-[#77735F] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+            </svg>
+          </div>
+        </div>
+
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs sm:text-sm">
             <thead>
-              <tr className="border-b border-[#E4DDCA] bg-[#EDE8D8]/40 text-[#77735F] font-semibold">
-                <th className="py-3.5 pl-4 sm:pl-6">USN</th>
-                <th className="py-3.5 px-4">Student Name</th>
-                <th className="py-3.5 px-4">Room Allocation</th>
-                <th className="py-3.5 px-4">Status & Quick Toggle</th>
-                <th className="py-3.5 pr-4 sm:pr-6 text-right">Reconciliation</th>
+              <tr className="border-b border-[#E4DDCA] bg-[#EDE8D8]/50 text-[#77735F] font-semibold">
+                <th className="py-3 pl-4 sm:pl-6">USN</th>
+                <th className="py-3 px-4">Student Name</th>
+                <th className="py-3 px-4">Room Allocation</th>
+                <th className="py-3 px-4">Attendance Status</th>
+                <th className="py-3 pr-4 sm:pr-6 text-right">Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#E4DDCA]/60 text-[#24251C]">
@@ -577,23 +663,33 @@ export function AttendanceView() {
               {!isLoadingAttendance &&
                 filteredRecords.map((rec) => {
                   return (
-                    <tr key={rec.usn} className="hover:bg-[#EDE8D8]/20 transition-colors">
-                      <td className="py-3.5 pl-4 sm:pl-6 font-bold text-[#6C5119]">
+                    <tr key={rec.usn} className="group hover:bg-[#EDE8D8]/25 transition-colors">
+                      <td className="py-3 pl-4 sm:pl-6 font-bold text-[#6C5119] [font-variant-numeric:tabular-nums]">
                         {rec.usn}
                       </td>
-                      <td className="py-3.5 px-4 font-semibold text-[#24251C]">
+                      <td className="py-3 px-4 font-semibold text-[#24251C]">
                         {rec.student_name || rec.usn}
                       </td>
-                      <td className="py-3.5 px-4 text-xs text-[#77735F]">
-                        {rec.room_id || "Unallocated"}
+                      <td className="py-3 px-4 text-xs text-[#77735F]">
+                        {rec.room_id && rec.room_id !== "UNALLOCATED" ? (
+                          rec.room_id
+                        ) : (
+                          <span className="text-[#A9AE8C] font-mono">—</span>
+                        )}
                       </td>
-                      <td className="py-3.5 px-4">
+                      <td className="py-3 px-4">
                         {canMarkAttendance ? (
-                          /* 4 State Toggle Pills */
-                          <div className="inline-flex rounded-lg border border-[#E4DDCA] p-0.5 bg-white space-x-0.5">
+                          /* Clean 3-Option Segmented Control (Present | Absent | Pending) with implicit Unreviewed */
+                          <div className="inline-flex rounded-lg border border-[#E4DDCA] p-0.5 bg-white space-x-0.5 shadow-2xs">
                             <button
                               type="button"
-                              onClick={() => handleStatusChange(rec.usn, "PRESENT")}
+                              onClick={() =>
+                                handleStatusChange(
+                                  rec.usn,
+                                  rec.status === "PRESENT" ? "UNREVIEWED" : "PRESENT"
+                                )
+                              }
+                              title={rec.status === "PRESENT" ? "Click to clear (Unreviewed)" : "Mark Present"}
                               className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                                 rec.status === "PRESENT"
                                   ? "bg-emerald-600 text-white shadow-2xs"
@@ -604,7 +700,13 @@ export function AttendanceView() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleStatusChange(rec.usn, "ABSENT")}
+                              onClick={() =>
+                                handleStatusChange(
+                                  rec.usn,
+                                  rec.status === "ABSENT" ? "UNREVIEWED" : "ABSENT"
+                                )
+                              }
+                              title={rec.status === "ABSENT" ? "Click to clear (Unreviewed)" : "Mark Absent"}
                               className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                                 rec.status === "ABSENT"
                                   ? "bg-rose-600 text-white shadow-2xs"
@@ -615,7 +717,13 @@ export function AttendanceView() {
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleStatusChange(rec.usn, "PENDING")}
+                              onClick={() =>
+                                handleStatusChange(
+                                  rec.usn,
+                                  rec.status === "PENDING" ? "UNREVIEWED" : "PENDING"
+                                )
+                              }
+                              title={rec.status === "PENDING" ? "Click to clear (Unreviewed)" : "Mark Pending"}
                               className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                                 rec.status === "PENDING"
                                   ? "bg-amber-500 text-white shadow-2xs"
@@ -624,21 +732,10 @@ export function AttendanceView() {
                             >
                               Pending
                             </button>
-                            <button
-                              type="button"
-                              onClick={() => handleStatusChange(rec.usn, "UNREVIEWED")}
-                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
-                                rec.status === "UNREVIEWED"
-                                  ? "bg-[#72785E] text-white shadow-2xs"
-                                  : "text-[#77735F] hover:bg-[#EDE8D8]"
-                              }`}
-                            >
-                              Unreviewed
-                            </button>
                           </div>
                         ) : (
                           <span
-                            className={`inline-block px-3 py-1 rounded-lg text-xs font-bold border ${
+                            className={`inline-block px-2.5 py-0.5 rounded-lg text-xs font-bold border ${
                               rec.status === "PRESENT"
                                 ? "bg-emerald-100 text-emerald-800 border-emerald-300"
                                 : rec.status === "ABSENT"
@@ -652,7 +749,7 @@ export function AttendanceView() {
                           </span>
                         )}
                       </td>
-                      <td className="py-3.5 pr-4 sm:pr-6 text-right">
+                      <td className="py-3 pr-4 sm:pr-6 text-right">
                         {canMarkAttendance ? (
                           <button
                             type="button"
@@ -660,9 +757,10 @@ export function AttendanceView() {
                               setReconcileTarget(rec);
                               setReconcileStatus(rec.status);
                             }}
-                            className="px-3 py-1 rounded-lg text-xs font-semibold bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer"
+                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-semibold text-[#77735F] group-hover:text-[#6C5119] border border-transparent group-hover:border-[#E4DDCA] group-hover:bg-[#EDE8D8]/50 transition-all cursor-pointer"
                           >
-                            Audit / Reconcile
+                            <span>Reconcile</span>
+                            <span>→</span>
                           </button>
                         ) : (
                           <span className="text-[11px] text-[#77735F] font-mono">Read-Only</span>

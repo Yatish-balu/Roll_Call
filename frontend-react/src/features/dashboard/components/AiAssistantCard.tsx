@@ -63,7 +63,7 @@ export function AiAssistantCard() {
   };
 
   return (
-    <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs space-y-4 flex flex-col justify-between transition-all">
+    <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 sm:p-5 shadow-2xs space-y-3.5 flex flex-col justify-between transition-all">
       {/* Hidden File Input for Scan Attendance */}
       <input
         type="file"
@@ -74,29 +74,29 @@ export function AiAssistantCard() {
       />
 
       {/* Card Header & Mascot Section */}
-      <div className="space-y-3">
+      <div className="space-y-2.5">
         <div className="flex items-start justify-between">
           <div>
             <div className="flex items-center space-x-1.5">
               <svg className="w-5 h-5 text-[#6C5119]" fill="currentColor" viewBox="0 0 24 24">
                 <path d="M12 2l2.4 7.2h7.6l-6 4.8 2.4 7.2-6.4-4.8-6.4 4.8 2.4-7.2-6-4.8h7.6z" />
               </svg>
-              <h2 className="text-lg font-bold text-[#24251C] tracking-tight">
+              <h2 className="text-base sm:text-lg font-bold text-[#24251C] tracking-tight">
                 AI Assistant
               </h2>
             </div>
-            <p className="text-xs text-[#77735F] font-medium mt-0.5">
+            <p className="text-[11px] text-[#77735F] font-medium mt-0.5">
               Your attendance assistant
             </p>
           </div>
 
-          <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-[#A77A13]/15 text-[#6C5119] border border-[#6C5119]/20 uppercase tracking-wide">
+          <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#A77A13]/15 text-[#6C5119] border border-[#6C5119]/20 uppercase tracking-wide">
             Beta
           </span>
         </div>
 
         {/* Pure Code 3D Animated Vector Mascot */}
-        <AnimatedAiMascot isThinking={isProcessing} />
+        <AnimatedAiMascot isThinking={isProcessing} className="h-32" />
       </div>
 
       {/* Backend Connection Error Banner */}
@@ -146,57 +146,51 @@ export function AiAssistantCard() {
       )}
 
       {/* Quick Action Tiles */}
-      <div className="space-y-2 pt-1">
+      <div className="grid grid-cols-2 gap-2 pt-0.5">
         {/* Action 1: Scan Attendance */}
         <button
           onClick={() => fileInputRef.current?.click()}
           disabled={isProcessing}
-          className="w-full flex items-center justify-between p-3 rounded-xl bg-white border border-[#E4DDCA] hover:border-[#6C5119]/50 hover:bg-[#F2EDE0]/60 hover:-translate-y-0.5 transition-all text-left shadow-2xs group cursor-pointer"
+          className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-[#E4DDCA] hover:border-[#6C5119]/50 hover:bg-[#F2EDE0]/60 transition-all text-left shadow-2xs group cursor-pointer"
         >
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-[#EDE8D8] text-[#6C5119] group-hover:bg-[#6C5119] group-hover:text-white transition-colors flex items-center justify-center shrink-0">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="flex items-center space-x-2.5 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-[#EDE8D8] text-[#6C5119] group-hover:bg-[#6C5119] group-hover:text-white transition-colors flex items-center justify-center shrink-0">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
               </svg>
             </div>
-            <div>
-              <p className="text-xs font-bold text-[#24251C] group-hover:text-[#6C5119] transition-colors">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-[#24251C] group-hover:text-[#6C5119] transition-colors truncate">
                 Scan Attendance
               </p>
-              <p className="text-[10px] text-[#77735F] font-medium">
-                From image or PDF sheet
+              <p className="text-[10px] text-[#77735F] font-medium truncate">
+                Upload sheet
               </p>
             </div>
           </div>
-          <svg className="w-4 h-4 text-[#77735F] group-hover:translate-x-1 group-hover:text-[#6C5119] transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
         </button>
 
         {/* Action 2: Ask RollCall AI */}
         <button
           onClick={() => chatInputRef.current?.focus()}
-          className="w-full flex items-center justify-between p-3 rounded-xl bg-white border border-[#E4DDCA] hover:border-[#6C5119]/50 hover:bg-[#F2EDE0]/60 hover:-translate-y-0.5 transition-all text-left shadow-2xs group cursor-pointer"
+          className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-[#E4DDCA] hover:border-[#6C5119]/50 hover:bg-[#F2EDE0]/60 transition-all text-left shadow-2xs group cursor-pointer"
         >
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-[#EDE8D8] text-[#6C5119] group-hover:bg-[#6C5119] group-hover:text-white transition-colors flex items-center justify-center shrink-0">
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <div className="flex items-center space-x-2.5 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-[#EDE8D8] text-[#6C5119] group-hover:bg-[#6C5119] group-hover:text-white transition-colors flex items-center justify-center shrink-0">
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" />
               </svg>
             </div>
-            <div>
-              <p className="text-xs font-bold text-[#24251C] group-hover:text-[#6C5119] transition-colors">
+            <div className="min-w-0">
+              <p className="text-xs font-bold text-[#24251C] group-hover:text-[#6C5119] transition-colors truncate">
                 Ask RollCall AI
               </p>
-              <p className="text-[10px] text-[#77735F] font-medium">
-                Get attendance insights, summaries & more
+              <p className="text-[10px] text-[#77735F] font-medium truncate">
+                AI insights
               </p>
             </div>
           </div>
-          <svg className="w-4 h-4 text-[#77735F] group-hover:translate-x-1 group-hover:text-[#6C5119] transition-all" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-          </svg>
         </button>
       </div>
 

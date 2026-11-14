@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
+import { useResource } from "@/hooks/useResource";
+import { invalidate } from "@/services/api/cache";
 import { checkBackendHealth } from "@/services/api/health";
 import { apiClient } from "@/services/api/client";
 import {
@@ -115,11 +117,53 @@ export function SettingsView() {
   const { session, logout } = useAuth();
 
   const [preferences, setPreferences] = useState<AppPreferences>(() => getPreferences());
-  const [metaConfig, setMetaConfig] = useState<MetaConfig | null>(null);
-  const [health, setHealth] = useState<{ ok: boolean; latencyMs?: number; checkedAt?: string } | null>(
-    null
+
+  // Cached reads: Settings is re-entered often; every read below (meta config,
+  // MFA status, active sessions, backend health) is served from the shared
+  // cache on tab switch and only revalidated in the background when stale.
+  const metaRes = useResource<MetaConfig>("/api/v1/meta/config", () =>
+    apiClient.get<MetaConfig>("/api/v1/meta/config")
   );
-  const [isCheckingHealth, setIsCheckingHealth] = useState(false);
+  const mfaRes = useResource<MfaStatus>("/api/v1/auth/mfa/status", () => fetchMfaStatus());
+  const sessionsRes = useResource<{ sessions?: ActiveSession[] }>("/api/v1/auth/sessions", () =>
+    fetchActiveSessions()
+  );
+  const healthRes = useResource<{
+    ok: boolean;
+    latencyMs: number;
+    checkedAt: string;
+  }>(
+    "/health",
+    async () => {
+      const started = performance.now();
+      const res = await checkBackendHealth();
+      return {
+        ok: res.status === "healthy" || res.status === "ok",
+        latencyMs: Math.round(performance.now() - started),
+        checkedAt: new Date().toLocaleTimeString(),
+      };
+    },
+    { staleTime: 15_000 }
+  );
+
+  const metaConfig = metaRes.data ?? null;
+  const mfaStatus = mfaRes.data ?? null;
+  const sessions = sessionsRes.data?.sessions ?? [];
+  const isLoadingSessions = sessionsRes.isLoading;
+  const isRefreshingSessions = sessionsRes.isRefreshing;
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const sessionsLoadError = sessionsRes.error
+    ? sessionsRes.error instanceof Error
+      ? sessionsRes.error.message
+      : "The active sessions could not be loaded."
+    : null;
+
+  const health: { ok: boolean; latencyMs?: number; checkedAt: string } | null =
+    healthRes.data ??
+    (healthRes.error
+      ? { ok: false, checkedAt: new Date().toLocaleTimeString() }
+      : null);
+  const isCheckingHealth = healthRes.isLoading || healthRes.isRefreshing;
 
   // Password
   const [oldPassword, setOldPassword] = useState("");
@@ -133,7 +177,6 @@ export function SettingsView() {
   const [passwordError, setPasswordError] = useState<string | null>(null);
 
   // MFA
-  const [mfaStatus, setMfaStatus] = useState<MfaStatus | null>(null);
   const [mfaPassword, setMfaPassword] = useState("");
   const [showMfaPassword, setShowMfaPassword] = useState(false);
   const [mfaCode, setMfaCode] = useState("");
@@ -144,9 +187,6 @@ export function SettingsView() {
   const [mfaError, setMfaError] = useState<string | null>(null);
 
   // Sessions
-  const [sessions, setSessions] = useState<ActiveSession[]>([]);
-  const [sessionsError, setSessionsError] = useState<string | null>(null);
-  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [sessionBusyId, setSessionBusyId] = useState<string | null>(null);
 
   const displayName = session?.name || session?.userId || "Faculty Member";
@@ -165,50 +205,6 @@ export function SettingsView() {
   useEffect(() => {
     applyTheme(preferences.theme);
   }, [preferences.theme]);
-
-  const checkHealth = useCallback(async () => {
-    setIsCheckingHealth(true);
-    const started = performance.now();
-    try {
-      const res = await checkBackendHealth();
-      setHealth({
-        ok: res.status === "healthy" || res.status === "ok",
-        latencyMs: Math.round(performance.now() - started),
-        checkedAt: new Date().toLocaleTimeString(),
-      });
-    } catch {
-      setHealth({ ok: false, checkedAt: new Date().toLocaleTimeString() });
-    } finally {
-      setIsCheckingHealth(false);
-    }
-  }, []);
-
-  const loadSessions = useCallback(async () => {
-    setIsLoadingSessions(true);
-    setSessionsError(null);
-    try {
-      const res = await fetchActiveSessions();
-      setSessions(res.sessions || []);
-    } catch (err: unknown) {
-      setSessionsError(
-        err instanceof Error ? err.message : "The active sessions could not be loaded."
-      );
-    } finally {
-      setIsLoadingSessions(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void checkHealth();
-    void loadSessions();
-    apiClient
-      .get<MetaConfig>("/api/v1/meta/config")
-      .then(setMetaConfig)
-      .catch(() => setMetaConfig(null));
-    fetchMfaStatus()
-      .then(setMfaStatus)
-      .catch(() => setMfaStatus(null));
-  }, [checkHealth, loadSessions]);
 
   const handlePasswordChange = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -267,8 +263,7 @@ export function SettingsView() {
       setMfaCode("");
       setMfaPassword("");
       setMfaMessage("Multi-factor authentication is now active for your account.");
-      const status = await fetchMfaStatus();
-      setMfaStatus(status);
+      invalidate("/api/v1/auth/mfa/status");
     } catch (err: unknown) {
       setMfaError(err instanceof Error ? err.message : "The MFA code could not be verified.");
     } finally {
@@ -285,8 +280,7 @@ export function SettingsView() {
       setMfaPassword("");
       setMfaCode("");
       setMfaMessage("Multi-factor authentication was disabled for your account.");
-      const status = await fetchMfaStatus();
-      setMfaStatus(status);
+      invalidate("/api/v1/auth/mfa/status");
     } catch (err: unknown) {
       setMfaError(err instanceof Error ? err.message : "MFA could not be disabled.");
     } finally {
@@ -299,7 +293,7 @@ export function SettingsView() {
     setSessionsError(null);
     try {
       await revokeSession(sessionId);
-      await loadSessions();
+      invalidate("/api/v1/auth/sessions");
     } catch (err: unknown) {
       setSessionsError(err instanceof Error ? err.message : "The session could not be revoked.");
     } finally {
@@ -312,7 +306,7 @@ export function SettingsView() {
     setSessionsError(null);
     try {
       await revokeAllOtherSessions();
-      await loadSessions();
+      invalidate("/api/v1/auth/sessions");
     } catch (err: unknown) {
       setSessionsError(err instanceof Error ? err.message : "The sessions could not be revoked.");
     } finally {
@@ -655,11 +649,11 @@ export function SettingsView() {
           <div className="flex flex-wrap items-center gap-2">
             <button
               type="button"
-              onClick={() => void loadSessions()}
-              disabled={isLoadingSessions}
+              onClick={sessionsRes.refresh}
+              disabled={isLoadingSessions || isRefreshingSessions}
               className="px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors disabled:opacity-50 cursor-pointer"
             >
-              {isLoadingSessions ? "Refreshing…" : "Refresh sessions"}
+              {isLoadingSessions || isRefreshingSessions ? "Refreshing…" : "Refresh sessions"}
             </button>
             <button
               type="button"
@@ -669,7 +663,11 @@ export function SettingsView() {
             >
               Sign out all other devices
             </button>
-            {sessionsError && <p className="text-xs font-semibold text-rose-700">{sessionsError}</p>}
+            {(sessionsError || sessionsLoadError) && (
+              <p className="text-xs font-semibold text-rose-700">
+                {sessionsError || sessionsLoadError}
+              </p>
+            )}
           </div>
 
           {sessions.length === 0 && !isLoadingSessions ? (
@@ -980,7 +978,7 @@ export function SettingsView() {
         </div>
         <button
           type="button"
-          onClick={() => void checkHealth()}
+          onClick={() => healthRes.refresh()}
           disabled={isCheckingHealth}
           className="mt-4 px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors disabled:opacity-50 cursor-pointer"
         >

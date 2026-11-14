@@ -262,7 +262,11 @@ export function TimetableView() {
               type="button"
               onClick={() => openCreate(selectedDay)}
               disabled={!reference || reference.timetables.length === 0}
-              className="px-3.5 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] transition-colors disabled:opacity-50 cursor-pointer"
+              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors ${
+                !reference || reference.timetables.length === 0
+                  ? "bg-[#EDE8D8] text-[#77735F] border border-[#E4DDCA] cursor-not-allowed opacity-70"
+                  : "bg-[#6C5119] text-white hover:bg-[#594214] cursor-pointer shadow-2xs"
+              }`}
               title={
                 reference && reference.timetables.length === 0
                   ? "No timetable is configured on the server yet"
@@ -290,20 +294,44 @@ export function TimetableView() {
           <span>Loading the weekly schedule…</span>
         </div>
       ) : !week || !week.has_timetable ? (
-        <div className="py-16 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl">
-          <p className="font-bold text-[#24251C]">No timetable is configured</p>
-          <p className="text-xs text-[#77735F] mt-1 max-w-lg mx-auto px-4">
+        <div className="card-crisp py-14 px-6 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl flex flex-col items-center justify-center">
+          <div className="w-12 h-12 rounded-full bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA] flex items-center justify-center mb-3">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+            </svg>
+          </div>
+          <p className="text-base font-bold text-[#24251C]">No timetable is configured</p>
+          <p className="text-xs text-[#77735F] mt-1.5 max-w-md mx-auto leading-relaxed">
             {week?.message ||
               "The backend has no active timetable for your department yet. Once an administrator publishes a timetable, your weekly schedule appears here."}
           </p>
+          <button
+            type="button"
+            onClick={() => void loadWeek()}
+            className="mt-4 px-4 py-2 rounded-xl bg-[#EDE8D8] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer shadow-2xs"
+          >
+            Refresh Schedule
+          </button>
         </div>
       ) : week.total_entries === 0 ? (
-        <div className="py-16 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl">
-          <p className="font-bold text-[#24251C]">Your timetable has no classes yet</p>
-          <p className="text-xs text-[#77735F] mt-1 max-w-lg mx-auto px-4">
+        <div className="card-crisp py-14 px-6 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl flex flex-col items-center justify-center">
+          <div className="w-12 h-12 rounded-full bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA] flex items-center justify-center mb-3">
+            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+            </svg>
+          </div>
+          <p className="text-base font-bold text-[#24251C]">Your timetable has no classes yet</p>
+          <p className="text-xs text-[#77735F] mt-1.5 max-w-md mx-auto leading-relaxed">
             {week.message ||
               "No timetable entries are visible for your account. Add a class slot to publish your teaching schedule."}
           </p>
+          <button
+            type="button"
+            onClick={() => void loadWeek()}
+            className="mt-4 px-4 py-2 rounded-xl bg-[#EDE8D8] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer shadow-2xs"
+          >
+            Refresh Schedule
+          </button>
         </div>
       ) : viewType === "day" ? (
         <div className="space-y-5">

@@ -28,7 +28,7 @@ export function RecentSessionsTable({ sessions, isLoading }: RecentSessionsTable
   const displaySessions = sessions.slice(0, 5);
 
   return (
-    <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs space-y-4">
+    <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs space-y-4">
       {/* Header */}
       <div className="flex items-center justify-between pb-1">
         <div className="flex items-center space-x-2.5">
