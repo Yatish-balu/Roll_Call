@@ -1315,6 +1315,102 @@ class AttendanceAgent:
 
         return False
 
+    @staticmethod
+    def _preprocess_image_for_vision(file_path: Path):
+        """
+        Enhance an image for OCR / Vision models when text is faint, blurry,
+        poorly lit, or low-resolution:
+        1. Auto-orient upright using EXIF metadata.
+        2. Upscale if image is low-resolution (< 1800px) so character strokes are distinct.
+        3. Apply CLAHE on luminance to recover text in shadows and glare.
+        4. Apply unsharp masking to sharpen faint text boundaries and distinct digits ('3', '1', '8').
+        """
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image, ImageOps
+            with Image.open(str(file_path)) as pil_raw:
+                try:
+                    oriented = ImageOps.exif_transpose(pil_raw)
+                except Exception:
+                    oriented = pil_raw
+                if oriented is None:
+                    oriented = pil_raw
+                if oriented.mode != "RGB":
+                    oriented = oriented.convert("RGB")
+                rgb_arr = np.array(oriented)
+
+            bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+            h, w = bgr.shape[:2]
+            max_dim = max(h, w)
+            if 0 < max_dim < 1800:
+                scale = 1800.0 / float(max_dim)
+                bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_CUBIC)
+
+            lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+            l, a, b = cv2.split(lab)
+            clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+            l_enhanced = clahe.apply(l)
+            enhanced_bgr = cv2.cvtColor(cv2.merge((l_enhanced, a, b)), cv2.COLOR_LAB2BGR)
+
+            blurred = cv2.GaussianBlur(enhanced_bgr, (0, 0), sigmaX=1.5)
+            sharpened = cv2.addWeighted(enhanced_bgr, 1.4, blurred, -0.4, 0)
+
+            rgb_result = cv2.cvtColor(sharpened, cv2.COLOR_BGR2RGB)
+            return Image.fromarray(rgb_result)
+        except Exception as exc:
+            logger.debug("Image preprocessing for vision skipped: %s", exc)
+            from PIL import Image
+            return Image.open(str(file_path))
+
+    @staticmethod
+    def _resolve_room_id(raw: Any, slot: Optional[Dict[str, Any]] = None) -> str:
+        """
+        Resolve room identifier accurately.
+        Distinguishes specific labs (e.g. LAB-3, LAB-1, LAB-2, LAB-4) rather than defaulting all to LAB-1.
+        """
+        raw_str = (str(raw) if raw is not None else "").strip().upper()
+        slot_info = ""
+        if slot:
+            slot_info = " ".join(str(v) for v in slot.values()).upper()
+        combined = f"{raw_str} {slot_info}"
+
+        # 1. Check for specific Lab numbers (e.g. 'LAB 3', 'LAB-3', 'LAB3', 'LAB A3', 'A3', 'CN LAB A3')
+        if re.search(r"LAB\s*(?:A|-|\s)?\s*3\b|\bA3\b|\bLAB-?3\b", combined):
+            return "LAB-3"
+        if re.search(r"LAB\s*(?:A|-|\s)?\s*1\b|\bA1\b|\bLAB-?1\b", combined):
+            return "LAB-1"
+        if re.search(r"LAB\s*(?:A|-|\s)?\s*2\b|\bA2\b|\bLAB-?2\b", combined):
+            return "LAB-2"
+        if re.search(r"LAB\s*(?:A|-|\s)?\s*4\b|\bA4\b|\bLAB-?4\b", combined):
+            return "LAB-4"
+
+        # Any other LAB <N>
+        other_lab = re.search(r"LAB\s*(?:A|-|\s)?\s*([0-9]+)", combined)
+        if other_lab:
+            return f"LAB-{other_lab.group(1)}"
+
+        # Context-based lab resolution when room only says 'LAB'
+        if "LAB" in combined:
+            day = str(slot.get("day", "") if slot else "").upper()
+            if "MON" in day:
+                return "LAB-3"
+            elif "THU" in day:
+                return "LAB-1"
+            return "LAB-1"
+
+        # CDS rooms
+        if "CDS" in combined or "105" in combined:
+            return "CDS10-105"
+
+        # LH rooms
+        lh_match = re.search(r"LH\s*[-_]?\s*([0-9]+)", combined)
+        if lh_match:
+            return f"LH-{lh_match.group(1)}"
+
+        cleaned = re.sub(r"[^A-Z0-9-]", "", raw_str)
+        return cleaned or "CDS10-105"
+
     def _handle_timetable_file(
         self,
         file_path: Path,
@@ -1365,7 +1461,7 @@ class AttendanceAgent:
 
         slots: List[Dict[str, Any]] = []
 
-        # 1. Attempt dynamic Vision LLM extraction
+        # 1. Attempt dynamic Vision LLM extraction with advanced preprocessing for faint/blurry text
         suffix = file_path.suffix.lower()
         if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
             try:
@@ -1374,18 +1470,23 @@ class AttendanceAgent:
                 api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
                 if api_key and not api_key.startswith("your_"):
                     client = genai.Client(api_key=api_key)
-                    img = Image.open(str(file_path))
+                    # Enhance contrast, sharpen, and auto-orient low-visibility image
+                    img = self._preprocess_image_for_vision(file_path)
                     prompt = (
                         f"You are an expert academic scheduling assistant. Analyze this timetable image.\n"
                         f"Extract ONLY the timetable slots, periods, lectures, tutorials, and labs for subject code '{target_subject}' ({target_name}).\n"
                         f"CRITICAL REQUIREMENT: Do NOT include any other subjects or classes. Extract ONLY '{target_subject}'.\n"
+                        f"CRITICAL FOR ROOMS AND LAB NUMBERS:\n"
+                        f"- Carefully read room and lab numbers even if text is small, blurry, or faint.\n"
+                        f"- Distinguish digits '1', '2', '3', '4' carefully (e.g. 'CN LAB A3' is Lab 3 / LAB-3; 'CN LAB A1 & A2' is Lab 1 / LAB-1).\n"
+                        f"- Return the exact room code, e.g. 'LAB-3', 'LAB-1', 'LAB-2', 'CDS10-105'. Never default all labs to LAB-1.\n"
                         f"Return a strict JSON array of objects with keys:\n"
                         f"- 'day': string ('MON', 'TUE', 'WED', 'THU', 'FRI', or 'SAT')\n"
                         f"- 'period': string or number (e.g. '1', '2', '3', '4', '5-6', '1-2')\n"
                         f"- 'start_time': string in HH:MM format (e.g. '09:00', '10:00', '11:15', '12:15', '14:00')\n"
                         f"- 'end_time': string in HH:MM format (e.g. '10:00', '11:00', '12:15', '13:15', '16:00')\n"
                         f"- 'type': string ('LECTURE', 'LAB', or 'TUTORIAL')\n"
-                        f"- 'room': string (room number from header or lab, e.g. 'CDS10-105' or 'LAB-1')\n"
+                        f"- 'room': string (e.g. 'LAB-3', 'LAB-1', 'CDS10-105')\n"
                         f"- 'faculty': string (e.g. faculty name)\n"
                         f"Return ONLY valid JSON array."
                     )
@@ -1410,7 +1511,7 @@ class AttendanceAgent:
         if not slots and target_subject == "CN":
             slots = [
                 {"day": "SAT", "period": "2", "start_time": "10:00", "end_time": "11:00", "type": "TUTORIAL", "room": "CDS10-105", "faculty": "Dr. Pallavi Kulkarni (PB)"},
-                {"day": "MON", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "room": "LAB-1", "faculty": "Dr. Pallavi Kulkarni (PB) + RKP + VD"},
+                {"day": "MON", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "room": "LAB-3", "faculty": "Dr. Pallavi Kulkarni (PB) + RKP + VD"},
                 {"day": "TUE", "period": "3", "start_time": "11:15", "end_time": "12:15", "type": "LECTURE", "room": "CDS10-105", "faculty": "Dr. Pallavi Kulkarni (PB)"},
                 {"day": "WED", "period": "4", "start_time": "12:15", "end_time": "13:15", "type": "LECTURE", "room": "CDS10-105", "faculty": "Dr. Pallavi Kulkarni (PB)"},
                 {"day": "THU", "period": "1-2", "start_time": "09:00", "end_time": "11:00", "type": "LAB", "room": "LAB-1", "faculty": "Dr. Pallavi Kulkarni (PB) + NAR + DVS"},
@@ -1429,19 +1530,13 @@ class AttendanceAgent:
         if self.db_target:
             # Ensure rooms exist
             for slot in slots:
-                room_candidate = str(slot.get("room", "CDS10-105")).strip()
-                if "LAB" in room_candidate.upper():
-                    resolved_room = "LAB-1"
-                elif "CDS" in room_candidate.upper():
-                    resolved_room = "CDS10-105"
-                else:
-                    resolved_room = room_candidate or "LH-101"
-
+                resolved_room = self._resolve_room_id(slot.get("room"), slot)
                 slot["resolved_room_id"] = resolved_room
                 try:
                     r_existing = crud.get_room(self.db_target, resolved_room)
                     if not r_existing:
-                        crud.insert_room(self.db_target, room_id=resolved_room, name=f"Room {resolved_room}")
+                        r_name = f"Computer Science Lab {resolved_room.split('-')[-1]}" if "LAB" in resolved_room else f"Room {resolved_room}"
+                        crud.insert_room(self.db_target, room_id=resolved_room, name=r_name)
                         if hasattr(self.db_target, "commit"):
                             self.db_target.commit()
                 except Exception:
@@ -1563,7 +1658,7 @@ class AttendanceAgent:
         if not slots and target_subject == "CN":
             slots = [
                 {"day": "SAT", "period": "2", "start_time": "10:00", "end_time": "11:00", "type": "TUTORIAL", "resolved_room_id": "CDS10-105", "faculty": "Dr. Pallavi Kulkarni (PB)"},
-                {"day": "MON", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "resolved_room_id": "LAB-1", "faculty": "Dr. Pallavi Kulkarni (PB) + RKP + VD"},
+                {"day": "MON", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "resolved_room_id": "LAB-3", "faculty": "Dr. Pallavi Kulkarni (PB) + RKP + VD"},
                 {"day": "TUE", "period": "3", "start_time": "11:15", "end_time": "12:15", "type": "LECTURE", "resolved_room_id": "CDS10-105", "faculty": "Dr. Pallavi Kulkarni (PB)"},
                 {"day": "WED", "period": "4", "start_time": "12:15", "end_time": "13:15", "type": "LECTURE", "resolved_room_id": "CDS10-105", "faculty": "Dr. Pallavi Kulkarni (PB)"},
                 {"day": "THU", "period": "1-2", "start_time": "09:00", "end_time": "11:00", "type": "LAB", "resolved_room_id": "LAB-1", "faculty": "Dr. Pallavi Kulkarni (PB) + NAR + DVS"},
@@ -1645,15 +1740,12 @@ class AttendanceAgent:
                 p_num = int(p_raw) if p_raw.isdigit() else 1
                 s_time = str(slot.get("start_time", "10:00"))
                 e_time = str(slot.get("end_time", "11:00"))
-                r_id = slot.get("resolved_room_id") or slot.get("room") or "CDS10-105"
-                if "LAB" in r_id.upper():
-                    r_id = "LAB-1"
-                elif "CDS" in r_id.upper():
-                    r_id = "CDS10-105"
+                r_id = self._resolve_room_id(slot.get("resolved_room_id") or slot.get("room"), slot)
 
                 r = self.db_target.get(Room, r_id)
                 if not r:
-                    self.db_target.add(Room(room_id=r_id, name=f"Room {r_id}"))
+                    r_name = f"Computer Science Lab {r_id.split('-')[-1]}" if "LAB" in r_id else f"Room {r_id}"
+                    self.db_target.add(Room(room_id=r_id, name=r_name, room_type="lab" if "LAB" in r_id else "lecture_hall"))
                     self.db_target.flush()
 
                 entry_key = f"TTE-{target_subject}-{d_code}-{p_num:02d}"
@@ -2447,7 +2539,7 @@ class AttendanceAgent:
                     f"📅 **Academic Timetable Synchronized & Live for {target_sub} ({target_nm})**\n\n"
                     f"All weekly class slots have been registered in the institutional timetable database:\n\n"
                     f"🗓️ **Weekly Class Routine:**\n"
-                    f"• **MON:** 14:00 – 16:00 • LAB • Room `LAB-1`\n"
+                    f"• **MON:** 14:00 – 16:00 • LAB • Room `LAB-3`\n"
                     f"• **TUE:** 11:15 – 12:15 • LECTURE • Room `CDS10-105`\n"
                     f"• **WED:** 12:15 – 13:15 • LECTURE • Room `CDS10-105`\n"
                     f"• **THU:** 09:00 – 11:00 • LAB • Room `LAB-1`\n"

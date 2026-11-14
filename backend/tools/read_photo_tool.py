@@ -148,22 +148,37 @@ class PhotoExtractionResult:
 # Image Preprocessing
 # ---------------------------------------------------------------------------
 
-def preprocess_image(image_path: str | Path) -> np.ndarray:
+def preprocess_image(image_path: str | Path) -> Tuple[np.ndarray, np.ndarray]:
     """
     Load and clean an attendance sheet image for best OCR / vision LLM accuracy.
 
     Steps:
-      1. Load with OpenCV preserving colour (for LLM) and make a grayscale copy.
-      2. Denoise (fastNlMeansDenoising).
-      3. Deskew by detecting the dominant rotation angle from Hough lines.
-      4. Apply adaptive thresholding on the grayscale copy to sharpen text.
-      5. Return the deskewed *colour* image (PIL-ready, uint8 RGB).
+      1. Load and auto-orient upright via EXIF.
+      2. Denoise and deskew by detecting dominant rotation angle from Hough lines.
+      3. Apply CLAHE contrast enhancement on luminance to recover faint or shadowed text.
+      4. Apply unsharp masking to sharpen character strokes and numbers.
+      5. Apply adaptive thresholding on grayscale copy for OCR fallback.
+      6. Return (deskewed_colour_rgb, thresholded_binary).
     """
     path = Path(image_path)
     if not path.exists():
         raise FileNotFoundError(f"Image not found: {image_path}")
 
-    bgr = cv2.imread(str(path))
+    # Auto-orient using EXIF (ensures mobile camera photos are upright)
+    try:
+        from PIL import Image as PILImage, ImageOps
+        with PILImage.open(str(path)) as pil_raw:
+            oriented = ImageOps.exif_transpose(pil_raw)
+            if oriented is not None:
+                if oriented.mode != "RGB":
+                    oriented = oriented.convert("RGB")
+                rgb_arr = np.array(oriented)
+                bgr = cv2.cvtColor(rgb_arr, cv2.COLOR_RGB2BGR)
+            else:
+                bgr = cv2.imread(str(path))
+    except Exception:
+        bgr = cv2.imread(str(path))
+
     if bgr is None:
         raise ValueError(f"OpenCV could not decode image: {image_path}")
 
@@ -176,6 +191,18 @@ def preprocess_image(image_path: str | Path) -> np.ndarray:
     if abs(angle) > 0.5:
         bgr = _rotate_image(bgr, angle)
         denoised = _rotate_image(denoised, angle)
+
+    # --- Contrast enhancement (CLAHE on Luminance) for faint/poorly-visible text ---
+    try:
+        lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+        l_clahe = clahe.apply(l)
+        enhanced_bgr = cv2.cvtColor(cv2.merge((l_clahe, a, b)), cv2.COLOR_LAB2BGR)
+        blurred = cv2.GaussianBlur(enhanced_bgr, (0, 0), sigmaX=1.5)
+        bgr = cv2.addWeighted(enhanced_bgr, 1.35, blurred, -0.35, 0)
+    except Exception:
+        pass
 
     # --- Adaptive threshold (for OCR fallback preview) ---
     thresh = cv2.adaptiveThreshold(
