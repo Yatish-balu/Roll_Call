@@ -103,6 +103,9 @@ export function FacultyView() {
   const [pendingRemoval, setPendingRemoval] = useState<TeacherSubjectMapping | null>(null);
   const [isRemoving, setIsRemoving] = useState(false);
 
+  // Full Teacher Profile View Modal (Admin & Directory)
+  const [viewingProfileTeacher, setViewingProfileTeacher] = useState<AdminTeacherItem | null>(null);
+
   // Reviewing a Request
   const [reviewingId, setReviewingId] = useState<string | null>(null);
 
@@ -473,20 +476,27 @@ export function FacultyView() {
                         {t.session_count}
                       </td>
                       <td className="py-3 px-4 text-right">
-                        {isAdmin ? (
+                        <div className="flex items-center justify-end gap-1.5">
                           <button
-                            onClick={() => {
-                              setEditNameTarget(t);
-                              setNewNameInput(t.name || "");
-                              setNameModalError(null);
-                            }}
-                            className="px-3 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#6C5119] hover:bg-[#EDE8D8]/50 shadow-2xs transition-colors cursor-pointer"
+                            onClick={() => setViewingProfileTeacher(t)}
+                            className="px-2.5 py-1.5 rounded-xl bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] text-xs font-bold transition-colors cursor-pointer"
+                            title="View complete faculty profile and contact details"
                           >
-                            Edit Name
+                            Details
                           </button>
-                        ) : (
-                          <span className="text-xs text-[#77735F] italic">Admin Only</span>
-                        )}
+                          {isAdmin && (
+                            <button
+                              onClick={() => {
+                                setEditNameTarget(t);
+                                setNewNameInput(t.name || "");
+                                setNameModalError(null);
+                              }}
+                              className="px-2.5 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#6C5119] hover:bg-[#EDE8D8]/50 shadow-2xs transition-colors cursor-pointer"
+                            >
+                              Edit Name
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   ))
@@ -959,6 +969,105 @@ export function FacultyView() {
                 className="px-4 py-2 rounded-xl bg-rose-700 text-white text-xs font-bold hover:bg-rose-800 disabled:opacity-50 cursor-pointer"
               >
                 {isRemoving ? "Unassigning..." : "Yes, Unassign"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL 5: Teacher Full Details & Contact Profile Modal */}
+      {viewingProfileTeacher && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-5 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div className="flex items-center space-x-3">
+                <div className="w-10 h-10 rounded-xl bg-[#3F451F] text-[#EDE8D8] flex items-center justify-center font-bold text-base uppercase">
+                  {viewingProfileTeacher.name ? viewingProfileTeacher.name.charAt(0) : viewingProfileTeacher.user_id.charAt(0)}
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#24251C]">{viewingProfileTeacher.name || viewingProfileTeacher.user_id}</h3>
+                  <p className="text-xs text-[#77735F] font-mono">{viewingProfileTeacher.user_id} • {viewingProfileTeacher.designation || "Faculty Member"}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViewingProfileTeacher(null)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-white border border-[#E4DDCA] space-y-1">
+                <span className="font-bold text-[#77735F] uppercase text-[10px]">Official Account Email</span>
+                <p className="font-semibold text-[#24251C] break-all">{viewingProfileTeacher.email || "—"}</p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-white border border-[#E4DDCA] space-y-1">
+                <span className="font-bold text-[#77735F] uppercase text-[10px]">Mobile / Phone</span>
+                <p className="font-semibold text-[#24251C]">{viewingProfileTeacher.mobile || "Not specified"}</p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-white border border-[#E4DDCA] space-y-1">
+                <span className="font-bold text-[#77735F] uppercase text-[10px]">Department / Branch</span>
+                <p className="font-semibold text-[#24251C]">{viewingProfileTeacher.branch || "General / Inter-departmental"}</p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-white border border-[#E4DDCA] space-y-1">
+                <span className="font-bold text-[#77735F] uppercase text-[10px]">Experience</span>
+                <p className="font-semibold text-[#24251C]">{viewingProfileTeacher.experience_years ? `${viewingProfileTeacher.experience_years} Years` : "—"}</p>
+              </div>
+
+              <div className="p-3 rounded-xl bg-white border border-[#E4DDCA] space-y-1 col-span-1 sm:col-span-2">
+                <span className="font-bold text-[#77735F] uppercase text-[10px]">Qualifications & Specialization</span>
+                <p className="font-semibold text-[#24251C]">
+                  {viewingProfileTeacher.qualifications || "—"}
+                  {viewingProfileTeacher.specialization ? ` (${viewingProfileTeacher.specialization})` : ""}
+                </p>
+              </div>
+            </div>
+
+            {/* Expertise Areas */}
+            {viewingProfileTeacher.expertise && viewingProfileTeacher.expertise.length > 0 && (
+              <div className="space-y-1.5">
+                <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider">Expertise & Research Areas</span>
+                <div className="flex flex-wrap gap-1.5">
+                  {viewingProfileTeacher.expertise.map((exp, idx) => (
+                    <span key={idx} className="px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-[#EDE8D8] text-[#24251C] border border-[#E4DDCA]">
+                      {exp}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Assigned Subjects & Session Activity */}
+            <div className="space-y-2 pt-2 border-t border-[#E4DDCA]">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-bold text-[#77735F] uppercase text-[10px]">Assigned Teaching Subjects</span>
+                <span className="font-bold text-[#6C5119]">{viewingProfileTeacher.session_count} Total Sessions</span>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {viewingProfileTeacher.subject_codes && viewingProfileTeacher.subject_codes.length > 0 ? (
+                  viewingProfileTeacher.subject_codes.map((sc) => (
+                    <span key={sc} className="px-2.5 py-1 rounded-xl text-xs font-bold bg-[#3F451F] text-[#EDE8D8]">
+                      {sc} {KNOWN_SUBJECTS[sc]?.name ? `• ${KNOWN_SUBJECTS[sc].name}` : ""}
+                    </span>
+                  ))
+                ) : (
+                  <span className="text-xs text-[#77735F] italic">No active subject assignments</span>
+                )}
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-3 border-t border-[#E4DDCA]">
+              <button
+                type="button"
+                onClick={() => setViewingProfileTeacher(null)}
+                className="px-4 py-2 rounded-xl bg-[#3F451F] text-[#FBF8F0] text-xs font-bold hover:bg-[#323719] transition-all cursor-pointer"
+              >
+                Close Profile
               </button>
             </div>
           </div>

@@ -197,6 +197,39 @@ class AttendanceUndoResponse(BaseModel):
     message: str
 
 
+class AttendanceUnlockRequestCreate(BaseModel):
+    """Schema for a teacher requesting permission to unlock a session older than 24h."""
+    session_id: str = Field(..., min_length=1, max_length=50, description="Locked session ID")
+    reason: str = Field(..., min_length=3, max_length=1000, description="Reason for requesting attendance change")
+    target_usns: Optional[List[str]] = Field(None, description="Optional list of affected student USNs")
+    requested_change: Optional[str] = Field(None, max_length=100, description="Description of requested correction")
+
+
+class AttendanceUnlockRequestReview(BaseModel):
+    """Schema for admin reviewing an attendance unlock request."""
+    decision: Literal["APPROVED", "REJECTED"] = Field(..., description="Admin decision")
+    admin_notes: Optional[str] = Field(None, max_length=1000, description="Optional admin review notes")
+    unlock_hours: Optional[int] = Field(24, ge=1, le=168, description="Hours the session stays unlocked if approved")
+
+
+class AttendanceUnlockRequestResponse(BaseModel):
+    """Schema for returning attendance unlock request records."""
+    request_id: str
+    session_id: str
+    teacher_id: str
+    teacher_name: Optional[str] = None
+    teacher_email: Optional[str] = None
+    reason: str
+    target_usns: Optional[str] = None
+    requested_change: Optional[str] = None
+    status: str
+    admin_notes: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    created_at: str
+    expires_at: Optional[str] = None
+
+
 AttendanceCreate.model_rebuild()
 AttendanceResponse.model_rebuild()
 AttendanceDetailResponse.model_rebuild()
@@ -208,5 +241,9 @@ AttendanceCorrectionRequest.model_rebuild()
 AttendanceCorrectionResponse.model_rebuild()
 AttendanceUndoRequest.model_rebuild()
 AttendanceUndoResponse.model_rebuild()
+AttendanceUnlockRequestCreate.model_rebuild()
+AttendanceUnlockRequestReview.model_rebuild()
+AttendanceUnlockRequestResponse.model_rebuild()
+
 
 

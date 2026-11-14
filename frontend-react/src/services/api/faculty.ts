@@ -108,6 +108,16 @@ export interface AdminTeacherItem {
   teacher_id: string;
   name: string;
   email: string;
+  profile_email?: string;
+  mobile?: string;
+  branch?: string;
+  designation?: string;
+  experience_years?: number;
+  qualifications?: string;
+  specialization?: string;
+  expertise?: string[];
+  mastered_subjects?: string[];
+  photo_url?: string;
   role: string;
   is_active: boolean;
   subject_codes: string[];

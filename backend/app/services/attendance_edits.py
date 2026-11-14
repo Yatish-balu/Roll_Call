@@ -179,26 +179,49 @@ def assert_session_edit_unlocked(
     current_user: AuthenticatedUser,
     session: Dict[str, Any],
     now_utc: Optional[str] = None,
+    db: Optional[Any] = None,
 ) -> None:
     """Raise ``403 LOCKED`` when a non-admin edits a session older than 24 h.
 
     Only write paths call this: reading an old session stays allowed. ADMIN is
     never locked (an override reason may still be required by the caller).
+    If an administrator has approved an AttendanceUnlockRequest for this teacher
+    and session that has not expired, the teacher is permitted to edit.
     """
     actor_role = getattr(current_user, "role", Role.VIEWER)
     role_str = actor_role.value if hasattr(actor_role, "value") else str(actor_role)
     if role_str.strip().upper() == "ADMIN":
         return
 
-    if policy_is_editable(session.get("created_at"), "FACULTY", now_utc or _utcnow_iso()):
+    check_now = now_utc or _utcnow_iso()
+    if policy_is_editable(session.get("created_at"), "FACULTY", check_now):
         return
 
     session_id = session.get("session_id", "<unknown>")
+
+    # Check for active admin-approved unlock request
+    if db is not None and hasattr(db, "execute"):
+        try:
+            from sqlalchemy import select
+            from app.db.models import AttendanceUnlockRequest
+            active_req = db.execute(
+                select(AttendanceUnlockRequest).where(
+                    AttendanceUnlockRequest.session_id == session_id,
+                    AttendanceUnlockRequest.teacher_id == current_user.user_id,
+                    AttendanceUnlockRequest.status == "APPROVED",
+                    AttendanceUnlockRequest.expires_at > check_now,
+                )
+            ).scalar_one_or_none()
+            if active_req is not None:
+                return
+        except Exception as e:
+            logger.warning("Error checking AttendanceUnlockRequest: %s", e)
+
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=(
             f"Locked: session '{session_id}' is older than {int(LOCK_HOURS)} hours and can "
-            "no longer be edited. Only an administrator can override the lock."
+            "no longer be edited. You can submit an unlock request to the administrator."
         ),
     )
 

@@ -322,14 +322,18 @@ def _ensure_permission_requests_table(db: Session) -> None:
 
 @router.get(
     "/teachers",
-    summary="List all faculty teachers with assigned subjects and session stats",
-    description="ADMIN-only listing of all teacher accounts with assignments and session counts.",
+    summary="List all faculty teachers with assigned subjects, session stats, and complete profile details",
+    description="ADMIN-only listing of all teacher accounts with assignments, contact info, qualifications, and session counts.",
 )
 def list_teachers(
     current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     from app.db.models import Session as DbSession, TeacherSubject, User
+    import json
+    from app.routers.profile import _ensure_profile_table
+    _ensure_profile_table(db)
+
     users = db.query(User).filter(User.role == "FACULTY").all()
     result = []
     for u in users:
@@ -337,11 +341,74 @@ def list_teachers(
             ts.subject_code for ts in db.query(TeacherSubject).filter(TeacherSubject.user_id == u.user_id).all()
         ]
         s_count = db.query(func.count(DbSession.session_id)).filter(DbSession.teacher_id == u.user_id).scalar() or 0
+
+        # Pull complete profile details if available
+        prof_row = db.execute(
+            text("""
+                SELECT full_name, mobile, email, branch, designation, experience_years,
+                       qualifications, specialization, expertise, mastered_subjects, photo_url
+                FROM user_profiles WHERE user_id = :uid
+            """),
+            {"uid": u.user_id},
+        ).fetchone()
+
+        full_name = u.name or u.user_id
+        mobile = ""
+        prof_email = u.email
+        branch = ""
+        designation = "Faculty"
+        experience_years = 0
+        qualifications = ""
+        specialization = ""
+        expertise = []
+        mastered_subjects = []
+        photo_url = ""
+
+        if prof_row:
+            if prof_row[0]:
+                full_name = prof_row[0]
+            if prof_row[1]:
+                mobile = prof_row[1]
+            if prof_row[2]:
+                prof_email = prof_row[2]
+            if prof_row[3]:
+                branch = prof_row[3]
+            if prof_row[4]:
+                designation = prof_row[4]
+            if prof_row[5] is not None:
+                experience_years = prof_row[5]
+            if prof_row[6]:
+                qualifications = prof_row[6]
+            if prof_row[7]:
+                specialization = prof_row[7]
+            if prof_row[8]:
+                try:
+                    expertise = json.loads(prof_row[8]) if isinstance(prof_row[8], str) else prof_row[8]
+                except Exception:
+                    expertise = [prof_row[8]]
+            if prof_row[9]:
+                try:
+                    mastered_subjects = json.loads(prof_row[9]) if isinstance(prof_row[9], str) else prof_row[9]
+                except Exception:
+                    mastered_subjects = [prof_row[9]]
+            if prof_row[10]:
+                photo_url = prof_row[10]
+
         result.append({
             "user_id": u.user_id,
             "teacher_id": u.user_id,
-            "name": u.name or u.user_id,
+            "name": full_name,
             "email": u.email,
+            "profile_email": prof_email,
+            "mobile": mobile,
+            "branch": branch,
+            "designation": designation,
+            "experience_years": experience_years,
+            "qualifications": qualifications,
+            "specialization": specialization,
+            "expertise": expertise,
+            "mastered_subjects": mastered_subjects,
+            "photo_url": photo_url,
             "role": u.role,
             "is_active": u.is_active,
             "subject_codes": subjects,
@@ -349,6 +416,72 @@ def list_teachers(
             "created_at": u.created_at,
         })
     return {"items": result, "total": len(result)}
+
+
+@router.get(
+    "/teachers/{user_id}/profile",
+    summary="Get complete teacher profile details (Admin only)",
+    description="ADMIN-only endpoint to inspect full profile details of a specific faculty member.",
+)
+def get_teacher_profile(
+    user_id: str,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from app.db.models import User
+    import json
+    from app.routers.profile import _ensure_profile_table
+    _ensure_profile_table(db)
+
+    u = db.get(User, user_id.strip())
+    if u is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Teacher '{user_id}' not found.",
+        )
+
+    prof_row = db.execute(
+        text("""
+            SELECT full_name, mobile, email, branch, designation, experience_years,
+                   qualifications, specialization, expertise, mastered_subjects, photo_url, updated_at
+            FROM user_profiles WHERE user_id = :uid
+        """),
+        {"uid": u.user_id},
+    ).fetchone()
+
+    expertise = []
+    mastered_subjects = []
+    if prof_row:
+        if prof_row[8]:
+            try:
+                expertise = json.loads(prof_row[8]) if isinstance(prof_row[8], str) else prof_row[8]
+            except Exception:
+                expertise = [prof_row[8]]
+        if prof_row[9]:
+            try:
+                mastered_subjects = json.loads(prof_row[9]) if isinstance(prof_row[9], str) else prof_row[9]
+            except Exception:
+                mastered_subjects = [prof_row[9]]
+
+    return {
+        "user_id": u.user_id,
+        "name": u.name or u.user_id,
+        "email": u.email,
+        "role": u.role,
+        "is_active": u.is_active,
+        "fullName": prof_row[0] if prof_row and prof_row[0] else (u.name or u.user_id),
+        "mobile": prof_row[1] if prof_row and prof_row[1] else "",
+        "profileEmail": prof_row[2] if prof_row and prof_row[2] else u.email,
+        "branch": prof_row[3] if prof_row and prof_row[3] else "",
+        "designation": prof_row[4] if prof_row and prof_row[4] else "Faculty",
+        "experienceYears": prof_row[5] if prof_row and prof_row[5] is not None else 0,
+        "qualifications": prof_row[6] if prof_row and prof_row[6] else "",
+        "specialization": prof_row[7] if prof_row and prof_row[7] else "",
+        "expertise": expertise,
+        "masteredSubjects": mastered_subjects,
+        "photoUrl": prof_row[10] if prof_row and prof_row[10] else "",
+        "updatedAt": prof_row[11] if prof_row and prof_row[11] else u.created_at,
+    }
 
 
 @router.patch(

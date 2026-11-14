@@ -1282,3 +1282,62 @@ class ClassDelegation(Base):
         )
 
 
+class AttendanceUnlockRequest(Base):
+    """Teacher request to unlock an attendance session older than 24h for corrections."""
+
+    __tablename__ = "attendance_unlock_requests"
+
+    request_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    teacher_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    target_usns: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    requested_change: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    admin_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reviewed_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(50), nullable=False)
+    expires_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    session = relationship("Session", foreign_keys=[session_id])
+    teacher = relationship("User", foreign_keys=[teacher_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "teacher_id": self.teacher_id,
+            "reason": self.reason,
+            "target_usns": self.target_usns,
+            "requested_change": self.requested_change,
+            "status": self.status,
+            "admin_notes": self.admin_notes,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": self.reviewed_at,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"<AttendanceUnlockRequest(id={self.request_id!r}, "
+            f"session={self.session_id!r}, teacher={self.teacher_id!r}, "
+            f"status={self.status!r})>"
+        )
+
+
+

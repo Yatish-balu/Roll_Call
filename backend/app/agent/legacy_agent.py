@@ -90,6 +90,79 @@ def _is_cancellation_input(clean: str) -> bool:
     return False
 
 
+# ---------------------------------------------------------------------------
+# 5-Step Agentic Intent Decomposition & Spelling Normalizer
+# ---------------------------------------------------------------------------
+
+COMMON_TYPO_MAP = {
+    "attendence": "attendance",
+    "atendance": "attendance",
+    "attandance": "attendance",
+    "attendace": "attendance",
+    "presnt": "present",
+    "persent": "present",
+    "prsnt": "present",
+    "abscent": "absent",
+    "absnt": "absent",
+    "abset": "absent",
+    "techer": "teacher",
+    "techers": "teachers",
+    "taecher": "teacher",
+    "fakulty": "faculty",
+    "faculity": "faculty",
+    "substitue": "substitute",
+    "substitut": "substitute",
+    "subsitute": "substitute",
+    "timtable": "timetable",
+    "time table": "timetable",
+    "timetbl": "timetable",
+    "schedual": "schedule",
+    "schedul": "schedule",
+    "skedule": "schedule",
+    "defalters": "defaulters",
+    "defaluters": "defaulters",
+    "defaulter": "defaulters",
+    "shortge": "shortage",
+    "calender": "calendar",
+    "calander": "calendar",
+    "vacnt": "vacant",
+    "vacent": "vacant",
+    "clasroom": "classroom",
+    "clasrooms": "classrooms",
+    "roms": "rooms",
+    "sesion": "session",
+    "sesions": "sessions",
+    "sesson": "session",
+    "studnt": "student",
+    "studnts": "students",
+    "sumary": "summary",
+    "sumery": "summary",
+    "unrevewed": "unreviewed",
+    "unrevwd": "unreviewed",
+    "pendng": "pending",
+    "netwoeks": "networks",
+    "netwrok": "networks",
+    "netwroks": "networks",
+}
+
+
+def normalize_typos(text: str) -> str:
+    """Normalize common typos in user prompt into authoritative vocabulary."""
+    tokens = text.split()
+    normalized = []
+    for tok in tokens:
+        clean_tok = re.sub(r"[^\w-]", "", tok.lower())
+        if clean_tok in COMMON_TYPO_MAP:
+            replacement = COMMON_TYPO_MAP[clean_tok]
+            prefix = tok[:len(tok) - len(tok.lstrip(".,?!;:'\""))]
+            suffix = tok[len(tok.rstrip(".,?!;:'\"")):]
+            normalized.append(f"{prefix}{replacement}{suffix}")
+        else:
+            normalized.append(tok)
+    return " ".join(normalized)
+
+
+
 
 # ============================================================================
 # Tool Registry & Metadata
@@ -851,7 +924,9 @@ class AttendanceAgent:
                 default_branch=default_branch,
             )
 
-        clean = input_str.lower().strip()
+        # Step 1: Normalization & Typo Resolution
+        normalized_input = normalize_typos(input_str)
+        clean = normalized_input.lower().strip()
 
         # Human-in-the-loop: Check pending conversational proposal confirmation / cancellation first
         pending_action = self._get_pending_mutation()

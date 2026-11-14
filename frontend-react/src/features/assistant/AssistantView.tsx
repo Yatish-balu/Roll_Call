@@ -1603,27 +1603,7 @@ export function AssistantView() {
                   );
                 })()}
 
-                {/* Tool Call Audit Trace (if present) */}
-                {m.toolCalls && m.toolCalls.length > 0 && (
-                  <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 text-xs">
-                    <p className="font-bold uppercase tracking-wider text-[10px] text-[#77735F] mb-1">
-                      Invoked Tools & Safety Guardrails ({m.toolCalls.length})
-                    </p>
-                    <div className="space-y-1">
-                      {m.toolCalls.map((tc, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between font-mono text-[11px] bg-white/50 px-2 py-1 rounded-md"
-                        >
-                          <span className="text-[#3F451F] font-bold">
-                            {String(tc.tool_name || tc.tool || "database_tool")}
-                          </span>
-                          <span className="text-emerald-700">Executed OK</span>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                {/* Real-time suggested actions */}
 
                 {/* F11 — Photo Quality Gate Rejection Card (N9) */}
                 {m.qualityRejection && (

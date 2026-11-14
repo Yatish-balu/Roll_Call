@@ -15,8 +15,12 @@ import {
   fetchSessionAttendance,
   updateSessionAttendance,
   reconcileAttendance,
+  createAttendanceUnlockRequest,
+  fetchAttendanceUnlockRequests,
+  reviewAttendanceUnlockRequest,
   type AttendanceRecord,
   type AttendanceStatus,
+  type AttendanceUnlockRequest,
 } from "@/services/api/attendance";
 
 export function AttendanceView() {
@@ -39,6 +43,14 @@ export function AttendanceView() {
   const [reconcileTarget, setReconcileTarget] = useState<AttendanceRecord | null>(null);
   const [reconcileStatus, setReconcileStatus] = useState<AttendanceStatus>("PRESENT");
   const [isReconciling, setIsReconciling] = useState(false);
+
+  // Attendance Unlock Request (>24h edit permission) state
+  const [activeUnlockRequest, setActiveUnlockRequest] = useState<AttendanceUnlockRequest | null>(null);
+  const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
+  const [unlockReason, setUnlockReason] = useState("");
+  const [unlockTargetUsn, setUnlockTargetUsn] = useState("");
+  const [unlockChangeDesc, setUnlockChangeDesc] = useState("Mark Present due to medical / OD leave");
+  const [isSubmittingUnlock, setIsSubmittingUnlock] = useState(false);
 
   // Filter state
   const [searchQuery, setSearchQuery] = useState("");
@@ -174,6 +186,98 @@ export function AttendanceView() {
   const sessionRoom = sessionRooms[0] ?? "";
   const effectiveRoom = selectedRoomOverride || sessionRoom || "UNALLOCATED";
 
+  const isSessionLocked = useMemo(() => {
+    if (isAdmin) return false;
+    if (!activeSession) return false;
+    if (activeSession.created_at) {
+      const ageHours = (Date.now() - new Date(activeSession.created_at).getTime()) / (1000 * 60 * 60);
+      return ageHours > 24;
+    }
+    if (activeSession.date) {
+      const sessionDate = new Date(`${activeSession.date}T23:59:59Z`);
+      const ageHours = (Date.now() - sessionDate.getTime()) / (1000 * 60 * 60);
+      return ageHours > 24;
+    }
+    return false;
+  }, [activeSession, isAdmin]);
+
+  const isUnlockedByAdmin = useMemo(() => {
+    if (!activeUnlockRequest) return false;
+    if (activeUnlockRequest.status !== "APPROVED") return false;
+    if (!activeUnlockRequest.expires_at) return true;
+    return new Date(activeUnlockRequest.expires_at).getTime() > Date.now();
+  }, [activeUnlockRequest]);
+
+  // Load unlock request for current session
+  const refreshUnlockRequest = useCallback(async () => {
+    if (!selectedSessionId) {
+      setActiveUnlockRequest(null);
+      return;
+    }
+    try {
+      const reqs = await fetchAttendanceUnlockRequests({ session_id: selectedSessionId });
+      if (reqs && reqs.length > 0) {
+        setActiveUnlockRequest(reqs[0]);
+      } else {
+        setActiveUnlockRequest(null);
+      }
+    } catch {
+      setActiveUnlockRequest(null);
+    }
+  }, [selectedSessionId]);
+
+  useEffect(() => {
+    void refreshUnlockRequest();
+  }, [refreshUnlockRequest]);
+
+  const handleRequestUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedSessionId || !unlockReason.trim()) return;
+    setIsSubmittingUnlock(true);
+    try {
+      const req = await createAttendanceUnlockRequest({
+        session_id: selectedSessionId,
+        reason: unlockReason.trim(),
+        target_usns: unlockTargetUsn.trim() ? [unlockTargetUsn.trim().toUpperCase()] : undefined,
+        requested_change: unlockChangeDesc.trim() || undefined,
+      });
+      setActiveUnlockRequest(req);
+      setIsUnlockModalOpen(false);
+      setUnlockReason("");
+      setUnlockTargetUsn("");
+      setStatusMessage({
+        type: "success",
+        text: "Permission request submitted to administrator successfully.",
+      });
+    } catch (err: unknown) {
+      setStatusMessage({
+        type: "error",
+        text: formatApiError(err),
+      });
+    } finally {
+      setIsSubmittingUnlock(false);
+    }
+  };
+
+  const handleReviewRequest = async (requestId: string, decision: "APPROVED" | "REJECTED") => {
+    try {
+      const updated = await reviewAttendanceUnlockRequest(requestId, {
+        decision,
+        unlock_hours: 24,
+      });
+      setActiveUnlockRequest(updated);
+      setStatusMessage({
+        type: "success",
+        text: decision === "APPROVED" ? "Session unlocked for teacher edits (24h)." : "Unlock request rejected.",
+      });
+    } catch (err: unknown) {
+      setStatusMessage({
+        type: "error",
+        text: formatApiError(err),
+      });
+    }
+  };
+
   // Attendance counts
   const counts = useMemo(() => {
     let present = 0;
@@ -206,6 +310,13 @@ export function AttendanceView() {
       });
       return;
     }
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Please request permission from the administrator to make changes.",
+      });
+      return;
+    }
     setAttendanceRecords((prev) =>
       prev.map((rec) => (rec.usn === usn ? { ...rec, status: nextStatus } : rec))
     );
@@ -216,6 +327,13 @@ export function AttendanceView() {
   // Initialize roster from enrolled students
   const handleInitializeRoster = async () => {
     if (!canMarkAttendance || !selectedSessionId || isInitializing) return;
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Request permission from an admin to initialize or edit the roster.",
+      });
+      return;
+    }
     setIsInitializing(true);
     setStatusMessage(null);
     try {
@@ -248,6 +366,13 @@ export function AttendanceView() {
   // Mark all present
   const handleMarkAllPresent = () => {
     if (!canMarkAttendance) return;
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Request permission from an admin to edit marks.",
+      });
+      return;
+    }
     setAttendanceRecords((prev) =>
       prev.map((rec) => ({ ...rec, status: "PRESENT" }))
     );
@@ -260,6 +385,13 @@ export function AttendanceView() {
   // Save changes to backend
   const handleSaveChanges = async () => {
     if (!canMarkAttendance || !selectedSessionId || isSaving) return;
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Submit an unlock request to the administrator to save changes.",
+      });
+      return;
+    }
     if (attendanceRecords.length === 0) {
       setStatusMessage({
         type: "error",
@@ -526,6 +658,77 @@ export function AttendanceView() {
             <p className="text-xl sm:text-2xl font-black text-[#3F451F]">{counts.unreviewed}</p>
           </div>
         </div>
+
+        {/* 24-Hour Edit Lock & Permission Request Banner */}
+        {isSessionLocked && (
+          <div
+            className={`p-4 rounded-xl border flex items-center justify-between gap-4 flex-wrap text-xs ${
+              isUnlockedByAdmin
+                ? "bg-emerald-50 border-emerald-300 text-emerald-950"
+                : activeUnlockRequest?.status === "PENDING"
+                ? "bg-amber-50 border-amber-300 text-amber-950"
+                : "bg-rose-50 border-rose-300 text-rose-950"
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-xl">
+                {isUnlockedByAdmin ? "🔓" : activeUnlockRequest?.status === "PENDING" ? "⏳" : "🔒"}
+              </span>
+              <div>
+                <h4 className="font-bold text-xs sm:text-sm">
+                  {isUnlockedByAdmin
+                    ? `Admin Override Active (Unlocked until ${
+                        activeUnlockRequest?.expires_at
+                          ? new Date(activeUnlockRequest.expires_at).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : "end of window"
+                      })`
+                    : activeUnlockRequest?.status === "PENDING"
+                    ? "Edit Permission Request Pending Admin Review"
+                    : "Session Locked (>24 Hours Old)"}
+                </h4>
+                <p className="text-xs opacity-90 mt-0.5 max-w-xl">
+                  {isUnlockedByAdmin
+                    ? "You have temporary authorization from the administrator to modify and save attendance records."
+                    : activeUnlockRequest?.status === "PENDING"
+                    ? `Submitted on ${activeUnlockRequest.created_at.slice(0, 10)}: "${activeUnlockRequest.reason}"`
+                    : "Teacher editing is restricted after 24 hours of class. Submit a permission request to the administrator to unlock changes."}
+                </p>
+              </div>
+            </div>
+
+            {!isAdmin && !isUnlockedByAdmin && activeUnlockRequest?.status !== "PENDING" && (
+              <button
+                type="button"
+                onClick={() => setIsUnlockModalOpen(true)}
+                className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs shadow-xs transition-all cursor-pointer whitespace-nowrap"
+              >
+                📨 Request Permission from Admin
+              </button>
+            )}
+
+            {isAdmin && activeUnlockRequest?.status === "PENDING" && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleReviewRequest(activeUnlockRequest.request_id, "APPROVED")}
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs shadow-xs transition-all cursor-pointer"
+                >
+                  ✅ Approve (24h)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleReviewRequest(activeUnlockRequest.request_id, "REJECTED")}
+                  className="px-3.5 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white font-bold text-xs shadow-xs transition-all cursor-pointer"
+                >
+                  ❌ Reject
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Filter and Search Bar */}
@@ -771,6 +974,90 @@ export function AttendanceView() {
                   className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   {isReconciling ? "Reconciling..." : "Confirm Reconciliation"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Attendance Unlock Request Modal (>24h Permission) */}
+      {isUnlockModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-lg w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-[#E4DDCA]">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">📨</span>
+                <h3 className="text-base font-bold text-[#24251C]">Request Attendance Edit Permission</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsUnlockModalOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-[#77735F]">
+              Session <span className="font-mono font-bold text-[#24251C]">{selectedSessionId}</span> is older than 24 hours. Submit a formal change request to the administrator with the justification.
+            </p>
+
+            <form onSubmit={handleRequestUnlock} className="space-y-3.5 text-xs sm:text-sm">
+              <div>
+                <label className="block font-bold text-[#24251C] mb-1">
+                  Reason for Modification *
+                </label>
+                <textarea
+                  value={unlockReason}
+                  onChange={(e) => setUnlockReason(e.target.value)}
+                  placeholder="e.g. Medical certificate verified for absent student, late OD duty approval, or optical reconciliation discrepancy"
+                  required
+                  rows={3}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-[#24251C] mb-1">
+                  Affected Student USN (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={unlockTargetUsn}
+                  onChange={(e) => setUnlockTargetUsn(e.target.value)}
+                  placeholder="e.g. 1DS24CY015"
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-[#24251C] mb-1">
+                  Requested Change / Action
+                </label>
+                <input
+                  type="text"
+                  value={unlockChangeDesc}
+                  onChange={(e) => setUnlockChangeDesc(e.target.value)}
+                  placeholder="e.g. Mark Present due to medical / OD leave"
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setIsUnlockModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] font-semibold text-xs transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingUnlock || !unlockReason.trim()}
+                  className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  {isSubmittingUnlock ? "Submitting..." : "Send Request to Admin"}
                 </button>
               </div>
             </form>

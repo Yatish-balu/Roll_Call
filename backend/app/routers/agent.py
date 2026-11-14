@@ -731,7 +731,7 @@ def agent_confirm(
     # chat text or the LLM output.
     assert_session_edit_authorized(current_user, session, db)
     # N5: the 24-hour lock applies to this write path too (admin is never locked).
-    assert_session_edit_unlocked(current_user, session)
+    assert_session_edit_unlocked(current_user, session, db=db)
 
     if not payload.records:
         raise HTTPException(

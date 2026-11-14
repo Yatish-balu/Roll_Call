@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import json
+import uuid
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -15,7 +18,7 @@ from app.auth.session_scope import resolve_data_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
-from app.db.models import Attendance
+from app.db.models import Attendance, AttendanceUnlockRequest, User
 from app.schemas.attendance import (
     AttendanceBulkCreate,
     AttendanceCorrectionRequest,
@@ -25,6 +28,9 @@ from app.schemas.attendance import (
     AttendanceResponse,
     AttendanceUndoRequest,
     AttendanceUndoResponse,
+    AttendanceUnlockRequestCreate,
+    AttendanceUnlockRequestResponse,
+    AttendanceUnlockRequestReview,
     BulkReconcileRequest,
     ReconcileRequest,
     SessionReconcilePayload,
@@ -144,7 +150,7 @@ def _assert_session_editable(
                 ),
             )
         return
-    assert_session_edit_unlocked(current_user, session)
+    assert_session_edit_unlocked(current_user, session, db=db)
 
 
 def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
@@ -973,4 +979,147 @@ def undo_single_attendance_generic(
         actor_role=actor_role,
         expected_version=payload.expected_version,
     )
+
+
+# ---------------------------------------------------------------------------
+# Attendance Unlock Requests (>24 Hours Teacher Permission)
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/unlock-requests",
+    response_model=AttendanceUnlockRequestResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit permission request to unlock attendance session older than 24h",
+)
+def create_unlock_request(
+    payload: AttendanceUnlockRequestCreate,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Teacher requests admin permission to edit attendance for a locked session (>24h)."""
+    session = _verify_session_exists(db, payload.session_id)
+    _assert_session_ownership(current_user, session, db)
+
+    # Check for existing pending request
+    existing = db.execute(
+        select(AttendanceUnlockRequest).where(
+            AttendanceUnlockRequest.session_id == payload.session_id,
+            AttendanceUnlockRequest.teacher_id == current_user.user_id,
+            AttendanceUnlockRequest.status == "PENDING",
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A pending unlock request for this session is already awaiting admin review.",
+        )
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    req_id = f"ULR-{uuid.uuid4().hex[:12].upper()}"
+    target_usns_str = json.dumps(payload.target_usns) if payload.target_usns else None
+
+    unlock_req = AttendanceUnlockRequest(
+        request_id=req_id,
+        session_id=payload.session_id,
+        teacher_id=current_user.user_id,
+        reason=payload.reason.strip(),
+        target_usns=target_usns_str,
+        requested_change=payload.requested_change.strip() if payload.requested_change else None,
+        status="PENDING",
+        created_at=now_iso,
+    )
+    db.add(unlock_req)
+    db.commit()
+    db.refresh(unlock_req)
+
+    teacher_user = db.get(User, current_user.user_id)
+    return {
+        **unlock_req.to_dict(),
+        "teacher_name": teacher_user.name if teacher_user else current_user.user_id,
+        "teacher_email": teacher_user.email if teacher_user else None,
+    }
+
+
+@router.get(
+    "/unlock-requests",
+    response_model=List[AttendanceUnlockRequestResponse],
+    summary="List attendance unlock requests for admin or current teacher",
+)
+def list_unlock_requests(
+    session_id: Optional[str] = Query(None, description="Filter by session ID"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status (PENDING, APPROVED, REJECTED)"),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN, Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """List unlock requests. Faculty only see their own requests; Admin sees all."""
+    stmt = select(AttendanceUnlockRequest).order_by(AttendanceUnlockRequest.created_at.desc())
+    if current_user.role != Role.ADMIN:
+        stmt = stmt.where(AttendanceUnlockRequest.teacher_id == current_user.user_id)
+    if session_id:
+        stmt = stmt.where(AttendanceUnlockRequest.session_id == session_id.strip())
+    if status_filter:
+        stmt = stmt.where(AttendanceUnlockRequest.status == status_filter.strip().upper())
+
+    results = []
+    for req in db.execute(stmt).scalars().all():
+        teacher_name = None
+        teacher_email = None
+        if req.teacher:
+            teacher_name = req.teacher.name
+            teacher_email = req.teacher.email
+        results.append({
+            **req.to_dict(),
+            "teacher_name": teacher_name,
+            "teacher_email": teacher_email,
+        })
+    return results
+
+
+@router.post(
+    "/unlock-requests/{request_id}/review",
+    response_model=AttendanceUnlockRequestResponse,
+    summary="Admin review (approve/reject) of attendance unlock request",
+)
+def review_unlock_request(
+    request_id: str,
+    payload: AttendanceUnlockRequestReview,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Admin approves or rejects teacher attendance unlock request with optional unlocked duration."""
+    req = db.get(AttendanceUnlockRequest, request_id.strip())
+    if req is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unlock request '{request_id}' not found.",
+        )
+    if req.status != "PENDING":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unlock request '{request_id}' has already been reviewed (current status: {req.status}).",
+        )
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    req.status = payload.decision
+    req.admin_notes = payload.admin_notes.strip() if payload.admin_notes else None
+    req.reviewed_by = current_user.user_id
+    req.reviewed_at = now_iso
+
+    if payload.decision == "APPROVED":
+        hours = payload.unlock_hours or 24
+        expires = now + timedelta(hours=hours)
+        req.expires_at = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    db.commit()
+    db.refresh(req)
+
+    teacher_name = req.teacher.name if req.teacher else None
+    teacher_email = req.teacher.email if req.teacher else None
+    return {
+        **req.to_dict(),
+        "teacher_name": teacher_name,
+        "teacher_email": teacher_email,
+    }
+
 
