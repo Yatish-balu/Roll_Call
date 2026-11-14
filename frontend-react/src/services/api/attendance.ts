@@ -131,6 +131,8 @@ export async function reconcileAttendance(
 export interface AttendanceUnlockRequest {
   request_id: string;
   session_id: string;
+  subject_code?: string | null;
+  session_date?: string | null;
   teacher_id: string;
   teacher_name?: string | null;
   teacher_email?: string | null;

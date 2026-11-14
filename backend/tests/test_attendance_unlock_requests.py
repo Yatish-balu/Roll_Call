@@ -94,6 +94,8 @@ def test_unlock_request_workflow(auth_tokens):
     assert data["session_id"] == "SESS-LOCKED-001"
     assert data["status"] == "PENDING"
     assert data["teacher_id"] == "teacher_test_ulr"
+    assert data["subject_code"] == "CN"
+    assert data["session_date"] == "2026-11-10"
     req_id = data["request_id"]
 
     # 2. Duplicate submission blocked with 409

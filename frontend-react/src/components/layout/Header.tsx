@@ -6,6 +6,10 @@ import {
   fetchSessionAllocations,
   type SessionAllocation,
 } from "@/services/api/sessions";
+import {
+  fetchAttendanceUnlockRequests,
+  reviewAttendanceUnlockRequest,
+} from "@/services/api/attendance";
 import { todayIso } from "@/lib/schedule";
 
 interface HeaderProps {
@@ -20,6 +24,9 @@ interface NotificationItem {
   time: string;
   read: boolean;
   type: "success" | "warning" | "info";
+  unlockRequestId?: string;
+  sessionId?: string;
+  actionRequired?: boolean;
 }
 
 export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
@@ -29,6 +36,7 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
   const [showProfile, setShowProfile] = useState(false);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [isLoadingNotifications, setIsLoadingNotifications] = useState(false);
+  const [reviewingId, setReviewingId] = useState<string | null>(null);
 
   const notifRef = useRef<HTMLDivElement>(null);
   const profileRef = useRef<HTMLDivElement>(null);
@@ -68,13 +76,78 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
   };
 
   /**
-   * Notifications are derived from the real backend state (today's class slots
-   * and the session initialisation status). Nothing is invented.
+   * Notifications are derived from the real backend state:
+   * - Today's class slots & initialisation status
+   * - Teacher attendance unlock permission requests (for Admin to review)
+   * - Status outcome alerts of unlock requests (for Faculty)
    */
   const loadNotifications = React.useCallback(async () => {
     setIsLoadingNotifications(true);
     const today = todayIso();
     const items: NotificationItem[] = [];
+
+    // 1. Fetch attendance unlock permission requests
+    try {
+      if (isAdmin) {
+        // Admin sees all PENDING unlock requests from teachers
+        const unlockReqs = await fetchAttendanceUnlockRequests({ status: "PENDING" });
+        unlockReqs.forEach((req) => {
+          items.push({
+            id: `unlock-${req.request_id}`,
+            title: `🔒 Permission Request: ${req.teacher_name || req.teacher_id}`,
+            description: `${req.subject_code ? `${req.subject_code} (${req.session_date || "Session"})` : `Session ${req.session_id.slice(0, 16)}`} • "${req.reason}"${req.target_usns ? ` • Target: ${req.target_usns}` : ""}`,
+            time: req.created_at ? req.created_at.slice(0, 10) : "Pending",
+            read: false,
+            type: "warning",
+            unlockRequestId: req.request_id,
+            sessionId: req.session_id,
+            actionRequired: true,
+          });
+        });
+      } else {
+        // Teachers see the status of their submitted requests
+        const myRequests = await fetchAttendanceUnlockRequests();
+        myRequests.slice(0, 5).forEach((req) => {
+          if (req.status === "APPROVED") {
+            items.push({
+              id: `unlock-${req.request_id}`,
+              title: `✅ Permission Granted: ${req.subject_code || "Session"}`,
+              description: `Admin approved your edit request. Session unlocked until ${
+                req.expires_at
+                  ? new Date(req.expires_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                  : "tomorrow"
+              }.`,
+              time: req.reviewed_at ? req.reviewed_at.slice(0, 10) : "Today",
+              read: false,
+              type: "success",
+              sessionId: req.session_id,
+            });
+          } else if (req.status === "REJECTED") {
+            items.push({
+              id: `unlock-${req.request_id}`,
+              title: `❌ Permission Denied: ${req.subject_code || "Session"}`,
+              description: `Admin declined your edit request${req.admin_notes ? `: "${req.admin_notes}"` : "."}`,
+              time: req.reviewed_at ? req.reviewed_at.slice(0, 10) : "Today",
+              read: false,
+              type: "warning",
+              sessionId: req.session_id,
+            });
+          } else if (req.status === "PENDING") {
+            items.push({
+              id: `unlock-${req.request_id}`,
+              title: `⏳ Permission Pending: ${req.subject_code || "Session"}`,
+              description: `Awaiting admin approval: "${req.reason}".`,
+              time: req.created_at ? req.created_at.slice(0, 10) : "Pending",
+              read: true,
+              type: "info",
+              sessionId: req.session_id,
+            });
+          }
+        });
+      }
+    } catch {
+      // Ignore if unlock requests endpoint fails temporarily
+    }
 
     try {
       const allocations = await fetchSessionAllocations({ date: today });
@@ -125,11 +198,43 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
 
     setNotifications(items);
     setIsLoadingNotifications(false);
-  }, []);
+  }, [isAdmin]);
 
   useEffect(() => {
     void loadNotifications();
+    const handleSync = () => {
+      void loadNotifications();
+    };
+    window.addEventListener("rollcall-unlock-request-updated", handleSync);
+    window.addEventListener("rollcall-attendance-updated", handleSync);
+    return () => {
+      window.removeEventListener("rollcall-unlock-request-updated", handleSync);
+      window.removeEventListener("rollcall-attendance-updated", handleSync);
+    };
   }, [loadNotifications]);
+
+  const handleReviewFromNotification = async (
+    requestId: string,
+    decision: "APPROVED" | "REJECTED",
+    e: React.MouseEvent
+  ) => {
+    e.stopPropagation();
+    setReviewingId(requestId);
+    try {
+      await reviewAttendanceUnlockRequest(requestId, {
+        decision,
+        unlock_hours: 24,
+        admin_notes: decision === "APPROVED" ? "Approved via Quick Notification" : "Rejected via Quick Notification",
+      });
+      window.dispatchEvent(new CustomEvent("rollcall-unlock-request-updated"));
+      window.dispatchEvent(new CustomEvent("rollcall-attendance-updated"));
+      await loadNotifications();
+    } catch (err) {
+      console.error("Failed to review unlock request from notification:", err);
+    } finally {
+      setReviewingId(null);
+    }
+  };
 
   const handleSignOut = async () => {
     setShowProfile(false);
@@ -247,23 +352,64 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
                   notifications.map((item) => (
                     <div
                       key={item.id}
+                      onClick={() => {
+                        if (item.sessionId) {
+                          setShowNotifications(false);
+                          navigate(`/attendance?sessionId=${encodeURIComponent(item.sessionId)}`);
+                        }
+                      }}
                       className={`p-3.5 transition-colors ${
                         item.read ? "bg-[#FBF8F0]" : "bg-[#EDE8D8]/30 font-medium"
-                      } hover:bg-[#EDE8D8]/60`}
+                      } hover:bg-[#EDE8D8]/60 ${item.sessionId ? "cursor-pointer" : ""}`}
                     >
                       <div className="flex items-start justify-between gap-2">
-                        <div className="space-y-1">
+                        <div className="space-y-1 flex-1">
                           <div className="flex items-center space-x-1.5">
                             {!item.read && (
-                              <span className="w-1.5 h-1.5 rounded-full bg-[#E06D20]" />
+                              <span className="w-1.5 h-1.5 rounded-full bg-[#E06D20] shrink-0" />
                             )}
                             <p className="text-xs font-bold text-[#24251C]">{item.title}</p>
                           </div>
                           <p className="text-[11px] text-[#77735F] leading-relaxed">
                             {item.description}
                           </p>
+
+                          {/* Quick Actions for Admin on Pending Permission Requests */}
+                          {item.actionRequired && item.unlockRequestId && (
+                            <div className="mt-2.5 pt-2 border-t border-[#E4DDCA]/60 flex items-center gap-2 flex-wrap">
+                              <button
+                                type="button"
+                                disabled={reviewingId === item.unlockRequestId}
+                                onClick={(e) => handleReviewFromNotification(item.unlockRequestId!, "APPROVED", e)}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-[10px] shadow-2xs transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                {reviewingId === item.unlockRequestId ? "Approving..." : "✅ Approve (24h)"}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={reviewingId === item.unlockRequestId}
+                                onClick={(e) => handleReviewFromNotification(item.unlockRequestId!, "REJECTED", e)}
+                                className="px-2.5 py-1 rounded-lg bg-stone-200 hover:bg-rose-100 text-stone-700 hover:text-rose-800 font-bold text-[10px] transition-all cursor-pointer disabled:opacity-50"
+                              >
+                                ❌ Reject
+                              </button>
+                              {item.sessionId && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setShowNotifications(false);
+                                    navigate(`/attendance?sessionId=${encodeURIComponent(item.sessionId!)}`);
+                                  }}
+                                  className="ml-auto text-[10px] font-bold text-[#6C5119] hover:underline cursor-pointer"
+                                >
+                                  View Session →
+                                </button>
+                              )}
+                            </div>
+                          )}
                         </div>
-                        <span className="text-[10px] text-[#77735F]/80 whitespace-nowrap">
+                        <span className="text-[10px] text-[#77735F]/80 whitespace-nowrap shrink-0">
                           {item.time}
                         </span>
                       </div>

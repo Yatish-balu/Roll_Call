@@ -18,7 +18,7 @@ from app.auth.session_scope import resolve_data_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
-from app.db.models import Attendance, AttendanceUnlockRequest, User
+from app.db.models import Attendance, AttendanceUnlockRequest, Session as DbSession, User
 from app.schemas.attendance import (
     AttendanceBulkCreate,
     AttendanceCorrectionRequest,
@@ -1033,10 +1033,13 @@ def create_unlock_request(
     db.refresh(unlock_req)
 
     teacher_user = db.get(User, current_user.user_id)
+    target_session = db.get(DbSession, payload.session_id.strip())
     return {
         **unlock_req.to_dict(),
         "teacher_name": teacher_user.name if teacher_user else current_user.user_id,
         "teacher_email": teacher_user.email if teacher_user else None,
+        "subject_code": target_session.subject_code if target_session else None,
+        "session_date": target_session.date if target_session else None,
     }
 
 
@@ -1067,10 +1070,14 @@ def list_unlock_requests(
         if req.teacher:
             teacher_name = req.teacher.name
             teacher_email = req.teacher.email
+        subject_code = req.session.subject_code if req.session else None
+        session_date = req.session.date if req.session else None
         results.append({
             **req.to_dict(),
             "teacher_name": teacher_name,
             "teacher_email": teacher_email,
+            "subject_code": subject_code,
+            "session_date": session_date,
         })
     return results
 
@@ -1116,10 +1123,14 @@ def review_unlock_request(
 
     teacher_name = req.teacher.name if req.teacher else None
     teacher_email = req.teacher.email if req.teacher else None
+    subject_code = req.session.subject_code if req.session else None
+    session_date = req.session.date if req.session else None
     return {
         **req.to_dict(),
         "teacher_name": teacher_name,
         "teacher_email": teacher_email,
+        "subject_code": subject_code,
+        "session_date": session_date,
     }
 
 

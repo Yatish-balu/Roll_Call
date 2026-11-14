@@ -46,6 +46,7 @@ export function AttendanceView() {
 
   // Attendance Unlock Request (>24h edit permission) state
   const [activeUnlockRequest, setActiveUnlockRequest] = useState<AttendanceUnlockRequest | null>(null);
+  const [pendingAdminRequests, setPendingAdminRequests] = useState<AttendanceUnlockRequest[]>([]);
   const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
   const [unlockReason, setUnlockReason] = useState("");
   const [unlockTargetUsn, setUnlockTargetUsn] = useState("");
@@ -226,9 +227,33 @@ export function AttendanceView() {
     }
   }, [selectedSessionId]);
 
+  // Load all pending unlock requests for administrator
+  const loadPendingAdminRequests = useCallback(async () => {
+    if (!isAdmin) {
+      setPendingAdminRequests([]);
+      return;
+    }
+    try {
+      const pending = await fetchAttendanceUnlockRequests({ status: "PENDING" });
+      setPendingAdminRequests(pending || []);
+    } catch {
+      setPendingAdminRequests([]);
+    }
+  }, [isAdmin]);
+
   useEffect(() => {
     void refreshUnlockRequest();
-  }, [refreshUnlockRequest]);
+    void loadPendingAdminRequests();
+
+    const handleSync = () => {
+      void refreshUnlockRequest();
+      void loadPendingAdminRequests();
+    };
+    window.addEventListener("rollcall-unlock-request-updated", handleSync);
+    return () => {
+      window.removeEventListener("rollcall-unlock-request-updated", handleSync);
+    };
+  }, [refreshUnlockRequest, loadPendingAdminRequests]);
 
   const handleRequestUnlock = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -249,6 +274,7 @@ export function AttendanceView() {
         type: "success",
         text: "Permission request submitted to administrator successfully.",
       });
+      window.dispatchEvent(new CustomEvent("rollcall-unlock-request-updated"));
     } catch (err: unknown) {
       setStatusMessage({
         type: "error",
@@ -270,6 +296,9 @@ export function AttendanceView() {
         type: "success",
         text: decision === "APPROVED" ? "Session unlocked for teacher edits (24h)." : "Unlock request rejected.",
       });
+      window.dispatchEvent(new CustomEvent("rollcall-unlock-request-updated"));
+      window.dispatchEvent(new CustomEvent("rollcall-attendance-updated"));
+      void loadPendingAdminRequests();
     } catch (err: unknown) {
       setStatusMessage({
         type: "error",
@@ -659,24 +688,80 @@ export function AttendanceView() {
           </div>
         </div>
 
+        {/* Admin Overview Banner of Pending Unlock Requests Across All Sessions */}
+        {isAdmin && pendingAdminRequests.length > 0 && (
+          <div className="p-3.5 rounded-xl bg-amber-50 border-2 border-amber-300 text-amber-950 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2.5">
+              <span className="text-xl">🔔</span>
+              <div>
+                <h4 className="font-bold text-xs sm:text-sm">
+                  {pendingAdminRequests.length} Teacher Edit Permission Request{pendingAdminRequests.length > 1 ? "s" : ""} Pending Review
+                </h4>
+                <p className="text-[11px] text-amber-900/80">
+                  Select a session below to review justification and grant or deny 24-hour temporary edit access.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {pendingAdminRequests.map((req) => (
+                <button
+                  key={req.request_id}
+                  type="button"
+                  onClick={() => setSelectedSessionId(req.session_id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    selectedSessionId === req.session_id
+                      ? "bg-amber-700 text-white shadow-xs"
+                      : "bg-white border border-amber-300 text-amber-900 hover:bg-amber-100"
+                  }`}
+                >
+                  Review {req.subject_code || "Session"} ({req.teacher_name || req.teacher_id}) →
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* 24-Hour Edit Lock & Permission Request Banner */}
-        {isSessionLocked && (
+        {(isSessionLocked || Boolean(activeUnlockRequest)) && (
           <div
             className={`p-4 rounded-xl border flex items-center justify-between gap-4 flex-wrap text-xs ${
               isUnlockedByAdmin
                 ? "bg-emerald-50 border-emerald-300 text-emerald-950"
                 : activeUnlockRequest?.status === "PENDING"
                 ? "bg-amber-50 border-amber-300 text-amber-950"
+                : activeUnlockRequest?.status === "REJECTED"
+                ? "bg-stone-100 border-stone-300 text-stone-800"
                 : "bg-rose-50 border-rose-300 text-rose-950"
             }`}
           >
             <div className="flex items-center gap-3">
               <span className="text-xl">
-                {isUnlockedByAdmin ? "🔓" : activeUnlockRequest?.status === "PENDING" ? "⏳" : "🔒"}
+                {isUnlockedByAdmin
+                  ? "🔓"
+                  : activeUnlockRequest?.status === "PENDING"
+                  ? "⏳"
+                  : activeUnlockRequest?.status === "REJECTED"
+                  ? "❌"
+                  : "🔒"}
               </span>
               <div>
                 <h4 className="font-bold text-xs sm:text-sm">
-                  {isUnlockedByAdmin
+                  {isAdmin
+                    ? activeUnlockRequest?.status === "PENDING"
+                      ? `Teacher Edit Permission Request · ${activeUnlockRequest.teacher_name || activeUnlockRequest.teacher_id}`
+                      : isUnlockedByAdmin
+                      ? `Teacher Temporary Unlock Active (Expires ${
+                          activeUnlockRequest?.expires_at
+                            ? new Date(activeUnlockRequest.expires_at).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
+                            : "end of window"
+                        })`
+                      : activeUnlockRequest?.status === "REJECTED"
+                      ? "Teacher Edit Request Declined"
+                      : "Session Older Than 24h"
+                    : isUnlockedByAdmin
                     ? `Admin Override Active (Unlocked until ${
                         activeUnlockRequest?.expires_at
                           ? new Date(activeUnlockRequest.expires_at).toLocaleTimeString([], {
@@ -687,13 +772,25 @@ export function AttendanceView() {
                       })`
                     : activeUnlockRequest?.status === "PENDING"
                     ? "Edit Permission Request Pending Admin Review"
+                    : activeUnlockRequest?.status === "REJECTED"
+                    ? "Edit Permission Declined by Admin"
                     : "Session Locked (>24 Hours Old)"}
                 </h4>
                 <p className="text-xs opacity-90 mt-0.5 max-w-xl">
-                  {isUnlockedByAdmin
+                  {isAdmin
+                    ? activeUnlockRequest?.status === "PENDING"
+                      ? `Submitted on ${activeUnlockRequest.created_at.slice(0, 10)}: "${activeUnlockRequest.reason}"${
+                          activeUnlockRequest.target_usns ? ` • Target: ${activeUnlockRequest.target_usns}` : ""
+                        }${activeUnlockRequest.requested_change ? ` • Change: ${activeUnlockRequest.requested_change}` : ""}`
+                      : isUnlockedByAdmin
+                      ? "The teacher currently has active override authorization to edit attendance."
+                      : "Administrative master view."
+                    : isUnlockedByAdmin
                     ? "You have temporary authorization from the administrator to modify and save attendance records."
                     : activeUnlockRequest?.status === "PENDING"
                     ? `Submitted on ${activeUnlockRequest.created_at.slice(0, 10)}: "${activeUnlockRequest.reason}"`
+                    : activeUnlockRequest?.status === "REJECTED"
+                    ? `Administrator declined the request${activeUnlockRequest.admin_notes ? `: "${activeUnlockRequest.admin_notes}"` : "."}`
                     : "Teacher editing is restricted after 24 hours of class. Submit a permission request to the administrator to unlock changes."}
                 </p>
               </div>

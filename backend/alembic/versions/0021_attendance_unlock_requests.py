@@ -79,3 +79,4 @@ def downgrade() -> None:
             table_name="attendance_unlock_requests",
         )
         op.drop_table("attendance_unlock_requests")
+

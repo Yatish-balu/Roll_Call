@@ -216,6 +216,8 @@ class AttendanceUnlockRequestResponse(BaseModel):
     """Schema for returning attendance unlock request records."""
     request_id: str
     session_id: str
+    subject_code: Optional[str] = None
+    session_date: Optional[str] = None
     teacher_id: str
     teacher_name: Optional[str] = None
     teacher_email: Optional[str] = None

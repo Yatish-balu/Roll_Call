@@ -6,6 +6,7 @@ import { TopStats } from "./components/TopStats";
 import { TodaysClasses } from "./components/TodaysClasses";
 import { AiAssistantCard } from "./components/AiAssistantCard";
 import { TodaysSummary } from "./components/TodaysSummary";
+import { PendingUnlockRequestsBanner } from "./components/PendingUnlockRequestsBanner";
 import { useAuth } from "@/hooks/useAuth";
 import { todayIso } from "@/lib/schedule";
 
@@ -97,6 +98,9 @@ export function DashboardView() {
           </button>
         </div>
       )}
+
+      {/* Admin Action Required: Pending Teacher Permission Requests */}
+      <PendingUnlockRequestsBanner isAdmin={isAdmin} />
 
       {/* Row 1: KPI Statistics Ribbon */}
       <TopStats
