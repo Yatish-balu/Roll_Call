@@ -107,3 +107,20 @@ export async function updateTimetableEntry(
 export async function deleteTimetableEntry(entryId: string): Promise<void> {
   await apiClient.delete<void>(`/api/v1/timetable/entries/${encodeURIComponent(entryId)}`);
 }
+
+export interface MasterTimetableSlotInput {
+  day: string;
+  start_time: string;
+  end_time: string;
+  subject_code: string;
+  room_id?: string;
+  session_type?: "THEORY" | "LAB";
+}
+
+export async function bulkAssignMasterTimetable(slots: MasterTimetableSlotInput[]): Promise<{
+  processed_slots: number;
+  teachers_updated: string[];
+  subjects_found: string[];
+}> {
+  return apiClient.post("/api/v1/admin/timetable/bulk-assign", { slots });
+}

@@ -10,6 +10,8 @@ import {
   fetchPermissionRequests,
   reviewPermissionRequest,
   submitPermissionRequest,
+  createTeacherAccount,
+  toggleTeacherActive,
   type TeacherSubjectMapping,
   type AdminTeacherItem,
   type PermissionRequestItem,
@@ -108,6 +110,24 @@ export function FacultyView() {
 
   // Reviewing a Request
   const [reviewingId, setReviewingId] = useState<string | null>(null);
+
+  // Add New Teacher Modal
+  const [isAddTeacherOpen, setIsAddTeacherOpen] = useState(false);
+  const [addTeacherForm, setAddTeacherForm] = useState({
+    user_id: "",
+    name: "",
+    email: "",
+    password: "",
+    branch: "",
+    designation: "",
+    department: "",
+  });
+  const [showAddPassword, setShowAddPassword] = useState(false);
+  const [isSubmittingAddTeacher, setIsSubmittingAddTeacher] = useState(false);
+  const [addTeacherError, setAddTeacherError] = useState<string | null>(null);
+
+  // Toggle active tracking (userId → loading)
+  const [togglingActiveId, setTogglingActiveId] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
     setIsLoading(true);
@@ -273,6 +293,62 @@ export function FacultyView() {
     }
   };
 
+  // Handle Add New Teacher
+  const handleAddTeacher = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!addTeacherForm.user_id.trim() || !addTeacherForm.name.trim() || !addTeacherForm.email.trim() || !addTeacherForm.password.trim()) return;
+    setIsSubmittingAddTeacher(true);
+    setAddTeacherError(null);
+    try {
+      await createTeacherAccount({
+        user_id: addTeacherForm.user_id.trim(),
+        name: addTeacherForm.name.trim(),
+        email: addTeacherForm.email.trim(),
+        password: addTeacherForm.password,
+        branch: addTeacherForm.branch.trim() || undefined,
+        designation: addTeacherForm.designation.trim() || undefined,
+        department: addTeacherForm.department.trim() || undefined,
+      });
+      setFeedbackMessage({
+        type: "success",
+        text: `Faculty account '${addTeacherForm.name.trim()}' (${addTeacherForm.user_id.trim()}) created successfully.`,
+      });
+      setIsAddTeacherOpen(false);
+      setAddTeacherForm({ user_id: "", name: "", email: "", password: "", branch: "", designation: "", department: "" });
+      await loadData();
+    } catch (err: unknown) {
+      setAddTeacherError(err instanceof Error ? err.message : "Failed to create teacher account.");
+    } finally {
+      setIsSubmittingAddTeacher(false);
+    }
+  };
+
+  // Handle Toggle Active
+  const handleToggleActive = async (t: AdminTeacherItem) => {
+    const action = t.is_active ? "deactivate" : "activate";
+    if (!window.confirm(`Are you sure you want to ${action} ${t.name || t.user_id}?`)) return;
+    setTogglingActiveId(t.user_id);
+    try {
+      const res = await toggleTeacherActive(t.user_id);
+      setTeachers((prev) =>
+        prev.map((item) =>
+          item.user_id === t.user_id ? { ...item, is_active: res.is_active } : item
+        )
+      );
+      setFeedbackMessage({
+        type: "success",
+        text: res.message || `Teacher ${t.user_id} ${res.is_active ? "activated" : "deactivated"}.`,
+      });
+    } catch (err: unknown) {
+      setFeedbackMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to toggle teacher status.",
+      });
+    } finally {
+      setTogglingActiveId(null);
+    }
+  };
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Header */}
@@ -298,12 +374,20 @@ export function FacultyView() {
 
         <div className="flex items-center gap-2">
           {isAdmin ? (
-            <button
-              onClick={() => setIsAssignOpen(true)}
-              className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#3F451F] text-[#FBF8F0] text-xs font-bold rounded-xl hover:bg-[#323719] transition-all shadow-2xs cursor-pointer"
-            >
-              <span>+ Assign Subject</span>
-            </button>
+            <>
+              <button
+                onClick={() => setIsAddTeacherOpen(true)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#6C5119] text-[#FBF8F0] text-xs font-bold rounded-xl hover:bg-[#594214] transition-all shadow-2xs cursor-pointer"
+              >
+                <span>+ Add New Faculty</span>
+              </button>
+              <button
+                onClick={() => setIsAssignOpen(true)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 bg-[#3F451F] text-[#FBF8F0] text-xs font-bold rounded-xl hover:bg-[#323719] transition-all shadow-2xs cursor-pointer"
+              >
+                <span>+ Assign Subject</span>
+              </button>
+            </>
           ) : (
             <button
               onClick={() => setIsRequestModalOpen(true)}
@@ -425,6 +509,7 @@ export function FacultyView() {
                   <th className="py-3 px-4">User ID</th>
                   <th className="py-3 px-4">Email</th>
                   <th className="py-3 px-4">Assigned Subjects</th>
+                  <th className="py-3 px-4 text-center">Status</th>
                   <th className="py-3 px-4 text-center">Sessions</th>
                   <th className="py-3 px-4 text-right">Actions</th>
                 </tr>
@@ -432,14 +517,14 @@ export function FacultyView() {
               <tbody className="divide-y divide-[#E4DDCA]/60 text-[#24251C]">
                 {isLoading ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-[#77735F]">
+                    <td colSpan={7} className="py-12 text-center text-[#77735F]">
                       <div className="w-6 h-6 border-2 border-[#6C5119] border-t-transparent rounded-full animate-spin mx-auto mb-2" />
                       Loading faculty directory...
                     </td>
                   </tr>
                 ) : teachers.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="py-12 text-center text-[#77735F]">
+                    <td colSpan={7} className="py-12 text-center text-[#77735F]">
                       No faculty records registered.
                     </td>
                   </tr>
@@ -471,6 +556,33 @@ export function FacultyView() {
                             <span className="text-xs text-[#77735F] italic">No subjects</span>
                           )}
                         </div>
+                      </td>
+                      <td className="py-3 px-4 text-center">
+                        {isAdmin ? (
+                          <button
+                            type="button"
+                            disabled={togglingActiveId === t.user_id}
+                            onClick={() => handleToggleActive(t)}
+                            title="Click to toggle teacher active/inactive status"
+                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50 ${
+                              Boolean(t.is_active)
+                                ? "bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200"
+                                : "bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200"
+                            }`}
+                          >
+                            {togglingActiveId === t.user_id ? "..." : Boolean(t.is_active) ? "● Active" : "○ Inactive"}
+                          </button>
+                        ) : (
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              Boolean(t.is_active)
+                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                : "bg-rose-50 text-rose-700 border border-rose-200"
+                            }`}
+                          >
+                            {Boolean(t.is_active) ? "Active" : "Inactive"}
+                          </span>
+                        )}
                       </td>
                       <td className="py-3 px-4 text-center font-semibold text-xs">
                         {t.session_count}
@@ -1070,6 +1182,144 @@ export function FacultyView() {
                 Close Profile
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {/* MODAL 6: Add New Faculty Account Modal (Admin Only) */}
+      {isAddTeacherOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-[#6C5119] text-white flex items-center justify-center font-bold text-sm">
+                  +
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#24251C]">Add New Faculty Member</h3>
+                  <p className="text-xs text-[#77735F]">Create an institutional teacher account</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAddTeacherOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {addTeacherError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-semibold">
+                {addTeacherError}
+              </div>
+            )}
+
+            <form onSubmit={handleAddTeacher} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">
+                  Faculty User ID <span className="text-rose-600">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. faculty_ai, faculty_math"
+                  value={addTeacherForm.user_id}
+                  onChange={(e) => setAddTeacherForm({ ...addTeacherForm, user_id: e.target.value })}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">
+                  Full Official Name <span className="text-rose-600">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Dr. Ramesh Kumar"
+                  value={addTeacherForm.name}
+                  onChange={(e) => setAddTeacherForm({ ...addTeacherForm, name: e.target.value })}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">
+                  Institutional Email <span className="text-rose-600">*</span>
+                </label>
+                <input
+                  type="email"
+                  required
+                  placeholder="e.g. ramesh.kumar@institution.edu"
+                  value={addTeacherForm.email}
+                  onChange={(e) => setAddTeacherForm({ ...addTeacherForm, email: e.target.value })}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">
+                  Temporary Password <span className="text-rose-600">*</span>
+                </label>
+                <div className="relative">
+                  <input
+                    type={showAddPassword ? "text" : "password"}
+                    required
+                    placeholder="Min 8 chars, 1 uppercase, 1 symbol"
+                    value={addTeacherForm.password}
+                    onChange={(e) => setAddTeacherForm({ ...addTeacherForm, password: e.target.value })}
+                    className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119] pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowAddPassword(!showAddPassword)}
+                    className="absolute right-3 top-2.5 text-xs text-[#77735F] hover:text-[#24251C]"
+                  >
+                    {showAddPassword ? "Hide" : "Show"}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-[#24251C] mb-1">Department / Branch</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. CSE, AI, ECE"
+                    value={addTeacherForm.branch}
+                    onChange={(e) => setAddTeacherForm({ ...addTeacherForm, branch: e.target.value })}
+                    className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-[#24251C] mb-1">Designation</label>
+                  <input
+                    type="text"
+                    placeholder="e.g. Asst. Professor"
+                    value={addTeacherForm.designation}
+                    onChange={(e) => setAddTeacherForm({ ...addTeacherForm, designation: e.target.value })}
+                    className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                  />
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E4DDCA]">
+                <button
+                  type="button"
+                  onClick={() => setIsAddTeacherOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:bg-[#EDE8D8]/50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingAddTeacher}
+                  className="px-4 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] disabled:opacity-50 transition-all shadow-xs"
+                >
+                  {isSubmittingAddTeacher ? "Creating..." : "Create Teacher Account"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

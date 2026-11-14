@@ -3,11 +3,14 @@ import {
   fetchAnalyticsSummary,
   downloadExcelReport,
   downloadPdfReport,
+  downloadConsolidatedAttendanceSheetPdf,
 } from "@/services/api/reports";
 import { fetchSessions, type SessionItem } from "@/services/api/sessions";
+import { useAuth } from "@/hooks/useAuth";
 import type { VerifiedSummaryReport } from "@/types/dashboard";
 
 export function ReportsView() {
+  const { isAdmin } = useAuth();
   const [summary, setSummary] = useState<VerifiedSummaryReport | null>(null);
   const [sessions, setSessions] = useState<SessionItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -21,6 +24,7 @@ export function ReportsView() {
   // Export State
   const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [isExportingMasterPdf, setIsExportingMasterPdf] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
 
   const loadData = useCallback(async () => {
@@ -116,6 +120,27 @@ export function ReportsView() {
       }
     } finally {
       setIsExportingPdf(false);
+    }
+  };
+
+  const handleExportConsolidatedPdf = async () => {
+    setIsExportingMasterPdf(true);
+    setExportMessage(null);
+    try {
+      const blob = await downloadConsolidatedAttendanceSheetPdf();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `RollCall_Master_Attendance_Sheet_${new Date().toISOString().slice(0, 10)}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      setExportMessage("Master Consolidated Attendance Sheet PDF exported successfully.");
+    } catch (err: unknown) {
+      setExportMessage(err instanceof Error ? `Export failed: ${err.message}` : "Failed to generate master attendance sheet.");
+    } finally {
+      setIsExportingMasterPdf(false);
     }
   };
 
@@ -295,6 +320,27 @@ export function ReportsView() {
               </>
             )}
           </button>
+
+          {isAdmin && (
+            <button
+              onClick={handleExportConsolidatedPdf}
+              disabled={isExportingMasterPdf}
+              className="inline-flex items-center gap-2 px-5 py-2.5 bg-[#24251C] text-[#FBF8F0] text-sm font-semibold rounded-xl hover:bg-black transition-all shadow-sm disabled:opacity-50 cursor-pointer"
+              title="Download consolidated institutional master sheet for all students and subjects"
+            >
+              {isExportingMasterPdf ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-[#FBF8F0] border-t-transparent rounded-full animate-spin" />
+                  Generating Master Sheet...
+                </>
+              ) : (
+                <>
+                  <span>📊</span>
+                  Consolidated Attendance Sheet (.pdf)
+                </>
+              )}
+            </button>
+          )}
 
           <button
             onClick={() => void loadData()}

@@ -6,9 +6,11 @@ import {
   fetchTimetableReference,
   fetchTimetableWeek,
   updateTimetableEntry,
+  bulkAssignMasterTimetable,
   type TimetableEntry,
   type TimetableReference,
   type TimetableWeek,
+  type MasterTimetableSlotInput,
 } from "@/services/api/timetable";
 import {
   ACADEMIC_DAY_END,
@@ -42,6 +44,60 @@ export function TimetableView() {
     date: string;
     timeSlot: string;
   } | null>(null);
+
+  // Master Timetable Upload (Admin only)
+  const [isMasterModalOpen, setIsMasterModalOpen] = useState(false);
+  const [masterJsonInput, setMasterJsonInput] = useState("");
+  const [isSubmittingMaster, setIsSubmittingMaster] = useState(false);
+  const [masterMessage, setMasterMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  const handleLoadSampleTemplate = () => {
+    const sample: MasterTimetableSlotInput[] = [
+      { day: "Monday", start_time: "10:00", end_time: "11:00", subject_code: "CN", room_id: "LH-101", session_type: "THEORY" },
+      { day: "Tuesday", start_time: "11:15", end_time: "12:15", subject_code: "DB-SYS", room_id: "LAB-1", session_type: "LAB" },
+      { day: "Wednesday", start_time: "12:15", end_time: "13:15", subject_code: "AI", room_id: "LH-201", session_type: "THEORY" },
+      { day: "Thursday", start_time: "09:00", end_time: "11:00", subject_code: "CN", room_id: "LAB-1", session_type: "LAB" },
+      { day: "Friday", start_time: "11:15", end_time: "12:15", subject_code: "DB-SYS", room_id: "LH-102", session_type: "THEORY" },
+      { day: "Saturday", start_time: "10:00", end_time: "11:00", subject_code: "AI", room_id: "CDS10-105", session_type: "THEORY" },
+    ];
+    setMasterJsonInput(JSON.stringify(sample, null, 2));
+    setMasterMessage(null);
+  };
+
+  const handleSubmitMasterTimetable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMasterMessage(null);
+    let parsedSlots: MasterTimetableSlotInput[] = [];
+    try {
+      parsedSlots = JSON.parse(masterJsonInput);
+      if (!Array.isArray(parsedSlots) || parsedSlots.length === 0) {
+        throw new Error("Input must be a non-empty JSON array of timetable slots.");
+      }
+    } catch (err: unknown) {
+      setMasterMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Invalid JSON format.",
+      });
+      return;
+    }
+
+    setIsSubmittingMaster(true);
+    try {
+      const res = await bulkAssignMasterTimetable(parsedSlots);
+      setMasterMessage({
+        type: "success",
+        text: `Success! Distributed ${res.processed_slots} slot(s) to ${res.teachers_updated?.length || 0} faculty member(s) across subjects [${res.subjects_found?.join(", ")}].`,
+      });
+      void loadWeek();
+    } catch (err: unknown) {
+      setMasterMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to assign master timetable slots.",
+      });
+    } finally {
+      setIsSubmittingMaster(false);
+    }
+  };
 
   // Entry editor
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -299,6 +355,22 @@ export function TimetableView() {
           >
             Refresh
           </button>
+
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setMasterMessage(null);
+                if (!masterJsonInput) handleLoadSampleTemplate();
+                setIsMasterModalOpen(true);
+              }}
+              className="px-3 py-2 rounded-xl bg-[#3F451F] hover:bg-[#323719] text-[#EDE8D8] text-xs font-bold transition-colors cursor-pointer flex items-center space-x-1 shadow-2xs"
+              title="Upload master institutional timetable to automatically distribute to all faculty"
+            >
+              <span>📅</span>
+              <span>Master Timetable</span>
+            </button>
+          )}
           {canScheduleSessions && (
             <button
               type="button"
@@ -812,6 +884,91 @@ export function TimetableView() {
           classDate={delegatingEntry.date}
           timeSlot={delegatingEntry.timeSlot}
         />
+      )}
+      {/* Master Timetable Ingestion Modal (Admin Only) */}
+      {isMasterModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-[#3F451F] text-white flex items-center justify-center font-bold text-sm">
+                  📅
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#24251C]">Master Institutional Timetable Ingestion</h3>
+                  <p className="text-xs text-[#77735F]">Distribute weekly teaching schedules to all faculty at once</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMasterModalOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {masterMessage && (
+              <div
+                className={`p-3 rounded-xl text-xs font-semibold ${
+                  masterMessage.type === "success"
+                    ? "bg-emerald-100 border border-emerald-300 text-emerald-900"
+                    : "bg-rose-100 border border-rose-300 text-rose-900"
+                }`}
+              >
+                {masterMessage.text}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmitMasterTimetable} className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-bold text-[#24251C]">
+                  Timetable Slots JSON Array
+                </label>
+                <button
+                  type="button"
+                  onClick={handleLoadSampleTemplate}
+                  className="text-xs font-bold text-[#6C5119] hover:underline cursor-pointer"
+                >
+                  Load Example Template
+                </button>
+              </div>
+
+              <textarea
+                required
+                rows={12}
+                value={masterJsonInput}
+                onChange={(e) => setMasterJsonInput(e.target.value)}
+                placeholder='[&#10;  { "day": "Monday", "start_time": "10:00", "end_time": "11:00", "subject_code": "CN", "room_id": "LH-101", "session_type": "THEORY" }&#10;]'
+                className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+              />
+
+              <div className="bg-[#EDE8D8]/50 p-3 rounded-xl border border-[#E4DDCA] text-xs text-[#77735F] space-y-1">
+                <p className="font-bold text-[#24251C]">💡 How Institutional Propagation Works:</p>
+                <p>
+                  Each slot's <code className="text-[#6C5119] font-bold">subject_code</code> is matched against the institutional Faculty-Subject assignments. Every teacher assigned to that subject automatically receives the slot in their personal timetable grid and today's schedule!
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E4DDCA]">
+                <button
+                  type="button"
+                  onClick={() => setIsMasterModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:bg-[#EDE8D8]/50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingMaster || !masterJsonInput.trim()}
+                  className="px-4 py-2 rounded-xl bg-[#3F451F] text-white text-xs font-bold hover:bg-[#323719] disabled:opacity-50 transition-all shadow-xs cursor-pointer"
+                >
+                  {isSubmittingMaster ? "Distributing Slots..." : "Propagate Master Timetable"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

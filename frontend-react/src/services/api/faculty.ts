@@ -177,3 +177,26 @@ export async function reviewPermissionRequest(
     { decision, comment }
   );
 }
+
+// POST /api/v1/admin/teachers/create
+export async function createTeacherAccount(data: {
+  user_id: string;
+  name: string;
+  email: string;
+  password: string;
+  branch?: string;
+  designation?: string;
+  department?: string;
+}): Promise<AdminTeacherItem> {
+  return apiClient.post<AdminTeacherItem>("/api/v1/admin/teachers/create", data);
+}
+
+// PATCH /api/v1/admin/teachers/{user_id}/toggle-active
+export async function toggleTeacherActive(
+  userId: string
+): Promise<{ user_id: string; is_active: boolean; message: string }> {
+  return apiClient.patch<{ user_id: string; is_active: boolean; message: string }>(
+    `/api/v1/admin/teachers/${encodeURIComponent(userId)}/toggle-active`,
+    {}
+  );
+}

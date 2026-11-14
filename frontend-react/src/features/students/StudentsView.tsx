@@ -6,6 +6,8 @@ import {
   createStudent,
   bulkCreateStudents,
   fetchStudentAttendanceSummary,
+  updateStudentProfile,
+  assignProctor,
   type Student,
   type StudentAttendanceSummary,
 } from "@/services/api/students";
@@ -13,6 +15,7 @@ import {
   downloadStudentRosterPdf,
   fetchStudentRosterFilters,
 } from "@/services/api/reports";
+import { fetchAdminTeachers, type AdminTeacherItem } from "@/services/api/faculty";
 import { useAuth } from "@/hooks/useAuth";
 
 const SEMESTERS = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -56,6 +59,96 @@ export function StudentsView() {
   const [aiError, setAiError] = useState<string | null>(null);
   const [aiSuccessMessage, setAiSuccessMessage] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Edit Student Modal state (Admin only)
+  const [isEditModalOpen, setIsEditModalOpen] = useState(false);
+  const [editingStudent, setEditingStudent] = useState<Student | null>(null);
+  const [editPhone, setEditPhone] = useState("");
+  const [editPersonalEmail, setEditPersonalEmail] = useState("");
+  const [editParentPhone, setEditParentPhone] = useState("");
+  const [editSemester, setEditSemester] = useState("");
+  const [isSubmittingEdit, setIsSubmittingEdit] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+
+  // Proctor Assignment Modal state (Admin only)
+  const [isProctorModalOpen, setIsProctorModalOpen] = useState(false);
+  const [proctorUsns, setProctorUsns] = useState("");
+  const [selectedProctorTeacher, setSelectedProctorTeacher] = useState("");
+  const [availableTeachers, setAvailableTeachers] = useState<AdminTeacherItem[]>([]);
+  const [isSubmittingProctor, setIsSubmittingProctor] = useState(false);
+  const [proctorMessage, setProctorMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  const handleOpenEditModal = (s: Student) => {
+    setEditingStudent(s);
+    setEditPhone(s.phone || "");
+    setEditPersonalEmail(s.personal_email || "");
+    setEditParentPhone(s.parent_phone || "");
+    setEditSemester(s.semester !== undefined && s.semester !== null ? String(s.semester) : "");
+    setEditError(null);
+    setIsEditModalOpen(true);
+  };
+
+  const handleSaveStudentEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingStudent) return;
+    setIsSubmittingEdit(true);
+    setEditError(null);
+    try {
+      await updateStudentProfile(editingStudent.usn, {
+        phone: editPhone.trim() || undefined,
+        personal_email: editPersonalEmail.trim() || undefined,
+        parent_phone: editParentPhone.trim() || undefined,
+        semester: editSemester.trim() || undefined,
+      });
+      setIsEditModalOpen(false);
+      void loadStudents();
+    } catch (err: unknown) {
+      setEditError(err instanceof Error ? err.message : "Failed to update student profile.");
+    } finally {
+      setIsSubmittingEdit(false);
+    }
+  };
+
+  const handleOpenProctorModal = async () => {
+    setIsProctorModalOpen(true);
+    setProctorMessage(null);
+    try {
+      const res = await fetchAdminTeachers();
+      setAvailableTeachers(res.items || []);
+      if (res.items && res.items.length > 0) {
+        setSelectedProctorTeacher(res.items[0].user_id);
+      }
+    } catch {
+      setAvailableTeachers([]);
+    }
+  };
+
+  const handleAssignProctor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const usnList = proctorUsns
+      .split(/[\n, ]+/)
+      .map((u) => u.trim().toUpperCase())
+      .filter(Boolean);
+    if (usnList.length === 0 || !selectedProctorTeacher) return;
+    setIsSubmittingProctor(true);
+    setProctorMessage(null);
+    try {
+      const res = await assignProctor(usnList, selectedProctorTeacher);
+      setProctorMessage({
+        type: "success",
+        text: `Assigned proctor ${selectedProctorTeacher} to ${res.updated} student(s) successfully.`,
+      });
+      setProctorUsns("");
+      void loadStudents();
+    } catch (err: unknown) {
+      setProctorMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to assign proctor.",
+      });
+    } finally {
+      setIsSubmittingProctor(false);
+    }
+  };
 
   // 300ms Search Debounce
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -340,7 +433,13 @@ export function StudentsView() {
         </div>
 
         {canManageStudents && (
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => handleOpenProctorModal()}
+              className="inline-flex items-center justify-center gap-1.5 px-3.5 py-2 bg-[#FBF8F0] border border-[#6C5119] text-[#6C5119] text-xs font-bold rounded-xl hover:bg-[#EDE8D8] transition-all shadow-2xs cursor-pointer"
+            >
+              <span>👤 Assign Proctor</span>
+            </button>
             <button
               onClick={() => setIsAddModalOpen(true)}
               className="inline-flex items-center justify-center gap-2 px-3.5 py-2 bg-[#FBF8F0] border border-[#3F451F] text-[#3F451F] text-xs font-semibold rounded-xl hover:bg-[#EDE8D8] transition-all shadow-2xs cursor-pointer"
@@ -535,18 +634,32 @@ export function StudentsView() {
                       {student.batch ? ` (${student.batch})` : ""}
                     </td>
                     <td className="py-3.5 px-4 text-right">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void handleSelectStudent(student.usn);
-                        }}
-                        className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded-lg bg-[#3F451F]/10 text-[#3F451F] hover:bg-[#3F451F] hover:text-[#FBF8F0] transition-colors cursor-pointer"
-                      >
-                        View Ledger
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
-                        </svg>
-                      </button>
+                      <div className="flex items-center justify-end gap-1.5">
+                        {canManageStudents && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenEditModal(student);
+                            }}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-lg bg-[#EDE8D8] text-[#6C5119] hover:bg-[#E4DDCA] transition-colors cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                        )}
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleSelectStudent(student.usn);
+                          }}
+                          className="inline-flex items-center gap-1 px-3 py-1 text-xs font-semibold rounded-lg bg-[#3F451F]/10 text-[#3F451F] hover:bg-[#3F451F] hover:text-[#FBF8F0] transition-colors cursor-pointer"
+                        >
+                          View Ledger
+                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 5l7 7-7 7" />
+                          </svg>
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -937,6 +1050,187 @@ export function StudentsView() {
                 {isAiSubmitting ? "Importing..." : `Import ${aiParsedList.length} Students`}
               </button>
             </div>
+          </div>
+        </div>
+      )}
+      {/* Edit Student Profile Modal (Admin Only) */}
+      {isEditModalOpen && editingStudent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div>
+                <h3 className="text-base font-bold text-[#24251C]">Edit Student Contact & Profile</h3>
+                <p className="text-xs text-[#77735F] font-mono">{editingStudent.usn} • {editingStudent.name}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsEditModalOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {editError && (
+              <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-semibold">
+                {editError}
+              </div>
+            )}
+
+            <form onSubmit={handleSaveStudentEdit} className="space-y-3.5">
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">Student Phone / Mobile</label>
+                <input
+                  type="text"
+                  placeholder="+91 9876543210"
+                  value={editPhone}
+                  onChange={(e) => setEditPhone(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">Personal / Notification Email</label>
+                <input
+                  type="email"
+                  placeholder="student.personal@example.com"
+                  value={editPersonalEmail}
+                  onChange={(e) => setEditPersonalEmail(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">Parent / Guardian Contact Phone</label>
+                <input
+                  type="text"
+                  placeholder="+91 9123456789"
+                  value={editParentPhone}
+                  onChange={(e) => setEditParentPhone(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">Current Academic Semester</label>
+                <input
+                  type="text"
+                  placeholder="e.g. 5, 6, 7"
+                  value={editSemester}
+                  onChange={(e) => setEditSemester(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E4DDCA]">
+                <button
+                  type="button"
+                  onClick={() => setIsEditModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:bg-[#EDE8D8]/50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingEdit}
+                  className="px-4 py-2 rounded-xl bg-[#3F451F] text-white text-xs font-bold hover:bg-[#343919] disabled:opacity-50 transition-all shadow-xs"
+                >
+                  {isSubmittingEdit ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Assign Proctor Modal (Admin Only) */}
+      {isProctorModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-lg w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-[#6C5119] text-white flex items-center justify-center font-bold text-sm">
+                  👤
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#24251C]">Assign Faculty Proctor / Advisor</h3>
+                  <p className="text-xs text-[#77735F]">Link students to their faculty mentor</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsProctorModalOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {proctorMessage && (
+              <div
+                className={`p-3 rounded-xl text-xs font-semibold ${
+                  proctorMessage.type === "success"
+                    ? "bg-emerald-100 border border-emerald-300 text-emerald-900"
+                    : "bg-rose-100 border border-rose-300 text-rose-900"
+                }`}
+              >
+                {proctorMessage.text}
+              </div>
+            )}
+
+            <form onSubmit={handleAssignProctor} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">
+                  Select Faculty Proctor <span className="text-rose-600">*</span>
+                </label>
+                <select
+                  required
+                  value={selectedProctorTeacher}
+                  onChange={(e) => setSelectedProctorTeacher(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-medium focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                >
+                  {availableTeachers.map((t) => (
+                    <option key={t.user_id} value={t.user_id}>
+                      {t.name || t.user_id} ({t.user_id}) {t.branch ? `• ${t.branch}` : ""}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-[#24251C] mb-1">
+                  Student USNs to Assign <span className="text-rose-600">*</span>
+                </label>
+                <p className="text-[11px] text-[#77735F] mb-1.5">
+                  Enter one or more USNs separated by commas, spaces, or newlines (e.g. 1DS24CY001, 1DS24CY002).
+                </p>
+                <textarea
+                  required
+                  rows={4}
+                  placeholder="1DS24CY001&#10;1DS24CY002&#10;1DS24CY003"
+                  value={proctorUsns}
+                  onChange={(e) => setProctorUsns(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E4DDCA]">
+                <button
+                  type="button"
+                  onClick={() => setIsProctorModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:bg-[#EDE8D8]/50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingProctor || !proctorUsns.trim()}
+                  className="px-4 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] disabled:opacity-50 transition-all shadow-xs"
+                >
+                  {isSubmittingProctor ? "Assigning..." : "Assign Proctor"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
