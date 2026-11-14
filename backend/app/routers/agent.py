@@ -704,6 +704,22 @@ def agent_confirm(
     # Verify session exists
     session = crud.get_session(db, session_id=clean_sess)
     if not session:
+        try:
+            import datetime
+            import re
+            from app.services.session_initialization import initialize_sessions_for_date
+
+            match = re.search(r"(\d{4})(\d{2})(\d{2})", clean_sess)
+            if match:
+                y, m, d = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                initialize_sessions_for_date(db, datetime.date(y, m, d))
+            else:
+                initialize_sessions_for_date(db, datetime.date.today())
+            session = crud.get_session(db, session_id=clean_sess)
+        except Exception as init_err:
+            logger.warning("Could not auto-initialize session %s: %s", clean_sess, init_err)
+
+    if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session with ID '{clean_sess}' not found.",

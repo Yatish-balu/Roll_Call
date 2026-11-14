@@ -109,3 +109,4 @@ def downgrade() -> None:
             "idx_class_delegations_session_id", table_name="class_delegations"
         )
         op.drop_table("class_delegations")
+

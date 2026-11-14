@@ -260,6 +260,13 @@ export function AttendanceView() {
   // Save changes to backend
   const handleSaveChanges = async () => {
     if (!canMarkAttendance || !selectedSessionId || isSaving) return;
+    if (attendanceRecords.length === 0) {
+      setStatusMessage({
+        type: "error",
+        text: "No attendance records to save. Please load or add students to the roster first.",
+      });
+      return;
+    }
     setIsSaving(true);
     setStatusMessage(null);
 

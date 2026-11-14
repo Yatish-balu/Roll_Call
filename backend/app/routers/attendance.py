@@ -51,9 +51,25 @@ router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 
 def _verify_session_exists(db: Session, session_id: str) -> Dict[str, Any]:
-    """Verify session exists in database; raise 404 if missing."""
+    """Verify session exists in database; resolve scheduled session if uninitialized, or raise clean 404."""
     clean_id = session_id.strip()
     session = crud.get_session(db, session_id=clean_id)
+    if not session:
+        try:
+            import datetime
+            import re
+            from app.services.session_initialization import initialize_sessions_for_date
+
+            match = re.search(r"(\d{4})(\d{2})(\d{2})", clean_id)
+            if match:
+                y, m, d = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                initialize_sessions_for_date(db, datetime.date(y, m, d))
+            else:
+                initialize_sessions_for_date(db, datetime.date.today())
+            session = crud.get_session(db, session_id=clean_id)
+        except Exception as init_err:
+            logger.warning("Could not auto-initialize session %s: %s", clean_id, init_err)
+
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -176,10 +192,11 @@ def _verify_roster_references(db: Session, records: Sequence[Any]) -> None:
         known_rooms = crud.get_existing_room_ids(db, non_unallocated)
         missing_rooms = sorted(non_unallocated - known_rooms)
         if missing_rooms:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Room with ID '{missing_rooms[0]}' not found.",
-            )
+            for r_id in missing_rooms:
+                try:
+                    crud.create_room(db, room_id=r_id, name=f"Room {r_id}")
+                except Exception:
+                    pass
 
 
 # ==============================================================================
