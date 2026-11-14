@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Any, List, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class SubjectCodesResponse(BaseModel):
@@ -44,8 +44,21 @@ class TeacherSubjectMapping(BaseModel):
     id: int = Field(..., description="Mapping row identifier")
     user_id: str = Field(..., description="Teacher user identifier")
     subject_code: str = Field(..., description="Assigned subject code")
+    teacher_id: Optional[str] = Field(None, description="Alias for user_id for frontend backward compatibility")
 
     model_config = ConfigDict(from_attributes=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def populate_teacher_id(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            if "teacher_id" not in data or not data["teacher_id"]:
+                data["teacher_id"] = data.get("user_id")
+        elif hasattr(data, "user_id"):
+            # ORM model
+            if not getattr(data, "teacher_id", None):
+                setattr(data, "teacher_id", getattr(data, "user_id", None))
+        return data
 
 
 class TeacherSubjectListResponse(BaseModel):

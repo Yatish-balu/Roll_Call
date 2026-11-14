@@ -93,6 +93,12 @@ def _assert_session_ownership(
 def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
     """Verify room exists in database; raise 404 if missing."""
     clean_id = room_id.strip()
+    if clean_id.upper() == "UNALLOCATED":
+        crud.ensure_unallocated_room(db)
+        room = crud.get_room(db, room_id="UNALLOCATED")
+        if room:
+            return room
+        return {"room_id": "UNALLOCATED", "name": "Unallocated Classroom"}
     room = crud.get_room(db, room_id=clean_id)
     if not room:
         raise HTTPException(
@@ -117,16 +123,22 @@ def _verify_roster_references(db: Session, records: Sequence[Any]) -> None:
             detail=f"Student with USN '{missing_usns[0]}' not found.",
         )
 
-    room_ids = {str(r.room_id).strip() if getattr(r, "room_id", None) else "UNALLOCATED" for r in records}
-    if "UNALLOCATED" in room_ids:
-        crud.ensure_unallocated_room(db)
-    known_rooms = crud.get_existing_room_ids(db, room_ids)
-    missing_rooms = sorted(room_ids - known_rooms)
-    if missing_rooms:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Room with ID '{missing_rooms[0]}' not found.",
-        )
+    crud.ensure_unallocated_room(db)
+    raw_rooms = {
+        str(r.room_id).strip()
+        if getattr(r, "room_id", None) and str(r.room_id).strip()
+        else "UNALLOCATED"
+        for r in records
+    }
+    non_unallocated = {r for r in raw_rooms if r.upper() != "UNALLOCATED"}
+    if non_unallocated:
+        known_rooms = crud.get_existing_room_ids(db, non_unallocated)
+        missing_rooms = sorted(non_unallocated - known_rooms)
+        if missing_rooms:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Room with ID '{missing_rooms[0]}' not found.",
+            )
 
 
 # ==============================================================================

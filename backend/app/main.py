@@ -82,10 +82,12 @@ async def lifespan(app: FastAPI):
 
     try:
         from app.routers.profile import _ensure_profile_table
+        from app.routers.admin import _ensure_permission_requests_table
         from app.db import crud
         session_factory = get_sync_session_factory()
         with session_factory() as session:
             _ensure_profile_table(session)
+            _ensure_permission_requests_table(session)
             crud.ensure_unallocated_room(session)
     except Exception as exc:
         logger.warning("Could not auto-create profile table or default room at startup: %s", exc)

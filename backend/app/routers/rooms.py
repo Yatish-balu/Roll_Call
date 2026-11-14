@@ -61,11 +61,18 @@ def get_room_by_id(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    room = crud.get_room(db, room_id=room_id)
+    clean_id = room_id.strip()
+    if clean_id.upper() == "UNALLOCATED":
+        crud.ensure_unallocated_room(db)
+        room = crud.get_room(db, room_id="UNALLOCATED")
+        if room:
+            return room
+        return {"room_id": "UNALLOCATED", "name": "Unallocated Classroom"}
+    room = crud.get_room(db, room_id=clean_id)
     if not room:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Room with ID '{room_id.strip()}' not found.",
+            detail=f"Room with ID '{clean_id}' not found.",
         )
     return room
 

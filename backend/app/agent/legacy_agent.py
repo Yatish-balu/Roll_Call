@@ -913,6 +913,10 @@ class AttendanceAgent:
         if self._is_greeting_intent(clean):
             return self._handle_greeting_intent(input_str, req_id)
 
+        # 2b. Real-time Date, Day & Time intent
+        if self._is_datetime_intent(clean):
+            return self._handle_datetime_intent(input_str, req_id)
+
         # 3. Defaulters / Attendance shortage intent (<75%)
         if self._is_defaulter_intent(clean):
             return self._handle_defaulters_intent(input_str, req_id)
@@ -1480,6 +1484,56 @@ class AttendanceAgent:
         )
 
     @staticmethod
+    def _is_datetime_intent(clean: str) -> bool:
+        """Detect real-time date, day of week, or time queries."""
+        date_phrases = [
+            "what is the day today", "what day is today", "what day is it",
+            "what is today's date", "what is the date today", "what date is it",
+            "what is current date", "what's the day today", "what is today",
+            "today's date", "current date", "what time is it", "current time",
+            "tell me today's date", "which day is today", "what is the day",
+            "today date", "today day", "current day", "what is date today"
+        ]
+        if any(p in clean for p in date_phrases):
+            return True
+        if "day" in clean and ("today" in clean or "now" in clean) and any(w in clean for w in ["what", "which", "tell", "check"]):
+            return True
+        if "date" in clean and ("today" in clean or "now" in clean or "current" in clean) and any(w in clean for w in ["what", "which", "tell", "show"]):
+            return True
+        return False
+
+    def _handle_datetime_intent(self, text: str, request_id: str) -> AgentResponse:
+        now_dt = datetime.datetime.now()
+        day_name = now_dt.strftime("%A")
+        full_date = now_dt.strftime("%B %d, %Y")
+        time_str = now_dt.strftime("%I:%M %p")
+        iso_date = now_dt.strftime("%Y-%m-%d")
+
+        self.tool_logger.log(
+            request_id=request_id,
+            tool_name="get_current_datetime",
+            arguments={"query": text},
+            success=True,
+            result_summary=f"Reported live real-time datetime: {day_name}, {full_date}",
+            duration_seconds=0.001,
+        )
+        msg = (
+            f"📅 **Live Real-Time Date & Day**:\n\n"
+            f"• **Day of the Week:** {day_name}\n"
+            f"• **Today's Date:** {full_date} (`{iso_date}`)\n"
+            f"• **Current Time:** {time_str}\n\n"
+            f"Your academic timetable, classroom vacancies, and attendance sessions are all synchronized with this live date."
+        )
+        return AgentResponse(
+            request_id=request_id,
+            message=msg,
+            success=True,
+            needs_confirmation=False,
+            data=[{"date": iso_date, "day": day_name, "time": time_str}],
+            tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+        )
+
+    @staticmethod
     def _is_defaulter_intent(clean: str) -> bool:
         keywords = ["defaulter", "defaulters", "below 75", "< 75", "<75", "shortage", "low attendance", "attendance below"]
         return any(k in clean for k in keywords)
@@ -1678,10 +1732,16 @@ class AttendanceAgent:
             else:
                 lines = [f"Found {len(pending_sessions)} session(s) with pending or unreviewed attendance:\n"]
                 for ps in pending_sessions:
-                    lines.append(
-                        f"• **{ps['session_id']}**: {ps['subject']} ({ps['subject_code']}) on **{ps['date']}** — "
-                        f"{ps['pending_count']} pending/unreviewed record(s) out of {ps['total_students']} total students."
-                    )
+                    if ps["total_students"] == 0:
+                        lines.append(
+                            f"• **{ps['session_id']}**: {ps['subject']} ({ps['subject_code']}) on **{ps['date']}** — "
+                            f"Awaiting attendance roster upload (0 students recorded)."
+                        )
+                    else:
+                        lines.append(
+                            f"• **{ps['session_id']}**: {ps['subject']} ({ps['subject_code']}) on **{ps['date']}** — "
+                            f"{ps['pending_count']} pending/unreviewed record(s) out of {ps['total_students']} total students."
+                        )
                 msg = "\n".join(lines)
 
             return AgentResponse(
@@ -2016,7 +2076,7 @@ class AttendanceAgent:
         is_update = any(v in clean for v in update_verbs)
 
         mobile_val = None
-        mob_match = re.search(r"(?:mobile|phone|contact|number)[^\d]*?(?:to|is|as|=|:)?\s*([+]?[\d\s-]{10,16})", text, re.IGNORECASE)
+        mob_match = re.search(r"(?:mobile|phone|contact|number).*?(?:to|is|as|=|:)?\s*([+]?[\d\s-]{10,16})", text, re.IGNORECASE)
         if mob_match:
             cand = re.sub(r"[\s-]", "", mob_match.group(1))
             if len(cand) >= 8 and cand.lstrip("+").isdigit():
@@ -2029,14 +2089,34 @@ class AttendanceAgent:
         email_match = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
         email_val = email_match.group(0) if email_match else None
 
+        def _clean_extracted_name(cand: str) -> str:
+            # Strip trailing context clauses: 'in my profile', 'in the dashboard', 'for admin', 'on my account', etc.
+            cand = re.sub(
+                r'\s+(?:in|on|at|of|for|from|as|with|into)\s+(?:(?:my|the|this|an?|admin)\s+)*(?:profile|dashboard|admin|account|system|database|db|settings|page|card|view|teacher).*$',
+                '',
+                cand,
+                flags=re.IGNORECASE
+            )
+            # Strip trailing filler words
+            cand = re.sub(r'\s+(?:please|now|right\s+now|immediately|asap|today|also|permanently)\b.*$', '', cand, flags=re.IGNORECASE)
+            # Strip leading articles/pronouns
+            cand = re.sub(r'^(?:my|the|a|an)\s+', '', cand, flags=re.IGNORECASE)
+            return cand.strip()
+
         name_val = None
-        if "name" in clean and is_update:
-            name_match = re.search(r"(?:name)[^\w]*?(?:to|is|as|=|:)\s*([A-Za-z0-9\s.]{2,40})", text, re.IGNORECASE)
-            if name_match:
-                cand_name = name_match.group(1).strip()
-                cand_name = re.sub(r"^(?:my|the|a)\s+", "", cand_name, flags=re.IGNORECASE).strip()
-                if cand_name:
-                    name_val = cand_name
+        if is_update and ("name" in clean or "rename" in clean):
+            # 1. Match after 'to', 'is', 'as', '=', ':'
+            m = re.search(r'\b(?:to|is|as|=|:)\s+([A-Za-z0-9\s.]{2,40})', text, re.IGNORECASE)
+            if m:
+                cand = _clean_extracted_name(m.group(1))
+                if cand:
+                    name_val = cand
+            if not name_val:
+                m2 = re.search(r'(?:rename\s+(?:me\s+)?|name\s+)([A-Za-z0-9\s.]{2,40})', text, re.IGNORECASE)
+                if m2:
+                    cand = _clean_extracted_name(m2.group(1))
+                    if cand:
+                        name_val = cand
 
         desig_val = None
         if "designation" in clean and is_update:
@@ -2067,7 +2147,7 @@ class AttendanceAgent:
             msg = (
                 f"📋 **Profile Update Proposal** for **{self.actor_name}** (`{self.actor_id}`):\n\n"
                 + "\n".join(changes)
-                + "\n\nWould you like me to proceed with updating your profile? Please reply **'yes'** or **'proceed'** to confirm."
+                + "\n\nWould you like me to proceed with updating your profile? Please click **Proceed** or reply **'yes'** to confirm."
             )
             return AgentResponse(
                 request_id=request_id,
@@ -2244,11 +2324,16 @@ class AttendanceAgent:
                 from app.agent.provider import GeminiProvider
                 provider = GeminiProvider(api_key=api_key)
                 subs_str = ", ".join(self.assigned_subjects) if self.assigned_subjects else "General"
+                now_dt = datetime.datetime.now()
                 sys_inst = (
-                    f"You are RollCall AI, an intelligent attendance assistant for higher education. "
-                    f"The logged-in instructor is {self.actor_name} (Role: {self.actor_role}), "
-                    f"assigned subjects: {subs_str}. "
-                    "Provide a direct, concise, and helpful answer regarding attendance, sessions, student regulations, or college operations."
+                    f"You are RollCall AI, an intelligent attendance assistant for higher education.\n"
+                    f"LIVE REAL-TIME SYSTEM CLOCK:\n"
+                    f"- Today's Day & Date: {now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')} (ISO: {now_dt.strftime('%Y-%m-%d')})\n"
+                    f"- Current Local Time: {now_dt.strftime('%I:%M %p')}\n\n"
+                    f"The logged-in instructor is {self.actor_name} (User ID: `{self.actor_id}`, Role: {self.actor_role}), "
+                    f"assigned subjects: {subs_str}.\n"
+                    "Provide a direct, concise, and helpful answer regarding attendance, sessions, student regulations, or college operations. "
+                    "When answering queries regarding today, current date, day, or schedule, ALWAYS strictly reference the live real-time clock above."
                 )
                 t_start = time.time()
                 resp = provider.generate(

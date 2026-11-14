@@ -210,7 +210,9 @@ def update_profile(
     # Synchronize users table display name and email if valid
     user_record = db.get(User, current_user.user_id)
     if user_record:
-        if payload.fullName:
+        # Only ADMIN has permission to alter official faculty name in users table
+        from app.schemas.auth import Role
+        if payload.fullName and current_user.role == Role.ADMIN:
             user_record.name = payload.fullName.strip()
         if payload.email and "@" in payload.email:
             clean_email = payload.email.strip().lower()

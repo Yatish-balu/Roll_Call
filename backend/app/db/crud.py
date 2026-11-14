@@ -1089,6 +1089,8 @@ def insert_attendance(
     """Insert or optionally upsert an attendance record."""
     validate_usn(usn)
     validate_room_id(room_id)
+    if room_id.strip() == "UNALLOCATED":
+        ensure_unallocated_room(target)
     clean_status = normalize_attendance_status(status)
     clean_allocation_id = allocation_id.strip() if allocation_id else None
     clean_attendance_id = attendance_id.strip() if attendance_id else str(uuid4())

@@ -244,6 +244,14 @@ def agent_chat(
         u = db.query(User).filter(User.user_id == current_user.user_id).first()
         if u and u.name:
             actor_name = u.name
+        # Prioritize full_name from persistent user_profiles if set
+        from sqlalchemy import text
+        prof_row = db.execute(
+            text("SELECT full_name FROM user_profiles WHERE user_id = :uid"),
+            {"uid": current_user.user_id},
+        ).fetchone()
+        if prof_row and prof_row[0] and prof_row[0].strip():
+            actor_name = prof_row[0].strip()
     except Exception:
         assigned_subs = []
 
