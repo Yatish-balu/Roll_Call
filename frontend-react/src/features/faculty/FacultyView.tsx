@@ -187,8 +187,7 @@ export function FacultyView() {
   const pendingSubjectRequests = useMemo(() => requests.filter((r) => r.status === "PENDING"), [requests]);
   const pendingUnlockRequests = useMemo(() => unlockRequests.filter((r) => r.status === "PENDING"), [unlockRequests]);
   const totalPendingCount = pendingSubjectRequests.length + pendingUnlockRequests.length;
-  const pendingRequestsCount = totalPendingCount;
-  const activeTeachersCount = useMemo(() => teachers.filter((t) => Boolean(t.is_active)).length, [teachers]);
+  const activeTeachersCount = useMemo(() => teachers.filter((t) => t.is_active).length, [teachers]);
   const totalSessionCount = useMemo(() => teachers.reduce((acc, t) => acc + (t.session_count || 0), 0), [teachers]);
 
   const handleReviewUnlock = async (requestId: string, decision: "APPROVED" | "REJECTED") => {
@@ -716,22 +715,22 @@ export function FacultyView() {
                               onClick={() => handleToggleActive(t)}
                               title="Click to toggle teacher active/inactive status"
                               className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50 ${
-                                Boolean(t.is_active)
+                                t.is_active
                                   ? "bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200"
                                   : "bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200"
                               }`}
                             >
-                              {togglingActiveId === t.user_id ? "..." : Boolean(t.is_active) ? "● Active" : "○ Inactive"}
+                              {togglingActiveId === t.user_id ? "..." : t.is_active ? "● Active" : "○ Inactive"}
                             </button>
                           ) : (
                             <span
                               className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                Boolean(t.is_active)
+                                t.is_active
                                   ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
                                   : "bg-rose-50 text-rose-700 border border-rose-200"
                               }`}
                             >
-                              {Boolean(t.is_active) ? "Active" : "Inactive"}
+                              {t.is_active ? "Active" : "Inactive"}
                             </span>
                           )}
                         </td>

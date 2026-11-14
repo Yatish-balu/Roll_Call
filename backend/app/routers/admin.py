@@ -1763,7 +1763,7 @@ def edit_student_profile(
         set_clause = ", ".join(f"{k} = :{k}" for k in updates)
         updates["_usn"] = clean_usn
         db.execute(
-            text(f"UPDATE students SET {set_clause} WHERE usn = :_usn"),
+            text(f"UPDATE students SET {set_clause} WHERE usn = :_usn"),  # nosec B608 - allowlisted columns, bound values
             updates,
         )
 

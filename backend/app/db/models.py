@@ -1312,6 +1312,11 @@ class AttendanceUnlockRequest(Base):
     created_at: Mapped[str] = mapped_column(String(50), nullable=False)
     expires_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
 
+    __table_args__ = (
+        Index("ix_attendance_unlock_requests_session_teacher", "session_id", "teacher_id"),
+        Index("ix_attendance_unlock_requests_status", "status"),
+    )
+
     session = relationship("Session", foreign_keys=[session_id])
     teacher = relationship("User", foreign_keys=[teacher_id])
     reviewer = relationship("User", foreign_keys=[reviewed_by])
