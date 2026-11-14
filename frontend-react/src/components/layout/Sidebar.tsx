@@ -130,6 +130,8 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   const { isOnline } = useBackendHealth();
   const { logout, session, isAdmin } = useAuth();
   const [collapsed, setCollapsed] = usePreference("sidebarCollapsed");
+  const [density] = usePreference("sidebarDensity");
+  const isCompactDensity = density === "compact";
 
   const isLinkActive = useCallback(
     (href: string) => {
@@ -198,17 +200,17 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     <div className="flex h-full flex-col bg-[#3F451F] text-[#EDE8D8]">
       {/* Brand */}
       <div
-        className={`flex items-center gap-3 px-4 pt-5 pb-4 ${
+        className={`flex items-center gap-3 px-3.5 pt-4 pb-2.5 ${
           compact ? "justify-center px-2" : ""
         }`}
       >
-        <div className="h-10 w-10 shrink-0 rounded-xl bg-[#EDE8D8]/10 ring-1 ring-[#EDE8D8]/15 flex items-center justify-center">
-          <svg className="h-6 w-6 text-[#EDE8D8]" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+        <div className="h-9 w-9 shrink-0 rounded-xl bg-[#EDE8D8]/10 ring-1 ring-[#EDE8D8]/15 flex items-center justify-center">
+          <svg className="h-5 w-5 text-[#EDE8D8]" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true">
             <path d="M12 3L1 9l4 2.18v6L12 21l7-3.82v-6l2-1.09V17h2V9L12 3zm6.82 6L12 12.72 5.18 9 12 5.28 18.82 9zM17 15.99l-5 2.73-5-2.73v-3.72L12 15l5-2.73v3.72z" />
           </svg>
         </div>
         {!compact && (
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <p className="truncate text-base font-extrabold tracking-tight text-[#FBF8F0]">
               RollCall AI
             </p>
@@ -230,8 +232,8 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
 
       {/* Workspace badge */}
       {!compact && (
-        <div className="px-4 pb-4">
-          <div className="flex items-center justify-between gap-2 rounded-xl bg-[#2C3117] px-3 py-2 ring-1 ring-[#EDE8D8]/10">
+        <div className="px-3.5 pb-2.5">
+          <div className="flex items-center justify-between gap-2 rounded-xl bg-[#2C3117] px-3 py-1.5 ring-1 ring-[#EDE8D8]/10">
             <span className="flex items-center gap-2 text-xs font-semibold text-[#E4E0CB]">
               <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_0_3px_rgba(52,211,153,0.18)]" />
               Teacher Workspace
@@ -243,19 +245,19 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
         </div>
       )}
 
-      {/* Navigation */}
+      {/* Navigation with sleek dark scrollbar */}
       <nav
         aria-label="Primary"
-        className={`flex-1 overflow-y-auto pb-4 ${compact ? "px-2" : "px-3"}`}
+        className={`flex-1 overflow-y-auto sidebar-scrollbar pb-3 ${compact ? "px-2" : "px-3"}`}
       >
         {groups.map((group) => (
-          <div key={group.label} className="mb-5 last:mb-0">
+          <div key={group.label} className="mb-3.5 last:mb-0">
             {!compact && (
-              <p className="px-3 pb-2 text-[10px] font-black uppercase tracking-[0.14em] text-[#8C926F]">
+              <p className="px-3 pb-1 text-[10px] font-black uppercase tracking-[0.14em] text-[#8C926F]">
                 {group.label}
               </p>
             )}
-            <ul className="space-y-1">
+            <ul className="space-y-0.5">
               {group.items.map((item) => {
                 const active = isLinkActive(item.href);
                 return (
@@ -267,11 +269,15 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
                       }}
                       title={compact ? item.name : undefined}
                       aria-current={active ? "page" : undefined}
-                      className={`group flex items-center gap-3 rounded-xl px-3 py-2.5 text-sm font-semibold transition-all duration-150 ${
-                        compact ? "justify-center px-0" : ""
+                      className={`group flex items-center gap-3 rounded-xl transition-all duration-150 ${
+                        compact
+                          ? "justify-center px-0 py-2"
+                          : isCompactDensity
+                          ? "px-3 py-1.5 text-xs font-semibold"
+                          : "px-3 py-2 text-sm font-semibold"
                       } ${
                         active
-                          ? "bg-[#A77A13] text-[#FBF8F0] shadow-[0_2px_10px_rgba(167,122,19,0.35)]"
+                          ? "bg-[#A77A13] text-[#FBF8F0] shadow-[0_2px_8px_rgba(0,0,0,0.25)] ring-1 ring-[#FBF8F0]/15"
                           : "text-[#DCDCC6] hover:bg-[#EDE8D8]/10 hover:text-[#FBF8F0]"
                       }`}
                     >
@@ -303,67 +309,56 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
         ))}
       </nav>
 
-      {/* Connection status */}
-      <div className={`border-t border-[#EDE8D8]/10 ${compact ? "px-2 py-3" : "px-4 py-3"}`}>
+      {/* Unified Account & Connection Footer (Eliminates redundant vertical bloat) */}
+      <div className={`mt-auto border-t border-[#EDE8D8]/10 ${compact ? "p-2" : "p-3"}`}>
         <div
-          className={`flex items-center justify-between gap-2 rounded-xl bg-[#2C3117] px-3 py-2 ring-1 ring-[#EDE8D8]/10 ${
-            compact ? "justify-center px-2" : ""
-          }`}
-          title={isOnline ? "Backend connected" : "Backend unreachable"}
-        >
-          {!compact && (
-            <span className="flex items-center gap-2 text-[11px] font-semibold text-[#DCDCC6]">
-              <span
-                className={`h-2 w-2 rounded-full ${
-                  isOnline ? "bg-emerald-400" : "bg-rose-400"
-                }`}
-              />
-              {isOnline ? "Backend Connected" : "Backend Offline"}
-            </span>
-          )}
-          {!compact && (
-            <span className="font-mono text-[10px] text-[#8C926F]">:8000</span>
-          )}
-        </div>
-      </div>
-
-      {/* Account */}
-      <div className={`border-t border-[#EDE8D8]/10 ${compact ? "px-2 py-3" : "px-3 py-3"}`}>
-        <div
-          className={`flex items-center gap-3 rounded-xl bg-[#2C3117] px-3 py-2 ring-1 ring-[#EDE8D8]/10 ${
-            compact ? "justify-center px-2" : ""
+          className={`flex items-center gap-2.5 rounded-xl bg-[#2C3117] ring-1 ring-[#EDE8D8]/10 ${
+            compact ? "justify-center p-2" : "p-2.5"
           }`}
         >
-          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[#EDE8D8] text-sm font-black text-[#3F451F]">
-            {userInitial}
+          <div className="relative shrink-0">
+            <div className="flex h-8 w-8 items-center justify-center rounded-full bg-[#EDE8D8] text-xs font-black text-[#3F451F]">
+              {userInitial}
+            </div>
+            {/* Live backend status dot attached to user avatar */}
+            <span
+              className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-[#2C3117] ${
+                isOnline ? "bg-emerald-400" : "bg-rose-400"
+              }`}
+              title={isOnline ? "Backend connected (:8000)" : "Backend unreachable"}
+            />
           </div>
+
           {!compact && (
             <div className="min-w-0 flex-1">
-              <p className="truncate text-xs font-bold text-[#FBF8F0]">{displayName}</p>
+              <div className="flex items-center gap-1.5">
+                <p className="truncate text-xs font-bold text-[#FBF8F0]">{displayName}</p>
+              </div>
               <p className="truncate font-mono text-[10px] text-[#8C926F]">
-                {session?.userId || "—"}
+                {session?.userId || "—"} · {isOnline ? "online" : "offline"}
               </p>
             </div>
           )}
-          <div className="flex items-center gap-1">
-              <Link
-                to="/settings"
-                title="Settings"
-                aria-label="Settings"
-                className="rounded-lg p-1.5 text-[#A9AE8C] transition-colors hover:bg-[#EDE8D8]/10 hover:text-[#FBF8F0]"
-              >
-                {ICONS.settings}
-              </Link>
-              <button
-                type="button"
-                onClick={() => void handleSignOut()}
-                title="Sign out"
-                aria-label="Sign out"
-                className="rounded-lg p-1.5 text-[#A9AE8C] transition-colors hover:bg-rose-500/20 hover:text-rose-200 cursor-pointer"
-              >
-                {ICONS.logout}
-              </button>
-            </div>
+
+          <div className="flex items-center gap-0.5">
+            <Link
+              to="/settings"
+              title="Settings"
+              aria-label="Settings"
+              className="rounded-lg p-1.5 text-[#A9AE8C] transition-colors hover:bg-[#EDE8D8]/10 hover:text-[#FBF8F0]"
+            >
+              {ICONS.settings}
+            </Link>
+            <button
+              type="button"
+              onClick={() => void handleSignOut()}
+              title="Sign out"
+              aria-label="Sign out"
+              className="rounded-lg p-1.5 text-[#A9AE8C] transition-colors hover:bg-rose-500/20 hover:text-rose-200 cursor-pointer"
+            >
+              {ICONS.logout}
+            </button>
+          </div>
         </div>
       </div>
     </div>
@@ -384,7 +379,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
             onClick={() => setCollapsed(true)}
             title="Collapse sidebar"
             aria-label="Collapse sidebar"
-            className="absolute -right-3 top-24 hidden h-7 w-7 items-center justify-center rounded-full bg-[#FBF8F0] text-[#3F451F] shadow-md ring-1 ring-[#E4DDCA] transition-colors hover:bg-[#EDE8D8] cursor-pointer lg:flex"
+            className="absolute -right-3 top-20 hidden h-6 w-6 items-center justify-center rounded-full bg-[#2C3117] text-[#EDE8D8] shadow-md border border-[#EDE8D8]/20 transition-all hover:bg-[#3F451F] hover:scale-105 cursor-pointer lg:flex"
           >
             {ICONS.chevronLeft}
           </button>

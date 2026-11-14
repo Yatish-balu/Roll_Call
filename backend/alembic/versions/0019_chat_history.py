@@ -67,3 +67,4 @@ def downgrade() -> None:
         op.drop_index("idx_user_chat_threads_updated_at", table_name="user_chat_threads")
         op.drop_index("idx_user_chat_threads_user_id", table_name="user_chat_threads")
         op.drop_table("user_chat_threads")
+
