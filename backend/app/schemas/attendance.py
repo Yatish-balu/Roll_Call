@@ -85,6 +85,7 @@ class AttendanceUpdate(BaseModel):
 
 class AttendanceResponse(AttendanceBase):
     """Schema for returning an attendance record."""
+    attendance_id: Optional[str] = Field(None, description="Unique attendance record identifier")
     session_id: str = Field(..., description="Session identifier")
     model_config = ConfigDict(from_attributes=True)
 
@@ -153,6 +154,49 @@ class SessionReconcilePayload(BaseModel):
     persist: bool = Field(default=True, description="Whether to persist reconciled records to the database")
 
 
+class AttendanceCorrectionRequest(BaseModel):
+    """Schema for single-student fast-path attendance correction."""
+    new_status: AttendanceStatusLiteral = Field(..., description="Target status: PRESENT, ABSENT, PENDING, or UNREVIEWED")
+    reason: Optional[str] = Field(default="Teacher correction", max_length=500, description="Reason for correction")
+    expected_version: Optional[int] = Field(None, description="Expected concurrency version")
+
+    @field_validator("new_status", mode="before")
+    @classmethod
+    def validate_new_status(cls, v: str) -> str:
+        return _clean_status(str(v))
+
+
+class AttendanceCorrectionResponse(BaseModel):
+    """Response returning optimistic version and 60-second undo token."""
+    record_id: str
+    session_id: str
+    usn: str
+    previous_status: Optional[str]
+    new_status: str
+    new_version: int
+    undo_token: str
+    undo_expires_at: str
+    message: str
+
+
+class AttendanceUndoRequest(BaseModel):
+    """Schema for executing a 60-second undo."""
+    undo_token: str = Field(..., min_length=1, description="Opaque HMAC-signed undo token")
+    expected_version: Optional[int] = Field(None, description="Expected record version before undo")
+
+
+class AttendanceUndoResponse(BaseModel):
+    """Response for a completed undo compensating transaction."""
+    success: bool
+    record_id: str
+    session_id: str
+    usn: str
+    previous_status: str
+    current_status: str
+    new_version: int
+    message: str
+
+
 AttendanceCreate.model_rebuild()
 AttendanceResponse.model_rebuild()
 AttendanceDetailResponse.model_rebuild()
@@ -160,4 +204,9 @@ AttendanceBulkCreate.model_rebuild()
 ReconcileRequest.model_rebuild()
 BulkReconcileRequest.model_rebuild()
 SessionReconcilePayload.model_rebuild()
+AttendanceCorrectionRequest.model_rebuild()
+AttendanceCorrectionResponse.model_rebuild()
+AttendanceUndoRequest.model_rebuild()
+AttendanceUndoResponse.model_rebuild()
+
 

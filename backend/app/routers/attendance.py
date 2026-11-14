@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy.exc import IntegrityError
@@ -15,14 +15,24 @@ from app.auth.session_scope import resolve_data_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
+from app.db.models import Attendance
 from app.schemas.attendance import (
     AttendanceBulkCreate,
+    AttendanceCorrectionRequest,
+    AttendanceCorrectionResponse,
     AttendanceCreate,
     AttendanceDetailResponse,
     AttendanceResponse,
+    AttendanceUndoRequest,
+    AttendanceUndoResponse,
     BulkReconcileRequest,
     ReconcileRequest,
     SessionReconcilePayload,
+)
+from app.services.undo_service import (
+    create_undo_token,
+    execute_undo,
+    get_record_version,
 )
 from app.services.attendance_edits import (
     AttendanceChange,
@@ -83,6 +93,12 @@ def _assert_session_ownership(
 def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
     """Verify room exists in database; raise 404 if missing."""
     clean_id = room_id.strip()
+    if clean_id.upper() == "UNALLOCATED":
+        crud.ensure_unallocated_room(db)
+        room = crud.get_room(db, room_id="UNALLOCATED")
+        if room:
+            return room
+        return {"room_id": "UNALLOCATED", "name": "Unallocated Classroom"}
     room = crud.get_room(db, room_id=clean_id)
     if not room:
         raise HTTPException(
@@ -90,6 +106,39 @@ def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
             detail=f"Room with ID '{clean_id}' not found.",
         )
     return room
+
+
+def _verify_roster_references(db: Session, records: Sequence[Any]) -> None:
+    """Validate every USN and room of a roster with a single query each.
+
+    The per-record checks issued two remote round trips per student, which made
+    a 45-student save take roughly half a minute against Supabase.
+    """
+    usns = {str(r.usn).strip().upper() for r in records}
+    known_usns = crud.get_existing_student_usns(db, usns)
+    missing_usns = sorted(usns - known_usns)
+    if missing_usns:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Student with USN '{missing_usns[0]}' not found.",
+        )
+
+    crud.ensure_unallocated_room(db)
+    raw_rooms = {
+        str(r.room_id).strip()
+        if getattr(r, "room_id", None) and str(r.room_id).strip()
+        else "UNALLOCATED"
+        for r in records
+    }
+    non_unallocated = {r for r in raw_rooms if r.upper() != "UNALLOCATED"}
+    if non_unallocated:
+        known_rooms = crud.get_existing_room_ids(db, non_unallocated)
+        missing_rooms = sorted(non_unallocated - known_rooms)
+        if missing_rooms:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Room with ID '{missing_rooms[0]}' not found.",
+            )
 
 
 # ==============================================================================
@@ -176,6 +225,12 @@ def record_attendance(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Attendance record for student '{clean_usn}' in session '{session_id}' conflicts.",
         )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        )
     except Exception as exc:
         db.rollback()
         logger.error("Failed to record attendance: %s", exc)
@@ -247,11 +302,9 @@ def bulk_record_attendance(
             detail="Bulk insert payload contains duplicate student USNs.",
         )
 
-    # Validate foreign keys
+    # Validate foreign keys in two queries instead of two per record.
+    _verify_roster_references(db, payload.records)
     for r in payload.records:
-        clean_usn = r.usn.strip().upper()
-        _verify_student_exists(db, clean_usn)
-        _verify_room_exists(db, r.room_id)
         if r.session_id and r.session_id.strip() != session_id.strip():
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -271,7 +324,7 @@ def bulk_record_attendance(
         {
             "session_id": session_id.strip(),
             "usn": r.usn.strip().upper(),
-            "room_id": r.room_id.strip(),
+            "room_id": r.room_id.strip() if getattr(r, "room_id", None) and str(r.room_id).strip() else "UNALLOCATED",
             "status": r.status,
             "source": r.source,
             "confidence": r.confidence,
@@ -292,6 +345,12 @@ def bulk_record_attendance(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Bulk insert failed due to duplicate or conflicting attendance records.",
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
         )
     except Exception as exc:
         db.rollback()
@@ -361,17 +420,14 @@ def replace_attendance(
             detail="Payload contains duplicate student USNs.",
         )
 
-    # Validate foreign keys
-    for r in payload.records:
-        clean_usn = r.usn.strip().upper()
-        _verify_student_exists(db, clean_usn)
-        _verify_room_exists(db, r.room_id)
+    # Validate foreign keys in two queries instead of two per record.
+    _verify_roster_references(db, payload.records)
 
     formatted_records = [
         {
             "session_id": session_id.strip(),
             "usn": r.usn.strip().upper(),
-            "room_id": r.room_id.strip(),
+            "room_id": r.room_id.strip() if getattr(r, "room_id", None) and str(r.room_id).strip() else "UNALLOCATED",
             "status": r.status,
             "source": r.source,
             "confidence": r.confidence,
@@ -393,6 +449,9 @@ def replace_attendance(
             r["usn"]: crud.normalize_attendance_status(r["status"])
             for r in formatted_records
         }
+        # Audit only rows that actually changed (added, edited or removed).
+        # Auditing untouched students wrote one INSERT per row - 45 extra
+        # round trips on a full roster - and buried the real edits.
         changes: List[AttendanceChange] = [
             AttendanceChange(
                 usn=usn,
@@ -400,6 +459,7 @@ def replace_attendance(
                 new_status=new_by_usn.get(usn),
             )
             for usn in sorted(set(previous_statuses) | set(new_by_usn))
+            if previous_statuses.get(usn) != new_by_usn.get(usn)
         ]
         write_attendance_audit(
             db,
@@ -676,3 +736,167 @@ def reconcile_attendance(
         status_code=status.HTTP_400_BAD_REQUEST,
         detail="Invalid reconciliation payload.",
     )
+
+
+# ==============================================================================
+# 5. Fast-Path Attendance Correction & 60-Second Undo Endpoints
+# ==============================================================================
+
+@router.post(
+    "/{record_id}/corrections",
+    response_model=AttendanceCorrectionResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Fast-path single-student attendance correction with 60-second undo token",
+)
+def correct_single_attendance(
+    record_id: str,
+    payload: AttendanceCorrectionRequest,
+    current_user: AuthenticatedUser = Depends(
+        require_roles(Role.ADMIN, Role.FACULTY)
+    ),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Instant execution for authorized single-student edits.
+
+    Verifies teacher ownership of session, enforces optimistic concurrency,
+    writes append-only audit entry, and returns an opaque 60-second HMAC undo token.
+    """
+    clean_id = record_id.strip()
+    record = None
+    if clean_id.isdigit():
+        record = db.get(Attendance, int(clean_id))
+    if record is None:
+        record = db.query(Attendance).filter(Attendance.attendance_id == clean_id).first()
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Attendance record with ID '{clean_id}' not found.",
+        )
+
+    # Re-verify session exists & teacher is authorized
+    session = crud.get_session(db, session_id=record.session_id)
+    if not session:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session '{record.session_id}' not found.",
+        )
+    assert_session_edit_authorized(current_user, session, db)
+
+    current_ver = get_record_version(db, str(record.attendance_id), record.session_id, record.usn)
+    if payload.expected_version is not None and payload.expected_version != current_ver:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                f"Optimistic concurrency conflict: expected record version {payload.expected_version}, "
+                f"but current version is {current_ver}. Record was modified concurrently."
+            ),
+        )
+
+    old_status = record.status
+    target_status = payload.new_status
+
+    if old_status == target_status:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Student '{record.usn}' is already marked as {target_status}.",
+        )
+
+    # Perform update
+    record.status = target_status
+
+    # Write audit log
+    actor_id, actor_role = actor_identity(current_user)
+    changes = [
+        AttendanceChange(
+            usn=record.usn,
+            old_status=old_status,
+            new_status=target_status,
+            attendance_id=str(record.attendance_id),
+        )
+    ]
+    write_attendance_audit(
+        db,
+        actor_id=actor_id,
+        actor_role=actor_role,
+        session_id=record.session_id,
+        action="ATTENDANCE_CORRECTION",
+        changes=changes,
+        reason=payload.reason or "Single attendance fast-path correction",
+    )
+    db.commit()
+
+    new_ver = get_record_version(db, str(record.attendance_id), record.session_id, record.usn)
+
+    undo_tok, undo_exp = create_undo_token(
+        actor_id=actor_id,
+        record_id=str(record.attendance_id),
+        session_id=record.session_id,
+        usn=record.usn,
+        previous_status=old_status,
+        new_status=target_status,
+        version=new_ver,
+    )
+
+    return {
+        "record_id": str(record.attendance_id),
+        "session_id": record.session_id,
+        "usn": record.usn,
+        "previous_status": old_status,
+        "new_status": target_status,
+        "new_version": new_ver,
+        "undo_token": undo_tok,
+        "undo_expires_at": undo_exp,
+        "message": f"Successfully updated attendance for {record.usn} to {target_status}. Undo available for 60s.",
+    }
+
+
+@router.post(
+    "/{record_id}/undo",
+    response_model=AttendanceUndoResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Compensating 60-second undo rollback for an attendance edit",
+)
+def undo_single_attendance_by_path(
+    record_id: str,
+    payload: AttendanceUndoRequest,
+    current_user: AuthenticatedUser = Depends(
+        require_roles(Role.ADMIN, Role.FACULTY)
+    ),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Execute server-side compensating transaction within 60-second window."""
+    actor_id, actor_role = actor_identity(current_user)
+    return execute_undo(
+        db,
+        undo_token=payload.undo_token,
+        actor_id=actor_id,
+        actor_role=actor_role,
+        expected_version=payload.expected_version,
+        target_record_id=record_id.strip(),
+    )
+
+
+@router.post(
+    "/undo",
+    response_model=AttendanceUndoResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Compensating 60-second undo rollback using token payload binding",
+)
+def undo_single_attendance_generic(
+    payload: AttendanceUndoRequest,
+    current_user: AuthenticatedUser = Depends(
+        require_roles(Role.ADMIN, Role.FACULTY)
+    ),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Execute server-side compensating transaction using token target binding."""
+    actor_id, actor_role = actor_identity(current_user)
+    return execute_undo(
+        db,
+        undo_token=payload.undo_token,
+        actor_id=actor_id,
+        actor_role=actor_role,
+        expected_version=payload.expected_version,
+    )
+

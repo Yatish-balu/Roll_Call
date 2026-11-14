@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 
 from app.auth import Role, get_current_user, require_roles
 from app.auth.session_scope import resolve_session_scope
+from app.db import crud
 from app.db.models import (
     AcademicYear,
     Batch,
@@ -442,7 +443,14 @@ def create_timetable_entry(
         end_time=payload.end_time,
         subject_code=payload.subject_code,
         room_id=payload.room_id,
-        faculty_id=payload.faculty_id or (None if current_user.role == Role.ADMIN else current_user.user_id),
+        # A faculty caller always owns the entry they create: any client
+        # supplied faculty_id is ignored (only an administrator may attribute
+        # an entry to another teacher).
+        faculty_id=(
+            payload.faculty_id
+            if current_user.role == Role.ADMIN
+            else current_user.user_id
+        ),
         batch_id=payload.batch_id,
         duration_minutes=duration,
     )
@@ -487,9 +495,11 @@ def update_timetable_entry(
             detail=f"Timetable entry '{entry_id}' was not found.",
         )
 
-    if current_user.role != Role.ADMIN and entry.faculty_id != current_user.user_id:
-        _assert_subject_allowed(db, current_user, entry.subject_code)
-        if entry.faculty_id not in (None, current_user.user_id):
+    if current_user.role != Role.ADMIN:
+        # Ownership is checked on the record as it exists now. An entry
+        # without an owner (faculty_id IS NULL) is not owned by anybody and
+        # therefore cannot be modified by a faculty caller.
+        if entry.faculty_id != current_user.user_id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You can only modify your own timetable entries.",
@@ -502,9 +512,18 @@ def update_timetable_entry(
         "end_time": payload.end_time if payload.end_time is not None else entry.end_time,
         "subject_code": payload.subject_code.upper() if payload.subject_code else entry.subject_code,
         "room_id": payload.room_id if payload.room_id else entry.room_id,
-        "faculty_id": payload.faculty_id if payload.faculty_id is not None else entry.faculty_id,
+        # A faculty caller cannot hand an entry over to another teacher.
+        "faculty_id": (
+            payload.faculty_id
+            if current_user.role == Role.ADMIN and payload.faculty_id is not None
+            else entry.faculty_id
+        ),
         "batch_id": payload.batch_id if payload.batch_id is not None else entry.batch_id,
     }
+
+    # The subject of the RESULTING record must be one the caller is allowed to
+    # teach - not only the subject the entry happens to carry today.
+    _assert_subject_allowed(db, current_user, updated["subject_code"])
 
     try:
         validate_academic_window(updated["start_time"], updated["end_time"])

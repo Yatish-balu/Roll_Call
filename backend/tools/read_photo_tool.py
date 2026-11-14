@@ -10,7 +10,8 @@ Environment variables required (add to .env):
   GEMINI_API_KEY   - Google AI Studio API key for Gemini vision model.
 
 Optional environment variables:
-  PHOTO_LLM_MODEL  - Gemini model to use (default: gemini-2.0-flash).
+  PHOTO_LLM_MODEL  - Gemini model to use (default: gemini-3.5-flash-lite,
+                     the same model the chat provider uses).
   PHOTO_MIN_CONFIDENCE - Minimum confidence threshold to keep a row (default: 0.5).
   PHOTO_OCR_GPU    - Set to "1" to enable EasyOCR GPU acceleration (default: 0).
 """
@@ -82,7 +83,10 @@ Rules:
   {"usn": "1MS21CS003", "name": "Charlie Brown", "status": "UNREVIEWED", "confidence": 0.48}
 ]"""
 
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
+# Tried in order when the primary model is unavailable (retired model name,
+# regional outage, quota). Mirrors app/agent/provider.py's fallbacks.
+DEFAULT_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-3.5-flash")
 DEFAULT_MIN_CONFIDENCE = 0.5
 
 
@@ -325,7 +329,10 @@ def _call_gemini(rgb: np.ndarray, api_key: str, model: str) -> str:
     Raises RuntimeError on API / network failure.
     """
     try:
-        import google.generativeai as genai  # lazy import; optional dep
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", category=FutureWarning)
+            import google.generativeai as genai  # lazy import; optional dep
     except ImportError as exc:
         raise RuntimeError(
             "google-generativeai package not installed. "
@@ -499,7 +506,7 @@ def read_photo_tool(
         image_path:     Path to the input image (JPEG, PNG, BMP, etc.).
         api_key:        Google Gemini API key. Falls back to GEMINI_API_KEY env var.
         model:          Gemini model name. Falls back to PHOTO_LLM_MODEL env var or
-                        'gemini-2.0-flash'.
+                        DEFAULT_MODEL ('gemini-3.5-flash-lite').
         min_confidence: Rows below this threshold are forced to UNREVIEWED.
                         Falls back to PHOTO_MIN_CONFIDENCE env var or 0.5.
         force_ocr:      Skip LLM entirely and go straight to EasyOCR (useful for tests
@@ -531,25 +538,32 @@ def read_photo_tool(
 
     # Step 2: Try LLM
     if not force_ocr and resolved_key:
-        try:
-            raw_response = _call_gemini(rgb, resolved_key, resolved_model)
-            rows = _parse_and_validate_json(raw_response, resolved_min_conf, source, warn)
-            return PhotoExtractionResult(
-                image_path=image_path,
-                rows=rows,
-                source=source,
-                warnings=warn,
-                raw_llm_response=raw_response,
-            )
-        except json.JSONDecodeError as exc:
-            warn.append(f"LLM JSON parse error: {exc}. Falling back to EasyOCR.")
-            logger.warning("LLM returned malformed JSON — falling back to EasyOCR: %s", exc)
-        except ValueError as exc:
-            warn.append(f"LLM response validation error: {exc}. Falling back to EasyOCR.")
-            logger.warning("LLM response invalid — falling back to EasyOCR: %s", exc)
-        except Exception as exc:  # network, quota, etc.
-            warn.append(f"LLM call failed ({type(exc).__name__}: {exc}). Falling back to EasyOCR.")
-            logger.warning("LLM call failed — falling back to EasyOCR: %s", exc)
+        candidates = [resolved_model] + [
+            m for m in DEFAULT_FALLBACK_MODELS if m != resolved_model
+        ]
+        for candidate in candidates:
+            try:
+                raw_response = _call_gemini(rgb, resolved_key, candidate)
+                rows = _parse_and_validate_json(raw_response, resolved_min_conf, source, warn)
+                return PhotoExtractionResult(
+                    image_path=image_path,
+                    rows=rows,
+                    source=source,
+                    warnings=warn,
+                    raw_llm_response=raw_response,
+                )
+            except json.JSONDecodeError as exc:
+                warn.append(f"LLM JSON parse error ({candidate}): {exc}. Trying the next model.")
+                logger.warning("LLM %s returned malformed JSON — falling back to EasyOCR: %s", candidate, exc)
+            except ValueError as exc:
+                warn.append(f"LLM response validation error ({candidate}): {exc}. Trying the next model.")
+                logger.warning("LLM %s response invalid — falling back to EasyOCR: %s", candidate, exc)
+            except Exception as exc:  # network, quota, retired model name, etc.
+                warn.append(
+                    f"LLM call failed ({type(exc).__name__}: {exc}) on {candidate}. Trying next model."
+                )
+                logger.warning("LLM call failed on %s (%s: %s); trying next candidate", candidate, type(exc).__name__, exc)
+        warn.append("All LLM attempts failed. Falling back to EasyOCR.")
     elif not force_ocr and not resolved_key:
         warn.append("GEMINI_API_KEY not set. Falling back to EasyOCR.")
 

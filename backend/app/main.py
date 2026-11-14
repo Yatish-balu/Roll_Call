@@ -41,6 +41,9 @@ from app.routers import (
     sessions_router,
     students_router,
     timetable_router,
+    profile_router,
+    calendar_router,
+    agent_stream_router,
 )
 
 
@@ -74,8 +77,26 @@ async def lifespan(app: FastAPI):
 
     # Deliberate database connectivity check for production startup.
     # A failed Supabase connection must not be mistaken for a successful startup.
-    from app.db.connection import verify_database_connectivity
+    from app.db.connection import verify_database_connectivity, get_sync_session_factory
     verify_database_connectivity()
+
+    try:
+        from app.routers.profile import _ensure_profile_table
+        from app.routers.admin import _ensure_permission_requests_table
+        from app.db import crud
+        session_factory = get_sync_session_factory()
+        with session_factory() as session:
+            _ensure_profile_table(session)
+            _ensure_permission_requests_table(session)
+            crud.ensure_unallocated_room(session)
+    except Exception as exc:
+        logger.warning("Could not auto-create profile table or default room at startup: %s", exc)
+
+    try:
+        from app.agent.tools import register_all_tools
+        register_all_tools()
+    except Exception as exc:
+        logger.warning("Could not register agent tools at startup: %s", exc)
 
     # Password reset only works if a reset link can be delivered. Report the
     # missing provider at startup instead of discovering it on the first reset.
@@ -110,11 +131,14 @@ async def lifespan(app: FastAPI):
 
     from app.services.session_initialization import run_daily_initialization
 
-    auto_init_enabled = os.getenv("SESSION_AUTO_INIT", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    auto_init_enabled = (
+        os.getenv("SESSION_AUTO_INIT", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        and "pytest" not in sys.modules
     )
 
     async def _session_initialisation_worker() -> None:
@@ -496,6 +520,37 @@ def health_check():
     }
 
 
+@app.get("/models", tags=["General"])
+@app.get("/v1/models", tags=["General"])
+@app.get("/api/v1/models", tags=["General"])
+@app.get("/api/models", tags=["General"])
+def list_models():
+    """Return list of models supported by the RollCall AI backend in OpenAI-compatible format."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "gemini-3.5-flash-lite",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+            {
+                "id": "gemini-2.5-flash",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+            {
+                "id": "rollcall-ai-agent",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+        ],
+    }
+
+
 # ==============================================================================
 # 5. API Routers Registration (Dual Mount: /api/v1 and Playbook Contract /api)
 # ==============================================================================
@@ -513,6 +568,9 @@ app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(agent_stream_router, prefix="/api/v1")
+app.include_router(profile_router, prefix="/api/v1")
+app.include_router(calendar_router, prefix="/api/v1")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
 app.include_router(auth_router, prefix="/api")
@@ -527,6 +585,9 @@ app.include_router(attendance_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+app.include_router(agent_stream_router, prefix="/api")
+app.include_router(profile_router, prefix="/api")
+app.include_router(calendar_router, prefix="/api")
 
 
 
