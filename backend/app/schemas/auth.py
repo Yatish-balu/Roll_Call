@@ -71,3 +71,17 @@ class UserMeResponse(BaseModel):
     subject_codes: List[str] = Field(default_factory=list, description="Assigned subject codes")
 
 
+class RevokeAllSessionsRequest(BaseModel):
+    """Payload to confirm revoking all other sessions with email verification OTP."""
+    otp: Optional[str] = Field(None, description="6-digit verification code sent to registered email", max_length=16)
+
+
+class RevokeAllOtpResponse(BaseModel):
+    """Response when requesting an email verification code for session revocation."""
+    message: str
+    email: str
+    expires_in_seconds: int = 300
+    dev_otp: Optional[str] = None
+
+
+

@@ -66,6 +66,20 @@ export async function revokeSession(sessionId: string): Promise<{ message?: stri
   );
 }
 
-export async function revokeAllOtherSessions(): Promise<{ message?: string }> {
-  return apiClient.post<{ message?: string }>("/api/v1/auth/sessions/revoke-all");
+export interface RevokeAllOtpResult {
+  message: string;
+  email: string;
+  expires_in_seconds: number;
+  dev_otp?: string;
 }
+
+export async function requestRevokeAllSessionsOtp(): Promise<RevokeAllOtpResult> {
+  return apiClient.post<RevokeAllOtpResult>("/api/v1/auth/sessions/revoke-all/request-otp");
+}
+
+export async function revokeAllOtherSessions(otp?: string): Promise<{ message?: string }> {
+  return apiClient.post<{ message?: string }>("/api/v1/auth/sessions/revoke-all", {
+    otp: otp || null,
+  });
+}
+

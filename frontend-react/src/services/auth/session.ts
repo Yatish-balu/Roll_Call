@@ -128,6 +128,14 @@ export function clearAuthSession(shouldRedirect = false): void {
     expiresAtUtc: null,
   };
 
+  if (typeof window !== "undefined") {
+    try {
+      window.localStorage.removeItem("rollcall_recent_chat_messages_v1");
+    } catch {
+      // Ignore storage cleanup error during logout
+    }
+  }
+
   notifyListeners();
 
   if (shouldRedirect && typeof window !== "undefined") {

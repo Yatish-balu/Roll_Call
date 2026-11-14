@@ -222,3 +222,63 @@ class AttendanceEditConfirmResponse(BaseModel):
     request_id: Optional[str] = Field(None, description="Correlation id")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class UserChatThreadSummary(BaseModel):
+    """Summary of a user-scoped chat thread for recent list."""
+
+    thread_id: str
+    user_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    is_pinned: bool = False
+    is_archived: bool = False
+    message_count: int = 0
+    last_message: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserChatMessageItem(BaseModel):
+    """Individual message in a thread."""
+
+    message_id: str
+    thread_id: str
+    user_id: str
+    sender: str
+    text: str
+    timestamp: str
+    metadata_json: Optional[str] = None
+    created_at: str
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class UserChatThreadDetail(BaseModel):
+    """Detailed view of a thread with all messages."""
+
+    thread_id: str
+    user_id: str
+    title: str
+    created_at: str
+    updated_at: str
+    is_pinned: bool = False
+    is_archived: bool = False
+    messages: List[UserChatMessageItem] = Field(default_factory=list)
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CreateChatThreadRequest(BaseModel):
+    """Request payload to create a new chat thread."""
+
+    title: Optional[str] = Field(None, max_length=200)
+
+
+class SyncChatThreadRequest(BaseModel):
+    """Request payload to sync messages in a chat thread."""
+
+    title: Optional[str] = Field(None, max_length=200)
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+

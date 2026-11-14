@@ -15,6 +15,7 @@ from sqlalchemy import (
     Integer,
     String,
     Float,
+    Text,
     UniqueConstraint,
     event,
     text,
@@ -1114,3 +1115,91 @@ class AcademicEvent(Base):
 
     def __repr__(self) -> str:
         return f"<AcademicEvent(event_id={self.event_id!r}, title={self.title!r}, date={self.event_date!r})>"
+
+
+class UserChatThread(Base):
+    """User-scoped conversational thread for AI attendance assistant."""
+
+    __tablename__ = "user_chat_threads"
+
+    thread_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(
+        String, nullable=False, default="New Conversation", server_default="New Conversation"
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    is_pinned: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_archived: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+    messages: Mapped[List["UserChatMessage"]] = relationship(
+        "UserChatMessage",
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="UserChatMessage.created_at",
+    )
+
+    __table_args__ = (
+        Index("idx_user_chat_threads_user_id", "user_id"),
+        Index("idx_user_chat_threads_updated_at", "updated_at"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "thread_id": self.thread_id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "is_pinned": bool(self.is_pinned),
+            "is_archived": bool(self.is_archived),
+        }
+
+    def __repr__(self) -> str:
+        return f"<UserChatThread(thread_id={self.thread_id!r}, user_id={self.user_id!r}, title={self.title!r})>"
+
+
+class UserChatMessage(Base):
+    """Individual message belonging to a UserChatThread."""
+
+    __tablename__ = "user_chat_messages"
+
+    message_id: Mapped[str] = mapped_column(String, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(
+        String, ForeignKey("user_chat_threads.thread_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    sender: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    timestamp: Mapped[str] = mapped_column(String, nullable=False)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+
+    thread: Mapped["UserChatThread"] = relationship("UserChatThread", back_populates="messages")
+
+    __table_args__ = (
+        Index("idx_user_chat_messages_thread_id", "thread_id"),
+        Index("idx_user_chat_messages_user_id", "user_id"),
+        Index("idx_user_chat_messages_created_at", "created_at"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "thread_id": self.thread_id,
+            "user_id": self.user_id,
+            "sender": self.sender,
+            "text": self.text,
+            "timestamp": self.timestamp,
+            "metadata_json": self.metadata_json,
+            "created_at": self.created_at,
+        }
+
+    def __repr__(self) -> str:
+        return f"<UserChatMessage(message_id={self.message_id!r}, thread_id={self.thread_id!r}, sender={self.sender!r})>"
+

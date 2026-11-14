@@ -350,4 +350,71 @@ export function subscribeToAgentTaskStream(
   };
 }
 
+// ---------------------------------------------------------------------------
+// User-Scoped Multi-Chat Threads & Persistence
+// ---------------------------------------------------------------------------
+
+export interface UserChatThreadSummary {
+  thread_id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  is_pinned: boolean;
+  is_archived: boolean;
+  message_count: number;
+  last_message?: string | null;
+}
+
+export interface UserChatMessageItem {
+  message_id: string;
+  thread_id: string;
+  user_id: string;
+  sender: string;
+  text: string;
+  timestamp: string;
+  metadata_json?: string | null;
+  created_at: string;
+}
+
+export interface UserChatThreadDetail {
+  thread_id: string;
+  user_id: string;
+  title: string;
+  created_at: string;
+  updated_at: string;
+  is_pinned: boolean;
+  is_archived: boolean;
+  messages: UserChatMessageItem[];
+}
+
+export async function fetchUserChatThreads(): Promise<UserChatThreadSummary[]> {
+  return apiClient.get<UserChatThreadSummary[]>("/api/v1/agent/threads");
+}
+
+export async function createChatThread(title?: string): Promise<UserChatThreadDetail> {
+  return apiClient.post<UserChatThreadDetail>("/api/v1/agent/threads", { title: title || null });
+}
+
+export async function fetchChatThread(threadId: string): Promise<UserChatThreadDetail> {
+  return apiClient.get<UserChatThreadDetail>(`/api/v1/agent/threads/${encodeURIComponent(threadId)}`);
+}
+
+export async function syncChatThread(
+  threadId: string,
+  payload: { title?: string; messages: unknown[] }
+): Promise<UserChatThreadDetail> {
+  return apiClient.post<UserChatThreadDetail>(
+    `/api/v1/agent/threads/${encodeURIComponent(threadId)}/sync`,
+    payload
+  );
+}
+
+export async function deleteChatThread(threadId: string): Promise<{ message: string; thread_id: string }> {
+  return apiClient.delete<{ message: string; thread_id: string }>(
+    `/api/v1/agent/threads/${encodeURIComponent(threadId)}`
+  );
+}
+
+
 

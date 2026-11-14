@@ -51,6 +51,7 @@ from app.security.uploads import (
     check_image_dimensions,
     get_malware_scanner,
 )
+from app.db.models import UserChatThread, UserChatMessage
 from app.schemas.agent import (
     AgentConfirmRequest,
     AgentResponseSchema,
@@ -60,6 +61,11 @@ from app.schemas.agent import (
     AttendanceEditProposalRequest,
     AttendanceEditProposalResponse,
     ChatQueryRequest,
+    CreateChatThreadRequest,
+    SyncChatThreadRequest,
+    UserChatMessageItem,
+    UserChatThreadDetail,
+    UserChatThreadSummary,
 )
 from app.schemas.auth import AuthenticatedUser
 from tools.validate_tool import validate_tool
@@ -992,3 +998,225 @@ def get_agent_status(
         confidence_threshold=CONFIDENCE_CONFIRMATION_THRESHOLD,
         available_tools=tools,
     )
+
+
+# ---------------------------------------------------------------------------
+# User-Scoped Multi-Chat Threads & Persistence
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/threads",
+    response_model=List[UserChatThreadSummary],
+    summary="List recent chat threads for current authenticated user",
+    description="Returns user-scoped chat threads sorted by updated_at descending. Strictly isolated per account.",
+)
+def list_user_chat_threads(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[UserChatThreadSummary]:
+    threads = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.user_id == current_user.user_id, UserChatThread.is_archived == 0)
+        .order_by(UserChatThread.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+    result: List[UserChatThreadSummary] = []
+    for t in threads:
+        msg_count = len(t.messages)
+        last_msg = t.messages[-1] if t.messages else None
+        result.append(
+            UserChatThreadSummary(
+                thread_id=t.thread_id,
+                user_id=t.user_id,
+                title=t.title,
+                created_at=t.created_at,
+                updated_at=t.updated_at,
+                is_pinned=bool(t.is_pinned),
+                is_archived=bool(t.is_archived),
+                message_count=msg_count,
+                last_message=last_msg.text[:60] if last_msg else None,
+            )
+        )
+    return result
+
+
+@router.post(
+    "/threads",
+    response_model=UserChatThreadDetail,
+    summary="Create a new chat thread for current authenticated user",
+)
+def create_user_chat_thread(
+    payload: Optional[CreateChatThreadRequest] = None,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserChatThreadDetail:
+    now = _utcnow_iso()
+    thread_id = f"thread_{uuid.uuid4().hex[:12]}"
+    title = (payload.title.strip() if payload and payload.title else "New Conversation") or "New Conversation"
+    thread = UserChatThread(
+        thread_id=thread_id,
+        user_id=current_user.user_id,
+        title=title,
+        created_at=now,
+        updated_at=now,
+        is_pinned=0,
+        is_archived=0,
+    )
+    db.add(thread)
+    db.commit()
+    db.refresh(thread)
+    return UserChatThreadDetail(
+        thread_id=thread.thread_id,
+        user_id=thread.user_id,
+        title=thread.title,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+        is_pinned=bool(thread.is_pinned),
+        is_archived=bool(thread.is_archived),
+        messages=[],
+    )
+
+
+@router.get(
+    "/threads/{thread_id}",
+    response_model=UserChatThreadDetail,
+    summary="Get chat thread messages for current authenticated user",
+)
+def get_user_chat_thread(
+    thread_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserChatThreadDetail:
+    thread = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+        .first()
+    )
+    if not thread:
+        raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
+
+    msgs = (
+        db.query(UserChatMessage)
+        .filter(UserChatMessage.thread_id == thread_id)
+        .order_by(UserChatMessage.created_at.asc())
+        .all()
+    )
+    return UserChatThreadDetail(
+        thread_id=thread.thread_id,
+        user_id=thread.user_id,
+        title=thread.title,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+        is_pinned=bool(thread.is_pinned),
+        is_archived=bool(thread.is_archived),
+        messages=[
+            UserChatMessageItem(
+                message_id=m.message_id,
+                thread_id=m.thread_id,
+                user_id=m.user_id,
+                sender=m.sender,
+                text=m.text,
+                timestamp=m.timestamp,
+                metadata_json=m.metadata_json,
+                created_at=m.created_at,
+            )
+            for m in msgs
+        ],
+    )
+
+
+@router.post(
+    "/threads/{thread_id}/sync",
+    response_model=UserChatThreadDetail,
+    summary="Synchronize and persist chat messages in a thread",
+)
+def sync_user_chat_thread_messages(
+    thread_id: str,
+    payload: SyncChatThreadRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserChatThreadDetail:
+    thread = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+        .first()
+    )
+    now = _utcnow_iso()
+    if not thread:
+        thread = UserChatThread(
+            thread_id=thread_id,
+            user_id=current_user.user_id,
+            title=(payload.title or "New Conversation").strip() or "New Conversation",
+            created_at=now,
+            updated_at=now,
+            is_pinned=0,
+            is_archived=0,
+        )
+        db.add(thread)
+        db.flush()
+
+    if payload.title and payload.title.strip():
+        thread.title = payload.title.strip()[:200]
+    elif thread.title == "New Conversation" and payload.messages:
+        for msg in payload.messages:
+            if msg.get("sender") == "user" and msg.get("text"):
+                clean_title = re.sub(r"\s+", " ", str(msg["text"])).strip()
+                if clean_title:
+                    thread.title = clean_title[:45] + ("…" if len(clean_title) > 45 else "")
+                    break
+
+    thread.updated_at = now
+
+    db.query(UserChatMessage).filter(UserChatMessage.thread_id == thread_id).delete()
+    db.flush()
+
+    items_to_add = []
+    for idx, msg in enumerate(payload.messages):
+        msg_id = str(msg.get("id") or f"msg_{uuid.uuid4().hex[:10]}_{idx}")
+        meta = msg.get("metadata") or {
+            k: v for k, v in msg.items() if k not in ("id", "sender", "text", "timestamp")
+        }
+        meta_str = json.dumps(meta) if meta else None
+        chat_msg = UserChatMessage(
+            message_id=msg_id,
+            thread_id=thread.thread_id,
+            user_id=current_user.user_id,
+            sender=str(msg.get("sender", "assistant")),
+            text=str(msg.get("text", "")),
+            timestamp=str(msg.get("timestamp", "")),
+            metadata_json=meta_str,
+            created_at=now,
+        )
+        items_to_add.append(chat_msg)
+
+    if items_to_add:
+        db.add_all(items_to_add)
+
+    db.commit()
+    db.refresh(thread)
+
+    return get_user_chat_thread(thread_id, current_user, db)
+
+
+@router.delete(
+    "/threads/{thread_id}",
+    summary="Delete a chat thread and all its messages",
+)
+def delete_user_chat_thread(
+    thread_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    thread = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+        .first()
+    )
+    if not thread:
+        raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
+
+    db.delete(thread)
+    db.commit()
+    return {"message": "Chat thread deleted successfully.", "thread_id": thread_id}
+

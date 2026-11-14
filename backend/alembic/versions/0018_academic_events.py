@@ -46,3 +46,4 @@ def downgrade() -> None:
         op.drop_index("idx_academic_events_type", table_name="academic_events")
         op.drop_index("idx_academic_events_date", table_name="academic_events")
         op.drop_table("academic_events")
+
