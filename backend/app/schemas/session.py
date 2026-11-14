@@ -104,8 +104,41 @@ class SessionResponse(SessionBase):
     created_at: Optional[str] = Field(None, description="Session creation timestamp (UTC ISO 8601)")
     teacher_id: Optional[str] = Field(None, description="Owning teacher user identifier")
     subject_code: Optional[str] = Field(None, description="Normalized subject code of the session")
+    editable: bool = Field(
+        True,
+        description="Whether the calling role may still edit this session (N5 24-hour lock; ADMIN always true)",
+    )
+    editable_until_utc: Optional[str] = Field(
+        None,
+        description="UTC timestamp when the edit window closes (created_at + lock hours), or null if unknown",
+    )
+    locked: bool = Field(
+        False,
+        description="True exactly when editable is false (kept explicit so the UI never computes it)",
+    )
+    is_delegated: Optional[bool] = Field(None, description="Whether this session has an active proxy delegation")
+    delegation: Optional[dict] = Field(None, description="Delegation metadata (proxy faculty, reason, etc.)")
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class SessionAttendanceEditRequest(BaseModel):
+    """Body of ``PUT /api/sessions/{id}/attendance/{usn}`` (N6)."""
+
+    status: str = Field(..., description="New status: PRESENT or ABSENT")
+    reason: Optional[str] = Field(
+        None,
+        max_length=1000,
+        description="Required when an ADMIN edits a session older than the lock window",
+    )
+
+    @field_validator("status")
+    @classmethod
+    def validate_status(cls, v: str) -> str:
+        cleaned = (v or "").strip().upper()
+        if cleaned not in {"PRESENT", "ABSENT"}:
+            raise ValueError("status must be 'PRESENT' or 'ABSENT'")
+        return cleaned
 
 
 class SessionPageResponse(BaseModel):
@@ -119,4 +152,50 @@ class SessionPageResponse(BaseModel):
 
 class SessionBulkCreate(BaseModel):
     sessions: List[SessionCreate] = Field(..., min_length=1, description="List of sessions to create")
+
+
+class ExtraSessionCreate(BaseModel):
+    subject_code: str = Field(..., min_length=1, max_length=50, description="Subject code (e.g. CN)")
+    subject_name: Optional[str] = Field(None, max_length=255, description="Subject name")
+    date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="Class date YYYY-MM-DD")
+    start_time: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="Start time HH:MM")
+    end_time: str = Field(..., pattern=r"^\d{2}:\d{2}$", description="End time HH:MM")
+    room_id: str = Field(..., min_length=1, max_length=50, description="Room ID (e.g. CDS10-105)")
+    dept_id: Optional[str] = Field(None, max_length=50, description="Department code (e.g. CSE-CY)")
+    semester_number: Optional[int] = Field(None, ge=1, le=8, description="Semester 1 - 8")
+    section_id: Optional[str] = Field(None, max_length=50, description="Section ID")
+    batch_id: Optional[str] = Field(None, max_length=50, description="Batch ID")
+    class_type: str = Field(default="EXTRA", description="Type: EXTRA, REMEDIAL, EMERGENCY")
+
+
+class ClassDelegationCreate(BaseModel):
+    session_id: str = Field(..., min_length=1, max_length=50, description="Session to delegate")
+    substitute_faculty_id: str = Field(..., min_length=1, max_length=64, description="Substitute faculty ID")
+    delegation_type: str = Field(default="PROXY", description="PROXY or EXCHANGE")
+    exchange_session_id: Optional[str] = Field(None, max_length=50, description="Exchange session ID if type is EXCHANGE")
+    reason: Optional[str] = Field(None, max_length=255, description="Reason for delegation (e.g. Leave)")
+
+
+class ClassDelegationResponse(BaseModel):
+    delegation_id: str
+    session_id: str
+    original_faculty_id: str
+    original_faculty_name: Optional[str] = None
+    substitute_faculty_id: str
+    substitute_faculty_name: Optional[str] = None
+    delegation_date: str
+    delegation_type: str
+    exchange_session_id: Optional[str] = None
+    reason: Optional[str] = None
+    status: str
+    subject_code: Optional[str] = None
+    subject_name: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    room_id: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+    model_config = ConfigDict(from_attributes=True)
+
 

@@ -43,7 +43,7 @@ Max 60 lines.
 | PUT | `/api/sessions/{id}/attendance/{usn}` | auth | Atomic attendance edit + audit |
 | POST | `/api/agent/attendance/propose` | auth | N7: propose chat attendance edit |
 | POST | `/api/agent/attendance/confirm` | auth | N7: confirm pending edit |
-| POST | `/api/chat/confirm` | auth | N7: chat confirm (pending_id + yes/no) |
+| POST | `/api/agent/chat/confirm?pending_id=&decision=yes|no` | auth | N7: chat confirm |
 | GET | `/api/defaulters` | auth | N10: defaulter analysis |
 | GET | `/api/admin/defaulters.pdf` | admin | N11: defaulter PDF report |
 | GET | `/api/students/lookup?q=` | auth | N12: student search |
@@ -53,7 +53,7 @@ Max 60 lines.
 | GET | `/api/calendar/export.ics` | admin | iCalendar export |
 | GET | `/api/admin/overview` | admin | Admin dashboard overview |
 | GET | `/api/admin/faculty-uploads` | admin | Per-teacher upload stats |
-| GET | `/api/admin/audit-log` | admin | Read-only audit log |
+| GET | `/api/admin/audit-logs` | admin | Read-only audit log |
 
 ## Agent Tools
 

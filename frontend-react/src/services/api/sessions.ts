@@ -23,6 +23,17 @@ export interface SessionItem {
   teacher_id?: string;
   created_at?: string;
   allocations?: SessionAllocation[];
+  is_delegated?: boolean;
+  delegation?: {
+    delegation_id: string;
+    type: string;
+    reason?: string;
+    from_user_id: string;
+    from_name: string;
+    to_user_id: string;
+    to_name: string;
+    is_proxy_for_me: boolean;
+  } | null;
 }
 
 export interface SessionPage {
@@ -131,4 +142,101 @@ export async function initializeSessions(date?: string): Promise<InitializationR
   return apiClient.post<InitializationResult>("/api/v1/sessions/initialize", null, {
     params: date ? { date } : undefined,
   });
+}
+
+export interface FacultyColleague {
+  user_id: string;
+  name: string;
+  email: string;
+  role: string;
+  assigned_subjects: string[];
+}
+
+export interface ExtraSessionInput {
+  subject_code: string;
+  subject_name?: string;
+  date: string;
+  start_time: string;
+  end_time: string;
+  room_id: string;
+  dept_id?: string;
+  semester_number?: number;
+  section_id?: string;
+  batch_id?: string;
+  class_type?: string;
+}
+
+export interface ExtraSessionResponse {
+  session_id: string;
+  date: string;
+  subject: string;
+  subject_code: string;
+  start_time: string;
+  end_time: string;
+  room_id: string;
+  class_type: string;
+  students_enrolled: number;
+  message: string;
+}
+
+export interface ClassDelegationInput {
+  session_id: string;
+  substitute_faculty_id: string;
+  delegation_type?: "PROXY" | "EXCHANGE";
+  exchange_session_id?: string;
+  reason?: string;
+}
+
+export interface ClassDelegationItem {
+  delegation_id: string;
+  session_id: string;
+  original_faculty_id: string;
+  original_faculty_name?: string;
+  substitute_faculty_id: string;
+  substitute_faculty_name?: string;
+  delegation_date: string;
+  delegation_type: string;
+  exchange_session_id?: string;
+  reason?: string;
+  status: string;
+  subject_code?: string;
+  subject_name?: string;
+  start_time?: string;
+  end_time?: string;
+  room_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ClassDelegationsReport {
+  received: ClassDelegationItem[];
+  given: ClassDelegationItem[];
+}
+
+export async function fetchFacultyColleagues(): Promise<FacultyColleague[]> {
+  return apiClient.get<FacultyColleague[]>("/api/v1/sessions/colleagues");
+}
+
+export async function createExtraSession(
+  payload: ExtraSessionInput
+): Promise<ExtraSessionResponse> {
+  return apiClient.post<ExtraSessionResponse>("/api/v1/sessions/extra", payload);
+}
+
+export async function createClassDelegation(
+  payload: ClassDelegationInput
+): Promise<ClassDelegationItem> {
+  return apiClient.post<ClassDelegationItem>("/api/v1/sessions/delegations", payload);
+}
+
+export async function fetchMyClassDelegations(): Promise<ClassDelegationsReport> {
+  return apiClient.get<ClassDelegationsReport>("/api/v1/sessions/delegations/my");
+}
+
+export async function cancelClassDelegation(
+  delegationId: string
+): Promise<{ message: string; delegation_id: string }> {
+  return apiClient.delete<{ message: string; delegation_id: string }>(
+    `/api/v1/sessions/delegations/${encodeURIComponent(delegationId)}`
+  );
 }

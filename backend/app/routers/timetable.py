@@ -205,6 +205,10 @@ def get_timetable_week(
         pattern=r"^\d{4}-\d{2}-\d{2}$",
         description="Any date inside the requested week (the Monday is used)",
     ),
+    include_all: bool = Query(
+        False,
+        description="Include all timetable slots for full department view",
+    ),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -230,11 +234,19 @@ def get_timetable_week(
                 selectinload(TimetableEntry.batch),
             )
         )
-        if current_user.role != Role.ADMIN:
+        if current_user.role != Role.ADMIN and not include_all:
             codes = _mapped_subject_codes(db, current_user)
+            from app.db.models import ClassDelegation, SessionAllocation
+            del_entry_ids = select(SessionAllocation.timetable_entry_id).join(
+                ClassDelegation, ClassDelegation.session_id == SessionAllocation.session_id
+            ).where(
+                ClassDelegation.substitute_faculty_id == current_user.user_id,
+                ClassDelegation.status == "ACTIVE",
+            )
             stmt = stmt.where(
                 (TimetableEntry.faculty_id == current_user.user_id)
                 | (TimetableEntry.subject_code.in_(codes) if codes else TimetableEntry.faculty_id.is_(None))
+                | (TimetableEntry.entry_id.in_(del_entry_ids))
             )
         entries = list(db.execute(stmt).scalars().all())
 

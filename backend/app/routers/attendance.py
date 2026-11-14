@@ -34,10 +34,13 @@ from app.services.undo_service import (
     execute_undo,
     get_record_version,
 )
+from app.config import LOCK_HOURS
+from app.policy import is_editable
 from app.services.attendance_edits import (
     AttendanceChange,
     actor_identity,
     assert_session_edit_authorized,
+    assert_session_edit_unlocked,
     capture_attendance_statuses,
     write_attendance_audit,
 )
@@ -80,14 +83,52 @@ def _assert_session_ownership(
     session: Dict[str, Any],
     db: Optional[Session] = None,
 ) -> None:
-    """Enforce faculty ownership of a session (N3).
+    """Enforce faculty ownership of a session (N3) **for reads and writes**.
 
     The policy itself lives in ``app.services.attendance_edits`` so that the
     direct API, the chat confirmation flow and the legacy UI commit all use
-    exactly the same rule. Session age and lifecycle status are not part of
-    the decision: there is no time-based editing lock (N5).
+    exactly the same rule. This function does not consider session age, so a
+    read of an old session stays allowed; write paths additionally call
+    :func:`_assert_session_editable`.
     """
     assert_session_edit_authorized(current_user, session, db)
+
+
+def _is_admin_override_required(
+    current_user: AuthenticatedUser,
+    session: Dict[str, Any],
+) -> bool:
+    """True when an ADMIN is editing a session whose lock window has closed."""
+    actor_role = getattr(current_user, "role", None)
+    role_str = str(actor_role.value if hasattr(actor_role, "value") else actor_role).upper()
+    if role_str != "ADMIN":
+        return False
+    return not is_editable(session.get("created_at"), "FACULTY")
+
+
+def _assert_session_editable(
+    current_user: AuthenticatedUser,
+    session: Dict[str, Any],
+    db: Optional[Session] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """Authorization **plus** the N5 24-hour lock, for write paths only.
+
+    ADMIN is never locked, but an admin edit of a locked session must carry a
+    reason so the override is explainable in the audit trail.
+    """
+    _assert_session_ownership(current_user, session, db)
+    if _is_admin_override_required(current_user, session):
+        if not (reason or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Admin override of a session older than {int(LOCK_HOURS)} hours "
+                    "requires a reason."
+                ),
+            )
+        return
+    assert_session_edit_unlocked(current_user, session)
 
 
 def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
@@ -185,11 +226,14 @@ def record_attendance(
     payload: AttendanceCreate,
     response: Response,
     upsert: bool = Query(False, description="Whether to update if record already exists"),
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     clean_usn = payload.usn.strip().upper()
     _verify_student_exists(db, clean_usn)
@@ -248,6 +292,7 @@ def record_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_UPSERT" if existing else "ATTENDANCE_RECORD",
+            reason=reason,
             changes=[
                 AttendanceChange(
                     usn=clean_usn,
@@ -288,11 +333,14 @@ def bulk_record_attendance(
     session_id: str,
     payload: AttendanceBulkCreate,
     upsert: bool = Query(False, description="Whether to update records if already existing"),
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     # Check for duplicate USNs within the request payload
     usns = [r.usn.strip().upper() for r in payload.records]
@@ -365,6 +413,7 @@ def bulk_record_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_BULK_UPSERT" if upsert else "ATTENDANCE_BULK",
+            reason=reason,
             changes=[
                 AttendanceChange(
                     usn=r["usn"],
@@ -406,11 +455,14 @@ def bulk_record_attendance(
 def replace_attendance(
     session_id: str,
     payload: AttendanceBulkCreate,
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     # Validate duplicates in payload
     usns = [r.usn.strip().upper() for r in payload.records]
@@ -467,6 +519,7 @@ def replace_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_REPLACE",
+            reason=reason,
             changes=changes,
         )
         db.commit()
@@ -590,11 +643,14 @@ def get_student_attendance_history(
 def reconcile_attendance(
     session_id: str,
     payload: SessionReconcilePayload,
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     # ---------------------------------------------------------
     # Mode 1: Single or Bulk Manual Resolutions
@@ -644,6 +700,7 @@ def reconcile_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_RECONCILE",
+            reason=reason,
             changes=[
                 AttendanceChange(
                     usn=rec["usn"],

@@ -18,6 +18,8 @@ import {
   todayIso,
   validateAcademicWindow,
 } from "@/lib/schedule";
+import { ExtraClassModal } from "@/features/sessions/components/ExtraClassModal";
+import { DelegateClassModal } from "@/features/sessions/components/DelegateClassModal";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -31,6 +33,15 @@ export function TimetableView() {
   const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<string>("Monday");
   const [viewType, setViewType] = useState<"day" | "grid">("day");
+  const [viewScope, setViewScope] = useState<"my" | "dept">("my");
+  const [isExtraModalOpen, setIsExtraModalOpen] = useState(false);
+  const [delegatingEntry, setDelegatingEntry] = useState<{
+    sessionId: string;
+    subjectCode: string;
+    subjectName: string;
+    date: string;
+    timeSlot: string;
+  } | null>(null);
 
   // Entry editor
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -53,14 +64,16 @@ export function TimetableView() {
     setIsLoading(true);
     setError(null);
     try {
-      const data = await fetchTimetableWeek();
+      const data = await fetchTimetableWeek({
+        include_all: viewScope === "dept" || isAdmin,
+      });
       setWeek(data);
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "The timetable could not be loaded.");
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [viewScope, isAdmin]);
 
   useEffect(() => {
     void loadWeek();
@@ -224,14 +237,41 @@ export function TimetableView() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          {/* My vs Department Switcher */}
+          <div className="inline-flex rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] p-1 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setViewScope("my")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                viewScope === "my"
+                  ? "bg-[#3F451F] text-[#EDE8D8]"
+                  : "text-[#77735F] hover:text-[#24251C]"
+              }`}
+            >
+              My Classes
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewScope("dept")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                viewScope === "dept"
+                  ? "bg-[#3F451F] text-[#EDE8D8]"
+                  : "text-[#77735F] hover:text-[#24251C]"
+              }`}
+            >
+              Department View
+            </button>
+          </div>
+
+          {/* Day vs Grid */}
           <div className="inline-flex rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] p-1 shadow-2xs">
             {(["day", "grid"] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
                 onClick={() => setViewType(mode)}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                   viewType === mode
                     ? "bg-[#3F451F] text-[#EDE8D8]"
                     : "text-[#77735F] hover:text-[#24251C]"
@@ -241,10 +281,21 @@ export function TimetableView() {
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            onClick={() => setIsExtraModalOpen(true)}
+            className="px-3 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white text-xs font-bold transition-colors cursor-pointer flex items-center space-x-1 shadow-2xs"
+            title="Quickly schedule an extra or makeup class"
+          >
+            <span>➕</span>
+            <span>Extra Class</span>
+          </button>
+
           <button
             type="button"
             onClick={() => void loadWeek()}
-            className="px-3.5 py-2 rounded-xl bg-[#FBF8F0] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
+            className="px-3 py-2 rounded-xl bg-[#FBF8F0] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
           >
             Refresh
           </button>
@@ -253,7 +304,7 @@ export function TimetableView() {
               type="button"
               onClick={() => openCreate(selectedDay)}
               disabled={!reference || reference.timetables.length === 0}
-              className="px-3.5 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] transition-colors disabled:opacity-50 cursor-pointer"
+              className="px-3 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] transition-colors disabled:opacity-50 cursor-pointer"
               title={
                 reference && reference.timetables.length === 0
                   ? "No timetable is configured on the server yet"
@@ -400,18 +451,42 @@ export function TimetableView() {
                         </div>
                       </div>
 
-                      <div className="shrink-0 flex items-center gap-2">
+                      <div className="shrink-0 flex items-center gap-2 flex-wrap">
                         <Link
-                          to="/attendance"
-                          className="px-4 py-2.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all shadow-2xs"
+                          to={`/attendance?session=${encodeURIComponent(
+                            `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
+                              entry.period_number
+                            ).padStart(2, "0")}`
+                          )}`}
+                          className="px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all shadow-2xs flex items-center space-x-1"
                         >
-                          Take Attendance
+                          <span>🟢</span>
+                          <span>Attendance</span>
                         </Link>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDelegatingEntry({
+                              sessionId: `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
+                                entry.period_number
+                              ).padStart(2, "0")}`,
+                              subjectCode: entry.subject_code,
+                              subjectName: entry.subject_name || entry.subject_code,
+                              date: today,
+                              timeSlot: `${entry.start_time} - ${entry.end_time}`,
+                            })
+                          }
+                          className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer flex items-center space-x-1"
+                          title="Delegate this class to a colleague"
+                        >
+                          <span>🤝</span>
+                          <span>Delegate</span>
+                        </button>
                         {canScheduleSessions && (
                           <button
                             type="button"
                             onClick={() => openEdit(entry)}
-                            className="px-3 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
+                            className="px-2.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
                           >
                             Edit
                           </button>
@@ -717,6 +792,26 @@ export function TimetableView() {
             </form>
           </div>
         </div>
+      )}
+      {/* Extra Class Modal */}
+      <ExtraClassModal
+        isOpen={isExtraModalOpen}
+        onClose={() => setIsExtraModalOpen(false)}
+        onSuccess={() => void loadWeek()}
+      />
+
+      {/* Class Delegation Modal */}
+      {delegatingEntry && (
+        <DelegateClassModal
+          isOpen={Boolean(delegatingEntry)}
+          onClose={() => setDelegatingEntry(null)}
+          onSuccess={() => void loadWeek()}
+          sessionId={delegatingEntry.sessionId}
+          subjectCode={delegatingEntry.subjectCode}
+          subjectName={delegatingEntry.subjectName}
+          classDate={delegatingEntry.date}
+          timeSlot={delegatingEntry.timeSlot}
+        />
       )}
     </div>
   );

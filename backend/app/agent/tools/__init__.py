@@ -41,6 +41,7 @@ from app.agent.tools.db_agent_tools import (
     create_attendance_session,
     update_user_profile,
 )
+from app.agent.tools.chat_edit_tools import CHAT_ATTENDANCE_EDIT_TOOL
 
 logger = logging.getLogger("rollcall.agent.tools")
 
@@ -58,6 +59,8 @@ ALL_TOOLS = [
     EXPORT_ATTENDANCE_TOOL,
     SINGLE_ATTENDANCE_CORRECTION_TOOL,
     BULK_ATTENDANCE_PROPOSAL_TOOL,
+    # N7 chat edit (proposal only; confirmation required before writing)
+    CHAT_ATTENDANCE_EDIT_TOOL,
     # Profile & Analytics
     GET_MY_PROFILE_TOOL,
     GET_DEFAULTERS_ANALYSIS_TOOL,
@@ -87,6 +90,7 @@ __all__ = [
     "EXPORT_ATTENDANCE_TOOL",
     "SINGLE_ATTENDANCE_CORRECTION_TOOL",
     "BULK_ATTENDANCE_PROPOSAL_TOOL",
+    "CHAT_ATTENDANCE_EDIT_TOOL",
     "GET_MY_PROFILE_TOOL",
     "GET_DEFAULTERS_ANALYSIS_TOOL",
     "summarize_attendance",

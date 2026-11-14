@@ -15,6 +15,8 @@ import {
 import { fetchMySubjects } from "@/services/api/faculty";
 import { useAuth } from "@/hooks/useAuth";
 import { formatIsoDate, todayIso } from "@/lib/schedule";
+import { ExtraClassModal } from "./components/ExtraClassModal";
+import { DelegateClassModal } from "./components/DelegateClassModal";
 
 export function SessionsView() {
   const navigate = useNavigate();
@@ -25,6 +27,10 @@ export function SessionsView() {
   const [allocations, setAllocations] = useState<SessionAllocation[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Extra class modal & delegation modal
+  const [isExtraModalOpen, setIsExtraModalOpen] = useState(false);
+  const [delegatingSession, setDelegatingSession] = useState<SessionItem | null>(null);
 
   // Session initialisation (server side)
   const [initialization, setInitialization] = useState<InitializationState | null>(null);
@@ -269,14 +275,25 @@ export function SessionsView() {
         </div>
 
         {canScheduleSessions && !isViewer ? (
-          <button
-            type="button"
-            onClick={() => setIsCreateOpen(true)}
-            disabled={!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0}
-            className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            Schedule Session
-          </button>
+          <div className="flex items-center space-x-2 flex-wrap gap-y-2">
+            <button
+              type="button"
+              onClick={() => setIsExtraModalOpen(true)}
+              className="inline-flex items-center space-x-1.5 px-3.5 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#3F451F] hover:bg-[#343919] text-[#EDE8D8] shadow-2xs transition-colors cursor-pointer"
+              title="Quickly schedule an extra or emergency class with auto-populated roster"
+            >
+              <span>⚡</span>
+              <span>Extra / Emergency Class</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setIsCreateOpen(true)}
+              disabled={!isAdmin && isFaculty && !isLoadingSubjects && assignedSubjects.length === 0}
+              className="inline-flex items-center space-x-2 px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors cursor-pointer self-start sm:self-auto disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              <span>Schedule Session</span>
+            </button>
+          </div>
         ) : (
           <span className="px-3.5 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] text-xs font-semibold border border-[#E4DDCA] flex items-center space-x-1.5 self-start sm:self-auto">
             Read-Only Session Registry
@@ -441,17 +458,38 @@ export function SessionsView() {
             const slot = allocationsBySession.get(sess.session_id) ?? [];
             const first = slot[0];
             const isToday = sess.date === today;
+            const isProxy = sess.is_delegated && sess.delegation?.is_proxy_for_me;
+            const isDelegatedAway = sess.is_delegated && !sess.delegation?.is_proxy_for_me;
 
             return (
               <div
                 key={sess.session_id}
-                className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs hover:border-[#6C5119]/40 transition-all flex flex-col justify-between space-y-4"
+                className={`border rounded-2xl p-5 shadow-2xs transition-all flex flex-col justify-between space-y-4 ${
+                  isProxy
+                    ? "bg-amber-50/60 border-amber-300 hover:border-amber-400"
+                    : isDelegatedAway
+                    ? "bg-slate-50 border-slate-300 opacity-80"
+                    : "bg-[#FBF8F0] border-[#E4DDCA] hover:border-[#6C5119]/40"
+                }`}
               >
                 <div className="space-y-3">
                   <div className="flex items-start justify-between gap-2">
-                    <span className="px-2.5 py-1 rounded-md text-xs font-black bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
-                      {code}
-                    </span>
+                    <div className="flex items-center space-x-2 flex-wrap gap-y-1">
+                      <span className="px-2.5 py-1 rounded-md text-xs font-black bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
+                        {code}
+                      </span>
+                      {isProxy && (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-200 text-amber-900 border border-amber-300 flex items-center space-x-1">
+                          <span>🤝</span>
+                          <span>Proxy (from {sess.delegation?.from_name})</span>
+                        </span>
+                      )}
+                      {isDelegatedAway && (
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-slate-200 text-slate-700 border border-slate-300 flex items-center space-x-1">
+                          <span>Delegated to {sess.delegation?.to_name}</span>
+                        </span>
+                      )}
+                    </div>
                     <span className="text-xs font-semibold text-[#77735F]">
                       {formatIsoDate(sess.date)}
                     </span>
@@ -513,13 +551,26 @@ export function SessionsView() {
                 </div>
 
                 <div className="pt-3 border-t border-[#E4DDCA]/60 flex items-center justify-between">
-                  <button
-                    type="button"
-                    onClick={() => setViewSession(sess)}
-                    className="text-xs font-bold text-[#77735F] hover:text-[#24251C] transition-colors cursor-pointer"
-                  >
-                    Session details
-                  </button>
+                  <div className="flex items-center space-x-3">
+                    <button
+                      type="button"
+                      onClick={() => setViewSession(sess)}
+                      className="text-xs font-bold text-[#77735F] hover:text-[#24251C] transition-colors cursor-pointer"
+                    >
+                      Session details
+                    </button>
+                    {!isDelegatedAway && canScheduleSessions && !isViewer && (
+                      <button
+                        type="button"
+                        onClick={() => setDelegatingSession(sess)}
+                        className="text-xs font-bold text-[#6C5119] hover:text-[#594214] transition-colors cursor-pointer inline-flex items-center space-x-1"
+                        title="Delegate this class to a colleague"
+                      >
+                        <span>🤝</span>
+                        <span>Delegate</span>
+                      </button>
+                    )}
+                  </div>
 
                   <Link
                     to={`/attendance?session=${encodeURIComponent(sess.session_id)}`}
@@ -747,6 +798,32 @@ export function SessionsView() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Extra Class Modal */}
+      <ExtraClassModal
+        isOpen={isExtraModalOpen}
+        onClose={() => setIsExtraModalOpen(false)}
+        onSuccess={() => {
+          void loadSessions();
+          window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
+        }}
+      />
+
+      {/* Class Delegation Modal */}
+      {delegatingSession && (
+        <DelegateClassModal
+          isOpen={Boolean(delegatingSession)}
+          onClose={() => setDelegatingSession(null)}
+          onSuccess={() => {
+            void loadSessions();
+            window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
+          }}
+          sessionId={delegatingSession.session_id}
+          subjectCode={delegatingSession.subject_code || undefined}
+          subjectName={delegatingSession.subject}
+          classDate={delegatingSession.date}
+        />
       )}
     </div>
   );

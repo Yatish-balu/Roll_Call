@@ -17,6 +17,7 @@ import {
   type MfaStatus,
   type RevokeAllOtpResult,
 } from "@/services/api/account";
+import QRCode from "qrcode";
 import {
   applyTheme,
   getPreferences,
@@ -140,6 +141,11 @@ export function SettingsView() {
   const [mfaBusy, setMfaBusy] = useState(false);
   const [mfaMessage, setMfaMessage] = useState<string | null>(null);
   const [mfaError, setMfaError] = useState<string | null>(null);
+  const [qrCodeDataUrl, setQrCodeDataUrl] = useState<string | null>(null);
+  const [copiedSecret, setCopiedSecret] = useState(false);
+  const [copiedRecovery, setCopiedRecovery] = useState(false);
+  const [isEnrollmentOpen, setIsEnrollmentOpen] = useState(false);
+  const [isDisableOpen, setIsDisableOpen] = useState(false);
 
   // Sessions
   const [sessions, setSessions] = useState<ActiveSession[]>([]);
@@ -282,6 +288,7 @@ export function SettingsView() {
       await disableMfa({ current_password: mfaPassword, code: mfaCode.trim() || undefined });
       setMfaPassword("");
       setMfaCode("");
+      setIsDisableOpen(false);
       setMfaMessage("Multi-factor authentication was disabled for your account.");
       const status = await fetchMfaStatus();
       setMfaStatus(status);
@@ -290,6 +297,60 @@ export function SettingsView() {
     } finally {
       setMfaBusy(false);
     }
+  };
+
+  useEffect(() => {
+    if (mfaSecret && session?.userId) {
+      const userLabel = encodeURIComponent(session.userId);
+      const issuer = encodeURIComponent("RollCall AI");
+      const uri = `otpauth://totp/${issuer}:${userLabel}?secret=${mfaSecret}&issuer=${issuer}`;
+      QRCode.toDataURL(uri, {
+        width: 200,
+        margin: 2,
+        color: {
+          dark: "#24251C",
+          light: "#FFFFFF",
+        },
+      })
+        .then((url) => setQrCodeDataUrl(url))
+        .catch(() => setQrCodeDataUrl(null));
+    } else {
+      setQrCodeDataUrl(null);
+    }
+  }, [mfaSecret, session?.userId]);
+
+  const handleCopySecret = async () => {
+    if (!mfaSecret) return;
+    try {
+      await navigator.clipboard.writeText(mfaSecret);
+      setCopiedSecret(true);
+      setTimeout(() => setCopiedSecret(false), 2000);
+    } catch {
+      // fallback
+    }
+  };
+
+  const handleCopyRecoveryCodes = async () => {
+    if (mfaRecoveryCodes.length === 0) return;
+    try {
+      await navigator.clipboard.writeText(mfaRecoveryCodes.join("\n"));
+      setCopiedRecovery(true);
+      setTimeout(() => setCopiedRecovery(false), 2000);
+    } catch {
+      // fallback
+    }
+  };
+
+  const handleDownloadRecoveryCodes = () => {
+    if (mfaRecoveryCodes.length === 0) return;
+    const content = `RollCall AI - MFA Emergency Recovery Codes\nUser: ${session?.userId || "faculty"}\nGenerated: ${new Date().toISOString()}\n\nKeep these codes safe. Each code can be used once if you lose access to your authenticator app:\n\n${mfaRecoveryCodes.join("\n")}\n`;
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `rollcall-mfa-recovery-codes-${session?.userId || "user"}.txt`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   const handleRevoke = async (sessionId: string) => {
@@ -495,120 +556,364 @@ export function SettingsView() {
 
       {/* MFA */}
       <SectionCard
-        title="Multi-factor authentication"
-        description="TOTP based second factor with single-use recovery codes."
-        badge="Server"
+        title="Two-Factor Authentication (2FA)"
+        description="Time-based one-time passwords (TOTP) and single-use emergency recovery codes."
+        badge="Security"
       >
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center gap-3 text-sm">
-            <span
-              className={`inline-flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold border ${
-                mfaStatus?.mfa_enabled
-                  ? "bg-emerald-50 text-emerald-800 border-emerald-200"
-                  : "bg-[#EDE8D8]/40 text-[#77735F] border-[#E4DDCA]"
-              }`}
-            >
+        <div className="space-y-5">
+          {/* Status Indicator */}
+          <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-[#E4DDCA]/60">
+            <div className="flex items-center space-x-2.5">
               <span
-                className={`w-2 h-2 rounded-full ${
-                  mfaStatus?.mfa_enabled ? "bg-emerald-500" : "bg-[#A8A28E]"
+                className={`w-3 h-3 rounded-full ${
+                  mfaStatus?.mfa_enabled ? "bg-emerald-500 animate-pulse" : "bg-[#A8A28E]"
                 }`}
               />
-              {mfaStatus
-                ? mfaStatus.mfa_enabled
-                  ? "MFA is active"
-                  : "MFA is not enabled"
-                : "MFA status unavailable"}
-            </span>
-            {mfaStatus && !mfaStatus.mfa_available && (
-              <span className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-2.5 py-1">
-                MFA is not configured on this server.
+              <span className="font-bold text-sm text-[#24251C]">
+                {mfaStatus?.mfa_enabled ? "2FA Protection Active" : "2FA Protection Inactive"}
               </span>
-            )}
+            </div>
+            <span
+              className={`px-3 py-1 rounded-xl text-xs font-black uppercase tracking-wider border ${
+                mfaStatus?.mfa_enabled
+                  ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                  : "bg-[#EDE8D8]/50 text-[#77735F] border-[#E4DDCA]"
+              }`}
+            >
+              {mfaStatus?.mfa_enabled ? "Enabled" : "Disabled"}
+            </span>
           </div>
 
-          {mfaSecret && (
-            <div className="p-4 rounded-xl bg-[#F2EDE0] border border-[#E4DDCA] space-y-3">
-              <p className="text-xs font-bold text-[#24251C]">1. Add this secret to your app</p>
-              <code className="block p-3 rounded-lg bg-white border border-[#E4DDCA] font-mono text-xs break-all text-[#24251C]">
-                {mfaSecret}
-              </code>
-              {mfaRecoveryCodes.length > 0 && (
-                <div>
-                  <p className="text-xs font-bold text-[#24251C]">Recovery codes (store them safely)</p>
-                  <ul className="mt-1 grid grid-cols-2 sm:grid-cols-3 gap-1.5 font-mono text-[11px] text-[#3F451F]">
-                    {mfaRecoveryCodes.map((code) => (
-                      <li key={code} className="px-2 py-1 rounded bg-white border border-[#E4DDCA]">
-                        {code}
-                      </li>
-                    ))}
-                  </ul>
+          {/* Messages */}
+          {mfaMessage && (
+            <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold flex items-center space-x-2">
+              <span>✅</span>
+              <span>{mfaMessage}</span>
+            </div>
+          )}
+          {mfaError && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold flex items-center space-x-2">
+              <span>⚠️</span>
+              <span>{mfaError}</span>
+            </div>
+          )}
+
+          {/* Case 1: MFA is Active */}
+          {mfaStatus?.mfa_enabled && !mfaSecret && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-emerald-50/70 border border-emerald-200 space-y-2">
+                <div className="flex items-center space-x-2 text-emerald-900 font-bold text-sm">
+                  <span>🛡️</span>
+                  <span>Your account is secured with Two-Factor Authentication</span>
+                </div>
+                <p className="text-xs text-emerald-800 leading-relaxed">
+                  Every sign-in requires your password plus a live 6-digit authenticator code.
+                  If you need to change your authenticator device or rotate recovery codes, you can re-enroll below.
+                </p>
+              </div>
+
+              {!isDisableOpen ? (
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsEnrollmentOpen(true);
+                      setMfaPassword("");
+                    }}
+                    className="px-4 py-2.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors cursor-pointer"
+                  >
+                    🔄 Reconfigure / Re-enroll 2FA
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setIsDisableOpen(true)}
+                    className="px-4 py-2.5 rounded-xl border border-rose-300 text-rose-700 text-xs font-bold hover:bg-rose-50 transition-colors cursor-pointer"
+                  >
+                    Disable 2FA
+                  </button>
+                </div>
+              ) : (
+                <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 space-y-3">
+                  <h4 className="text-xs font-bold text-rose-900">
+                    Confirm disabling Two-Factor Authentication
+                  </h4>
+                  <p className="text-xs text-rose-700">
+                    Enter your account password to confirm disabling 2FA. This will lower your account security.
+                  </p>
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <input
+                      type="password"
+                      placeholder="Account password"
+                      value={mfaPassword}
+                      onChange={(e) => setMfaPassword(e.target.value)}
+                      className={inputClass}
+                    />
+                    <div className="flex items-center space-x-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void handleMfaDisable()}
+                        disabled={mfaBusy || !mfaPassword}
+                        className="px-4 py-2.5 rounded-xl bg-rose-600 text-white text-xs font-bold hover:bg-rose-700 transition-colors disabled:opacity-50 cursor-pointer"
+                      >
+                        {mfaBusy ? "Disabling…" : "Confirm Disable"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setIsDisableOpen(false)}
+                        className="px-3.5 py-2.5 rounded-xl bg-[#EDE8D8] text-[#24251C] text-xs font-semibold hover:bg-[#E4DDCA] transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
                 </div>
               )}
             </div>
           )}
 
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div>
-              <label className={labelClass} htmlFor="mfaPassword">
-                Current account password
-              </label>
-              <input
-                id="mfaPassword"
-                type="password"
-                autoComplete="current-password"
-                className={inputClass}
-                value={mfaPassword}
-                onChange={(e) => setMfaPassword(e.target.value)}
-              />
-            </div>
-            <div>
-              <label className={labelClass} htmlFor="mfaCode">
-                Authenticator / recovery code
-              </label>
-              <input
-                id="mfaCode"
-                className={inputClass}
-                value={mfaCode}
-                onChange={(e) => setMfaCode(e.target.value)}
-                placeholder="6-digit TOTP code"
-              />
-            </div>
-          </div>
+          {/* Case 2: Enrollment In Progress (Secret is present) */}
+          {mfaSecret && (
+            <div className="space-y-6 p-5 rounded-2xl bg-[#F2EDE0]/60 border border-[#E4DDCA]">
+              <div className="border-b border-[#E4DDCA] pb-3">
+                <h3 className="text-sm font-bold text-[#24251C] flex items-center space-x-2">
+                  <span>📱</span>
+                  <span>Two-Factor Authentication Setup</span>
+                </h3>
+                <p className="text-xs text-[#77735F] mt-0.5">
+                  Complete these 3 steps to activate two-factor authentication on your account.
+                </p>
+              </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            {!mfaStatus?.mfa_enabled && !mfaSecret && (
-              <button
-                type="button"
-                onClick={() => void handleMfaEnable()}
-                disabled={mfaBusy || !mfaPassword}
-                className="px-4 py-2.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors disabled:opacity-50 cursor-pointer"
-              >
-                Start MFA enrollment
-              </button>
-            )}
-            {mfaSecret && (
-              <button
-                type="button"
-                onClick={() => void handleMfaVerify()}
-                disabled={mfaBusy || !mfaCode.trim()}
-                className="px-4 py-2.5 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] transition-colors disabled:opacity-50 cursor-pointer"
-              >
-                Verify and activate
-              </button>
-            )}
-            {mfaStatus?.mfa_enabled && (
-              <button
-                type="button"
-                onClick={() => void handleMfaDisable()}
-                disabled={mfaBusy || !mfaPassword}
-                className="px-4 py-2.5 rounded-xl border border-rose-300 text-rose-700 text-xs font-bold hover:bg-rose-50 transition-colors disabled:opacity-50 cursor-pointer"
-              >
-                Disable MFA
-              </button>
-            )}
-            {mfaMessage && <p className="text-xs font-semibold text-emerald-700">{mfaMessage}</p>}
-            {mfaError && <p className="text-xs font-semibold text-rose-700">{mfaError}</p>}
-          </div>
+              {/* Step 1: Scan QR Code & Secret */}
+              <div className="space-y-3">
+                <div className="flex items-center space-x-2">
+                  <span className="w-5 h-5 rounded-full bg-[#3F451F] text-[#EDE8D8] text-[11px] font-black flex items-center justify-center">
+                    1
+                  </span>
+                  <h4 className="text-xs font-bold text-[#24251C]">
+                    Scan QR Code or Enter Secret Key
+                  </h4>
+                </div>
+                <p className="text-xs text-[#77735F]">
+                  Open Google Authenticator, Microsoft Authenticator, Authy, or 1Password, and scan the QR code below:
+                </p>
+
+                <div className="flex flex-col sm:flex-row items-center sm:items-start gap-5 pt-2">
+                  {qrCodeDataUrl ? (
+                    <div className="p-3 bg-white rounded-2xl border border-[#E4DDCA] shadow-2xs shrink-0">
+                      <img
+                        src={qrCodeDataUrl}
+                        alt="2FA QR Code"
+                        className="w-44 h-44 object-contain"
+                      />
+                    </div>
+                  ) : (
+                    <div className="w-44 h-44 rounded-2xl bg-white border border-[#E4DDCA] flex items-center justify-center text-xs text-[#77735F]">
+                      Generating QR…
+                    </div>
+                  )}
+
+                  <div className="space-y-3 flex-1 min-w-0">
+                    <div>
+                      <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider block mb-1">
+                        Manual Entry Key (Base32)
+                      </span>
+                      <div className="flex items-center space-x-2">
+                        <code className="flex-1 p-2.5 rounded-xl bg-white border border-[#E4DDCA] font-mono text-xs text-[#24251C] break-all select-all font-bold">
+                          {mfaSecret}
+                        </code>
+                        <button
+                          type="button"
+                          onClick={() => void handleCopySecret()}
+                          className="px-3 py-2.5 rounded-xl bg-[#EDE8D8] text-[#24251C] text-xs font-bold hover:bg-[#E4DDCA] transition-colors shrink-0 cursor-pointer"
+                        >
+                          {copiedSecret ? "✓ Copied" : "📋 Copy"}
+                        </button>
+                      </div>
+                    </div>
+
+                    {session?.userId && (
+                      <a
+                        href={`otpauth://totp/RollCall%20AI:${encodeURIComponent(session.userId)}?secret=${mfaSecret}&issuer=RollCall%20AI`}
+                        className="inline-flex items-center space-x-1.5 text-xs font-bold text-[#6C5119] hover:underline"
+                      >
+                        <span>📲 Open Directly in Authenticator App</span>
+                        <span>↗</span>
+                      </a>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              {/* Step 2: Emergency Recovery Codes */}
+              {mfaRecoveryCodes.length > 0 && (
+                <div className="space-y-3 pt-3 border-t border-[#E4DDCA]">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <div className="flex items-center space-x-2">
+                      <span className="w-5 h-5 rounded-full bg-[#3F451F] text-[#EDE8D8] text-[11px] font-black flex items-center justify-center">
+                        2
+                      </span>
+                      <h4 className="text-xs font-bold text-[#24251C]">
+                        Save Emergency Recovery Codes
+                      </h4>
+                    </div>
+                    <div className="flex items-center space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyRecoveryCodes()}
+                        className="px-2.5 py-1 rounded-lg bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8] transition-colors cursor-pointer"
+                      >
+                        {copiedRecovery ? "✓ Codes Copied" : "📋 Copy All Codes"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDownloadRecoveryCodes}
+                        className="px-2.5 py-1 rounded-lg bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors cursor-pointer"
+                      >
+                        💾 Download .txt
+                      </button>
+                    </div>
+                  </div>
+
+                  <p className="text-xs text-[#77735F]">
+                    Save these backup codes. If you ever lose access to your phone or authenticator app, each code can be used once to log in.
+                  </p>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 pt-1">
+                    {mfaRecoveryCodes.map((code, idx) => (
+                      <div
+                        key={code}
+                        className="p-2 rounded-xl bg-white border border-[#E4DDCA] text-center font-mono text-xs font-bold text-[#3F451F]"
+                      >
+                        <span className="text-[10px] text-[#A8A28E] block">{idx + 1}</span>
+                        {code}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Step 3: Verify and Activate */}
+              <div className="space-y-3 pt-3 border-t border-[#E4DDCA]">
+                <div className="flex items-center space-x-2">
+                  <span className="w-5 h-5 rounded-full bg-[#3F451F] text-[#EDE8D8] text-[11px] font-black flex items-center justify-center">
+                    3
+                  </span>
+                  <h4 className="text-xs font-bold text-[#24251C]">
+                    Enter the 6-Digit Code from Authenticator
+                  </h4>
+                </div>
+
+                <div className="flex flex-col sm:flex-row items-center gap-3">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    pattern="[0-9]*"
+                    maxLength={6}
+                    placeholder="000000"
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, ""))}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && mfaCode.trim().length === 6 && !mfaBusy) {
+                        void handleMfaVerify();
+                      }
+                    }}
+                    className="w-full sm:w-48 px-4 py-2.5 rounded-xl bg-white border border-[#E4DDCA] font-mono text-center text-lg tracking-widest font-black text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                    autoFocus
+                  />
+                  <div className="flex items-center space-x-2 w-full sm:w-auto">
+                    <button
+                      type="button"
+                      onClick={() => void handleMfaVerify()}
+                      disabled={mfaBusy || mfaCode.trim().length !== 6}
+                      className="flex-1 sm:flex-initial px-5 py-2.5 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white text-xs font-bold transition-colors disabled:opacity-50 cursor-pointer shadow-2xs"
+                    >
+                      {mfaBusy ? "Verifying…" : "✓ Verify & Activate 2FA"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMfaSecret(null);
+                        setMfaRecoveryCodes([]);
+                        setMfaCode("");
+                        setMfaPassword("");
+                      }}
+                      className="px-3.5 py-2.5 rounded-xl bg-[#EDE8D8] text-[#24251C] text-xs font-semibold hover:bg-[#E4DDCA] transition-colors cursor-pointer"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Case 3: MFA Not Enabled & Setup Not Started */}
+          {!mfaStatus?.mfa_enabled && !mfaSecret && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-xl bg-[#F2EDE0]/60 border border-[#E4DDCA] space-y-2">
+                <div className="flex items-center space-x-2 text-[#24251C] font-bold text-sm">
+                  <span>🔐</span>
+                  <span>Enhance your faculty account security</span>
+                </div>
+                <p className="text-xs text-[#77735F] leading-relaxed">
+                  Two-factor authentication adds an essential second verification step. When logging in, you will provide both your password and a dynamic verification code generated by Google Authenticator, Microsoft Authenticator, or Authy.
+                </p>
+              </div>
+
+              {!isEnrollmentOpen ? (
+                <button
+                  type="button"
+                  onClick={() => setIsEnrollmentOpen(true)}
+                  className="px-4 py-2.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors cursor-pointer shadow-2xs flex items-center space-x-2"
+                >
+                  <span>🚀</span>
+                  <span>Set Up Two-Factor Authentication</span>
+                </button>
+              ) : (
+                <div className="p-4 rounded-xl bg-white border border-[#E4DDCA] space-y-3">
+                  <h4 className="text-xs font-bold text-[#24251C]">
+                    Enter your account password to begin enrollment
+                  </h4>
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <input
+                      type="password"
+                      placeholder="Account password"
+                      value={mfaPassword}
+                      onChange={(e) => setMfaPassword(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" && mfaPassword && !mfaBusy) {
+                          void handleMfaEnable();
+                        }
+                      }}
+                      className={inputClass}
+                      autoFocus
+                    />
+                    <div className="flex items-center space-x-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void handleMfaEnable()}
+                        disabled={mfaBusy || !mfaPassword}
+                        className="px-4 py-2.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors disabled:opacity-50 cursor-pointer"
+                      >
+                        {mfaBusy ? "Preparing…" : "Continue →"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsEnrollmentOpen(false);
+                          setMfaPassword("");
+                        }}
+                        className="px-3.5 py-2.5 rounded-xl bg-[#EDE8D8] text-[#24251C] text-xs font-semibold hover:bg-[#E4DDCA] transition-colors cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </SectionCard>
 

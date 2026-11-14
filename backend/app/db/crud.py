@@ -896,7 +896,11 @@ def normalize_subject_code(raw: Optional[str]) -> str:
     return str(raw).strip().upper()
 
 
-def _session_scope_condition_orm(user_id: str, subject_codes: List[str]):
+def _session_scope_condition_orm(
+    user_id: str,
+    subject_codes: List[str],
+    delegated_session_ids: Optional[Sequence[str]] = None,
+):
     """SQLAlchemy predicate restricting sessions to one caller's scope.
 
     The policy itself lives in ``app.auth.session_scope`` so that the session
@@ -905,7 +909,7 @@ def _session_scope_condition_orm(user_id: str, subject_codes: List[str]):
     """
     from app.auth.session_scope import session_scope_condition
 
-    return session_scope_condition(user_id, subject_codes)
+    return session_scope_condition(user_id, subject_codes, delegated_session_ids)
 
 
 def get_sessions_paginated_scoped(
@@ -917,6 +921,7 @@ def get_sessions_paginated_scoped(
     offset: int = 0,
     scope_user_id: Optional[str] = None,
     scope_subject_codes: Optional[Sequence[str]] = None,
+    scope_delegated_session_ids: Optional[Sequence[str]] = None,
     unrestricted: bool = False,
 ) -> Tuple[List[Dict[str, Any]], int]:
     """Paginated session listing restricted to the caller's visibility scope.
@@ -942,6 +947,9 @@ def get_sessions_paginated_scoped(
             if normalize_subject_code(code)
         }
     )
+    clean_del_ids = sorted(
+        {str(sid).strip() for sid in (scope_delegated_session_ids or []) if str(sid).strip()}
+    )
 
     if isinstance(target, Session):
         conditions = []
@@ -956,7 +964,9 @@ def get_sessions_paginated_scoped(
                 )
             )
         if not unrestricted:
-            conditions.append(_session_scope_condition_orm(clean_uid, clean_codes))
+            conditions.append(
+                _session_scope_condition_orm(clean_uid, clean_codes, clean_del_ids)
+            )
 
         count_stmt = select(func.count(DbSession.session_id))
         if conditions:
@@ -996,6 +1006,10 @@ def get_sessions_paginated_scoped(
             if "teacher_id" in available:
                 scope_parts.append("teacher_id = ?")
                 scope_params.append(clean_uid)
+            if clean_del_ids and "session_id" in available:
+                placeholders = ",".join("?" for _ in clean_del_ids)
+                scope_parts.append(f"session_id IN ({placeholders})")
+                scope_params.extend(clean_del_ids)
             if clean_uid and "coordinator_faculty_id" in available:
                 inner_parts.append("coordinator_faculty_id = ?")
                 inner_params.append(clean_uid)

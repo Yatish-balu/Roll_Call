@@ -49,7 +49,7 @@ from app.schemas.timetable import (
 
 logger = logging.getLogger("rollcall.services.session_initialization")
 
-WEEKEND_DAYS = {"Saturday", "Sunday"}
+WEEKEND_DAYS = {"Sunday"}
 
 STATUS_INITIALIZED = "INITIALIZED"
 STATUS_NO_CLASSES = "NO_CLASSES"

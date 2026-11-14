@@ -32,6 +32,7 @@ from app.services.attendance_edits import (
     AttendanceChange,
     actor_identity,
     assert_session_edit_authorized,
+    assert_session_edit_unlocked,
     capture_attendance_statuses,
     confirm_attendance_edit,
     propose_attendance_edit,
@@ -512,6 +513,41 @@ async def agent_process_file(
             except Exception as exc:  # pragma: no cover - inspection is best effort
                 logger.debug("Unable to inspect upload for embedded instructions: %s", exc)
 
+        # N9: image quality gate. A blurry or badly lit photo is rejected
+        # BEFORE the vision API is called, with the measured values and the
+        # thresholds returned in the message so the user knows what to fix.
+        if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            from tools.quality_gate import check_image_quality
+
+            quality = check_image_quality(temp_path)
+            if not quality["ok"]:
+                measured = (
+                    f"sharpness={quality['sharpness']}, brightness={quality['brightness']}, "
+                    f"thresholds={quality['thresholds']}"
+                )
+                reasons = "; ".join(quality["reasons"]) or "Photo quality check failed."
+                log_security_event(
+                    "upload_rejected",
+                    severity="info",
+                    outcome="failure",
+                    actor_id=current_user.user_id,
+                    ip_address=_client_ip(request),
+                    request_id=get_request_id(),
+                    details={
+                        "reason": "quality_rejected",
+                        "filename": safe_filename,
+                        "sharpness": quality["sharpness"],
+                        "brightness": quality["brightness"],
+                    },
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        "Photo quality rejected. Please retake the photo. "
+                        f"{reasons} ({measured})"
+                    ),
+                )
+
         scope = resolve_data_scope(db, current_user)
         assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
         actor_name = getattr(current_user, "name", None) or current_user.user_id
@@ -678,6 +714,8 @@ def agent_confirm(
     # The same policy the direct API uses - never a decision taken from the
     # chat text or the LLM output.
     assert_session_edit_authorized(current_user, session, db)
+    # N5: the 24-hour lock applies to this write path too (admin is never locked).
+    assert_session_edit_unlocked(current_user, session)
 
     if not payload.records:
         raise HTTPException(

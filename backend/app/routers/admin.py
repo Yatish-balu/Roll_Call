@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 import uuid
@@ -579,4 +579,147 @@ def review_permission_request(
         "status": new_status,
         "message": f"Request {request_id} has been {new_status.lower()}.",
     }
+
+
+# ==============================================================================
+# N8: GET /api/admin/overview — institution-wide branch/room attendance
+# ==============================================================================
+
+@router.get(
+    "/overview",
+    summary="Admin attendance overview by branch and room",
+    description=(
+        "ADMIN-only aggregate attendance metrics: present/absent/percent per branch "
+        "and per room, plus institute-wide totals. Percentages are computed in the "
+        "backend; the frontend never calculates them."
+    ),
+)
+def admin_overview(
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from tools.summary_tool import summary_tool
+
+    sessions = crud.get_all_sessions(db)
+    records: list[Dict[str, Any]] = []
+    for sess in sessions:
+        records.extend(
+            crud.get_session_attendance_details(db, session_id=sess["session_id"])
+        )
+
+    report = summary_tool(records)
+    return {
+        "room_wise": report.room_wise_records(),
+        "branch_wise": report.branch_wise_records(),
+        "overall": report.overall,
+        "total_sessions": len(sessions),
+        "total_records": len(records),
+    }
+
+
+# ==============================================================================
+# N8: GET /api/admin/faculty-uploads — per-teacher upload activity
+# ==============================================================================
+
+@router.get(
+    "/faculty-uploads",
+    summary="Per-teacher upload/session activity",
+    description=(
+        "ADMIN-only per-teacher activity: last session (upload) time in UTC, "
+        "sessions created in the last 7 days, and total sessions."
+    ),
+)
+def admin_faculty_uploads(
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from app.db.models import Session as DbSession, User
+
+    now = datetime.now(timezone.utc)
+    cutoff = (now - timedelta(days=7)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    teachers = db.query(User).filter(User.role == "FACULTY").all()
+    items = []
+    for teacher in teachers:
+        base = db.query(DbSession).filter(DbSession.teacher_id == teacher.user_id)
+        total = base.count()
+        last_at = (
+            db.query(func.max(DbSession.created_at))
+            .filter(DbSession.teacher_id == teacher.user_id)
+            .scalar()
+        )
+        recent = (
+            db.query(func.count(DbSession.session_id))
+            .filter(
+                DbSession.teacher_id == teacher.user_id,
+                DbSession.created_at.isnot(None),
+                DbSession.created_at >= cutoff,
+            )
+            .scalar()
+            or 0
+        )
+        items.append(
+            {
+                "user_id": teacher.user_id,
+                "name": teacher.name or teacher.user_id,
+                "email": teacher.email,
+                "last_upload_at_utc": last_at,
+                "sessions_last_7_days": int(recent),
+                "total_sessions": int(total),
+            }
+        )
+
+    items.sort(key=lambda row: (row["sessions_last_7_days"], row["total_sessions"]), reverse=True)
+    return {"items": items, "total": len(items), "window_days": 7}
+
+
+# ==============================================================================
+# N11: GET /api/admin/defaulters.pdf — admin defaulter report
+# ==============================================================================
+
+@router.get(
+    "/defaulters.pdf",
+    summary="Export defaulter report as PDF",
+    description=(
+        "ADMIN-only PDF of students strictly below the attendance threshold. "
+        "Writes one DEFAULTER_EXPORT row to the audit log."
+    ),
+    responses={
+        200: {"description": "PDF file", "content": {"application/pdf": {}}},
+        403: {"description": "Admin only"},
+    },
+)
+def export_defaulters_pdf(
+    subject: Optional[str] = Query(None, description="Filter by subject code"),
+    branch: Optional[str] = Query(None, description="Filter by branch"),
+    semester: Optional[str] = Query(None, description="Filter by semester"),
+    threshold: float = Query(75.0, gt=0, lt=100, description="Defaulter threshold percent"),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    from fastapi.responses import Response
+
+    from tools.defaulter_pdf import generate_defaulter_pdf
+
+    actor_role = str(
+        current_user.role.value if hasattr(current_user.role, "value") else current_user.role
+    ).upper()
+    pdf_bytes = generate_defaulter_pdf(
+        db=db,
+        actor_id=current_user.user_id,
+        actor_role=actor_role,
+        subject_code=subject,
+        branch=branch,
+        semester=semester,
+        threshold=threshold,
+    )
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={
+            "Content-Disposition": 'attachment; filename="defaulter_report.pdf"',
+            "Cache-Control": "no-cache",
+        },
+    )
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -140,6 +141,52 @@ def list_students(
         "total": total,
         "limit": limit,
         "offset": offset,
+    }
+
+
+@router.get(
+    "/lookup",
+    summary="Student lookup (partial USN or name)",
+    description=(
+        "Search students by partial USN or name (max 20 results). "
+        "Teacher sees only students in their assigned subjects; admin sees all. "
+        "Declared before '/{usn}' so the static path is never captured as a USN."
+    ),
+)
+def lookup_students(
+    q: str = Query(..., min_length=1, description="Search term (USN or name)"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from sqlalchemy import func, or_, select
+
+    from app.db.models import Student
+
+    clean_q = q.strip()
+    if not clean_q:
+        return {"results": [], "total": 0}
+
+    scope = resolve_data_scope(db, current_user)
+    condition = scope.student_condition()
+    term = f"%{clean_q.lower()}%"
+
+    stmt = select(Student.usn, Student.name, Student.branch).where(
+        or_(
+            func.lower(Student.usn).like(term),
+            func.lower(Student.name).like(term),
+        )
+    )
+    if condition is not None:
+        stmt = stmt.where(condition)
+
+    rows = db.execute(stmt.limit(20)).all()
+
+    return {
+        "results": [
+            {"usn": row.usn, "name": row.name, "branch": row.branch}
+            for row in rows
+        ],
+        "total": len(rows),
     }
 
 
@@ -302,51 +349,6 @@ def bulk_create_students(
 # ==============================================================================
 
 @router.get(
-    "/lookup",
-    summary="Student lookup (partial USN or name)",
-    description=(
-        "Search students by partial USN or name (max 20 results). "
-        "Teacher sees only students in their assigned subjects; admin sees all."
-    ),
-)
-def lookup_students(
-    q: str = Query(..., min_length=1, description="Search term (USN or name)"),
-    current_user: AuthenticatedUser = Depends(get_current_user),
-    db: Session = Depends(get_db),
-) -> Dict[str, Any]:
-    from sqlalchemy import func, or_, select
-
-    from app.db.models import Student
-
-    clean_q = q.strip()
-    if not clean_q:
-        return {"results": [], "total": 0}
-
-    scope = resolve_data_scope(db, current_user)
-    condition = scope.student_condition()
-    term = f"%{clean_q.lower()}%"
-
-    stmt = select(Student.usn, Student.name, Student.branch).where(
-        or_(
-            func.lower(Student.usn).like(term),
-            func.lower(Student.name).like(term),
-        )
-    )
-    if condition is not None:
-        stmt = stmt.where(condition)
-
-    rows = db.execute(stmt.limit(20)).all()
-
-    return {
-        "results": [
-            {"usn": row.usn, "name": row.name, "branch": row.branch}
-            for row in rows
-        ],
-        "total": len(rows),
-    }
-
-
-@router.get(
     "/{usn}/ledger",
     summary="Student attendance ledger",
     description=(
@@ -386,6 +388,7 @@ def get_student_ledger(
             Attendance.status,
             Attendance.source,
             Attendance.confidence,
+            Attendance.room_id,
             DbSession.date,
             DbSession.subject,
             DbSession.subject_code,
@@ -421,10 +424,17 @@ def get_student_ledger(
         for r in rows
     ]
 
+    if isinstance(student, dict):
+        student_name = student.get("name")
+        student_branch = student.get("branch")
+    else:
+        student_name = getattr(student, "name", None)
+        student_branch = getattr(student, "branch", None)
+
     return {
         "usn": clean_usn,
-        "name": student.name,
-        "branch": student.branch,
+        "name": student_name,
+        "branch": student_branch,
         "total_classes": total,
         "present": present,
         "absent": absent,

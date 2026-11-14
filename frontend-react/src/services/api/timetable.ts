@@ -72,6 +72,7 @@ export interface TimetableEntryInput {
 
 export async function fetchTimetableWeek(params?: {
   week_start?: string;
+  include_all?: boolean;
 }): Promise<TimetableWeek> {
   return apiClient.get<TimetableWeek>("/api/v1/timetable/week", params);
 }

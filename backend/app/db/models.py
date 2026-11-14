@@ -1203,3 +1203,82 @@ class UserChatMessage(Base):
     def __repr__(self) -> str:
         return f"<UserChatMessage(message_id={self.message_id!r}, thread_id={self.thread_id!r}, sender={self.sender!r})>"
 
+
+class ClassDelegation(Base):
+    """Faculty class handover, proxy substitution or period exchange."""
+
+    __tablename__ = "class_delegations"
+
+    delegation_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    original_faculty_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    substitute_faculty_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    delegation_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    delegation_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="PROXY",
+    )  # PROXY, EXCHANGE
+    exchange_session_id: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        ForeignKey("sessions.session_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="ACTIVE",
+    )  # ACTIVE, COMPLETED, CANCELLED
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String(40), nullable=False, default=_utcnow_iso)
+
+    session: Mapped["Session"] = relationship(
+        "Session",
+        foreign_keys=[session_id],
+    )
+    original_faculty: Mapped["User"] = relationship("User", foreign_keys=[original_faculty_id])
+    substitute_faculty: Mapped["User"] = relationship("User", foreign_keys=[substitute_faculty_id])
+
+    __table_args__ = (
+        Index("idx_class_delegations_session_id", "session_id"),
+        Index("idx_class_delegations_orig_faculty", "original_faculty_id"),
+        Index("idx_class_delegations_sub_faculty", "substitute_faculty_id"),
+        Index("idx_class_delegations_date", "delegation_date"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "delegation_id": self.delegation_id,
+            "session_id": self.session_id,
+            "original_faculty_id": self.original_faculty_id,
+            "substitute_faculty_id": self.substitute_faculty_id,
+            "delegation_date": self.delegation_date,
+            "delegation_type": self.delegation_type,
+            "exchange_session_id": self.exchange_session_id,
+            "reason": self.reason,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"<ClassDelegation(id={self.delegation_id!r}, "
+            f"session={self.session_id!r}, from={self.original_faculty_id!r}, "
+            f"to={self.substitute_faculty_id!r}, status={self.status!r})>"
+        )
+
+

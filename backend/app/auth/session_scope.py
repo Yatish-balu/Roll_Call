@@ -41,7 +41,11 @@ logger = logging.getLogger("rollcall.auth.session_scope")
 LEGACY_OWNER_SENTINELS = ("", "legacy")
 
 
-def session_scope_condition(user_id: str, subject_codes: Sequence[str]):
+def session_scope_condition(
+    user_id: str,
+    subject_codes: Sequence[str],
+    delegated_session_ids: Optional[Sequence[str]] = None,
+):
     """SQLAlchemy predicate restricting sessions to one caller's scope.
 
     This is the single implementation of the session-visibility policy; it is
@@ -54,6 +58,10 @@ def session_scope_condition(user_id: str, subject_codes: Sequence[str]):
     )
     owned_by_viewer = DbSession.teacher_id == user_id
 
+    allowed_or_clauses = [owned_by_viewer]
+    if delegated_session_ids:
+        allowed_or_clauses.append(DbSession.session_id.in_(list(delegated_session_ids)))
+
     inner: List[Any] = []
     if user_id:
         inner.append(DbSession.coordinator_faculty_id == user_id)
@@ -62,8 +70,8 @@ def session_scope_condition(user_id: str, subject_codes: Sequence[str]):
         inner.append(func.upper(DbSession.subject_code).in_(codes))
 
     if not inner:
-        return owned_by_viewer
-    return or_(owned_by_viewer, and_(unowned, or_(*inner)))
+        return or_(*allowed_or_clauses)
+    return or_(*allowed_or_clauses, and_(unowned, or_(*inner)))
 
 
 @dataclass(frozen=True)
@@ -77,19 +85,30 @@ class DataScope:
     user_id: str
     unrestricted: bool
     subject_codes: FrozenSet[str] = field(default_factory=frozenset)
+    delegated_session_ids: FrozenSet[str] = field(default_factory=frozenset)
 
     # -- sessions ---------------------------------------------------------
     def session_condition(self):
         """SQLAlchemy predicate over :class:`DbSession` for this caller."""
         if self.unrestricted:
             return None
-        return session_scope_condition(self.user_id, sorted(self.subject_codes))
+        return session_scope_condition(
+            self.user_id,
+            sorted(self.subject_codes),
+            sorted(self.delegated_session_ids),
+        )
 
     def visible_session_ids(self, db) -> FrozenSet[str]:
         """Session ids this caller may read (empty for a caller with no scope)."""
         if self.unrestricted:
             return frozenset()
-        stmt = select(DbSession.session_id).where(session_scope_condition(self.user_id, sorted(self.subject_codes)))
+        stmt = select(DbSession.session_id).where(
+            session_scope_condition(
+                self.user_id,
+                sorted(self.subject_codes),
+                sorted(self.delegated_session_ids),
+            )
+        )
         try:
             rows = db.execute(stmt).scalars().all()
         except Exception:
@@ -104,7 +123,11 @@ class DataScope:
         if not clean:
             return False
         stmt = select(DbSession.session_id).where(
-            session_scope_condition(self.user_id, sorted(self.subject_codes)),
+            session_scope_condition(
+                self.user_id,
+                sorted(self.subject_codes),
+                sorted(self.delegated_session_ids),
+            ),
             DbSession.session_id == clean,
         )
         try:
@@ -179,6 +202,7 @@ def resolve_data_scope(db, current_user: AuthenticatedUser) -> DataScope:
         user_id=scope.user_id,
         unrestricted=scope.unrestricted,
         subject_codes=scope.subject_codes,
+        delegated_session_ids=scope.delegated_session_ids,
     )
 
 
@@ -201,6 +225,7 @@ class SessionScope:
     user_id: str
     is_admin: bool
     subject_codes: FrozenSet[str] = field(default_factory=frozenset)
+    delegated_session_ids: FrozenSet[str] = field(default_factory=frozenset)
 
     @property
     def unrestricted(self) -> bool:
@@ -251,6 +276,9 @@ class SessionScope:
             return False
         if self.owns(session):
             return True
+        session_id = str(session.get("session_id") or "").strip()
+        if session_id and session_id in self.delegated_session_ids:
+            return True
         if not self.is_unowned(session):
             # Owned by another teacher: not visible, even for a teacher who is
             # mapped to the same subject code.
@@ -286,14 +314,27 @@ def resolve_session_scope(db, current_user: AuthenticatedUser) -> SessionScope:
 
     user_id = (current_user.user_id or "").strip()
     subject_codes: Set[str] = set()
+    delegated_ids: Set[str] = set()
     if user_id:
         for raw_code in crud.get_teacher_subjects(db, user_id=user_id) or []:
             normalized = normalize_subject_code(raw_code)
             if normalized:
                 subject_codes.add(normalized)
 
+        try:
+            from app.db.models import ClassDelegation
+
+            d_stmt = select(ClassDelegation.session_id).where(
+                ClassDelegation.substitute_faculty_id == user_id,
+                ClassDelegation.status == "ACTIVE",
+            )
+            delegated_ids = set(str(sid) for sid in db.execute(d_stmt).scalars().all())
+        except Exception:
+            pass
+
     return SessionScope(
         user_id=user_id,
         is_admin=current_user.role == Role.ADMIN,
         subject_codes=frozenset(subject_codes),
+        delegated_session_ids=frozenset(delegated_ids),
     )

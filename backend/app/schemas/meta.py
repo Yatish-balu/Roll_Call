@@ -125,17 +125,15 @@ class MetaConfigResponse(BaseModel):
     edit_lock_hours: int = Field(
         ...,
         description=(
-            "DEPRECATED (N5): hours after session creation until editing is locked. "
-            "Attendance editing is UNLIMITED, so this value is never used for "
-            "authorization or editing decisions. Kept only for API compatibility "
-            "until the frontend removes its 24-hour lock display."
+            "Hours after session creation until attendance editing is locked for "
+            "faculty (N5). ADMIN may override the lock by supplying a reason."
         ),
     )
     unlimited_attendance_editing: bool = Field(
         ...,
         description=(
-            "True when attendance may be edited at any time by an authorized actor, "
-            "regardless of session age or lifecycle status (N5)."
+            "Always False (N5): attendance editing is governed by the edit-lock "
+            "window. Kept as an explicit field so clients never infer the policy."
         ),
     )
     admin_override_allowed: bool = Field(..., description="Whether ADMIN may override an edit lock with a reason (D12)")

@@ -31,6 +31,18 @@ from tests.conftest import seed_test_admin_user
 from tools.read_photo_tool import PhotoExtractionResult, PhotoRow, ExtractionSource
 
 
+def _sharp_png_bytes() -> bytes:
+    """A decodable, sharp, mid-brightness PNG that passes the N9 quality gate."""
+    import cv2
+    import numpy as np
+
+    image = np.indices((400, 400)).sum(axis=0) % 2
+    image = (image * 255).astype(np.uint8)
+    ok, buffer = cv2.imencode(".png", image)
+    assert ok
+    return buffer.tobytes()
+
+
 @pytest.fixture
 def test_db_engine():
     """In-memory SQLite database isolated per test session."""
@@ -150,15 +162,22 @@ def test_process_file_photo_success(seeded_client):
     ]
     fake_result = PhotoExtractionResult(image_path="sheet.png", rows=fake_rows, source=ExtractionSource.LLM)
 
-    with patch("app.agent.legacy_agent.read_photo_tool", return_value=fake_result):
-        # A minimal but *valid* 1x1 PNG image (the upload endpoint rejects
-        # malformed images, so the fixture must be decodable).
-        png_bytes = (
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
-            b"\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe"
-            b"\x02\xfe\r\xefF\xb8\x00\x00\x00\x00IEND\xaeB`\x82"
-        )
-        files = {"file": ("sheet.png", io.BytesIO(png_bytes), "image/png")}
+    # The document-type classifiers may call the vision provider. These tests
+    # exercise the attendance-roster pipeline only, so they are pinned to the
+    # roster branch (no network access from tests).
+    with patch(
+        "app.agent.legacy_agent.AttendanceAgent._is_calendar_of_events_document",
+        return_value=False,
+    ), patch(
+        "app.agent.legacy_agent.AttendanceAgent._is_timetable_document",
+        return_value=False,
+    ), patch(
+        "app.agent.legacy_agent.AttendanceAgent._is_student_upload_document",
+        return_value=False,
+    ), patch("app.agent.legacy_agent.read_photo_tool", return_value=fake_result):
+        # A sharp, well-lit PNG so the N9 quality gate lets it through to the
+        # (mocked) vision step.
+        files = {"file": ("sheet.png", io.BytesIO(_sharp_png_bytes()), "image/png")}
         data = {"session_id": "SESS-001", "default_room": "LH-101"}
 
         res = seeded_client.post("/api/v1/agent/process-file", files=files, data=data)
@@ -192,14 +211,20 @@ def test_process_file_low_confidence_triggers_confirmation(seeded_client):
     ]
     fake_result = PhotoExtractionResult(image_path="sheet.png", rows=fake_rows, source=ExtractionSource.LLM)
 
-    with patch("app.agent.legacy_agent.read_photo_tool", return_value=fake_result):
-        # A minimal but *valid* 1x1 PNG image.
-        png_bytes = (
-            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
-            b"\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe"
-            b"\x02\xfe\r\xefF\xb8\x00\x00\x00\x00IEND\xaeB`\x82"
-        )
-        files = {"file": ("sheet.png", io.BytesIO(png_bytes), "image/png")}
+    # Pin the document classifier to the attendance-roster branch: it can
+    # otherwise call the vision provider, which tests must never do.
+    with patch(
+        "app.agent.legacy_agent.AttendanceAgent._is_calendar_of_events_document",
+        return_value=False,
+    ), patch(
+        "app.agent.legacy_agent.AttendanceAgent._is_timetable_document",
+        return_value=False,
+    ), patch(
+        "app.agent.legacy_agent.AttendanceAgent._is_student_upload_document",
+        return_value=False,
+    ), patch("app.agent.legacy_agent.read_photo_tool", return_value=fake_result):
+        # A sharp, well-lit PNG so the N9 quality gate lets it through.
+        files = {"file": ("sheet.png", io.BytesIO(_sharp_png_bytes()), "image/png")}
         res = seeded_client.post("/api/v1/agent/process-file", files=files)
         assert res.status_code == 200
         body = res.json()

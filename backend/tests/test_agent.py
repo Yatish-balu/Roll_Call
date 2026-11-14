@@ -194,6 +194,7 @@ def _find_repo_root() -> Path:
     return current.parents[1]
 
 
+@pytest.mark.timeout(180)
 def test_photo_genuine_ocr_pipeline(agent, monkeypatch):
     """Integration test using genuine EasyOCR on generated sheet_clean.jpg without mocking."""
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)

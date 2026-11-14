@@ -30,6 +30,7 @@ from app.services.attendance_edits import (
     AttendanceChange,
     _utcnow_iso,
     assert_session_edit_authorized,
+    assert_session_edit_unlocked,
     write_attendance_audit,
 )
 
@@ -231,6 +232,8 @@ def execute_undo(
             role=user_role,
         )
         assert_session_edit_authorized(auth_user, session_dict, db)
+        # N5: undo is a write, so the 24-hour lock applies (admin is never locked).
+        assert_session_edit_unlocked(auth_user, session_dict)
 
     # 3. Optimistic concurrency check
     curr_version = get_record_version(db, str(record.attendance_id), sess_id, usn)

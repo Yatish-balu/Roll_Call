@@ -44,6 +44,7 @@ from app.routers import (
     profile_router,
     calendar_router,
     agent_stream_router,
+    defaulters_router,
 )
 
 
@@ -424,9 +425,11 @@ async def value_error_handler(request: Request, exc: ValueError):
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={
-            "error": "BadRequest",
-            "message": str(exc),
-            "detail": str(exc),
+            "error": {
+                "code": "BAD_REQUEST",
+                "message": str(exc),
+            },
+            "status_code": 400,
         },
     )
 
@@ -438,8 +441,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
-            "error": "InternalServerError",
-            "message": "An unexpected internal server error occurred. Please try again later.",
+            "error": {
+                "code": "INTERNAL_SERVER_ERROR",
+                "message": "An unexpected internal server error occurred. Please try again later.",
+            },
+            "status_code": 500,
         },
     )
 
@@ -571,6 +577,7 @@ app.include_router(agent_router, prefix="/api/v1")
 app.include_router(agent_stream_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
+app.include_router(defaulters_router, prefix="/api/v1")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
 app.include_router(auth_router, prefix="/api")
@@ -588,6 +595,7 @@ app.include_router(agent_router, prefix="/api")
 app.include_router(agent_stream_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(calendar_router, prefix="/api")
+app.include_router(defaulters_router, prefix="/api")
 
 
 

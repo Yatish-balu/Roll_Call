@@ -14,6 +14,18 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
+from app.config import (
+    ACCESS_TOKEN_TTL_MINUTES,
+    ADMIN_OVERRIDE_ALLOWED,
+    BAND_GREEN_ABOVE_PERCENT,
+    BAND_YELLOW_FROM_PERCENT,
+    CHAT_CONFIRM_EXPIRY_MINUTES,
+    DEFAULTER_REQUIRED_PERCENT,
+    DEFAULTER_THRESHOLD_PERCENT,
+    LOCK_HOURS,
+    MAX_CSV_UPLOAD_BYTES,
+    MAX_IMAGE_UPLOAD_BYTES,
+)
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
@@ -64,24 +76,23 @@ def get_meta_config(
     )
 
     return {
-        # DEPRECATED (N5): kept for API compatibility only. Attendance editing
-        # is unlimited, so this value never gates an edit and is never consulted
-        # by the backend authorization or editing logic.
-        "edit_lock_hours": _env_int("EDIT_LOCK_HOURS", 24),
-        "unlimited_attendance_editing": True,
-        "admin_override_allowed": True,
-        "defaulter_threshold_percent": _env_float("DEFAULTER_THRESHOLD_PERCENT", 75.0),
-        "defaulter_required_percent": _env_float("DEFAULTER_REQUIRED_PERCENT", 75.0),
+        # N5: the 24-hour edit lock is enforced by the backend. These values are
+        # the single source of truth React reads; React never computes them.
+        "edit_lock_hours": _env_int("EDIT_LOCK_HOURS", LOCK_HOURS),
+        "unlimited_attendance_editing": False,
+        "admin_override_allowed": ADMIN_OVERRIDE_ALLOWED,
+        "defaulter_threshold_percent": _env_float("DEFAULTER_THRESHOLD_PERCENT", DEFAULTER_THRESHOLD_PERCENT),
+        "defaulter_required_percent": _env_float("DEFAULTER_REQUIRED_PERCENT", DEFAULTER_REQUIRED_PERCENT),
         "attendance_bands": {
-            "green_above_percent": _env_float("BAND_GREEN_ABOVE_PERCENT", 85.0),
-            "yellow_from_percent": _env_float("BAND_YELLOW_FROM_PERCENT", 70.0),
+            "green_above_percent": _env_float("BAND_GREEN_ABOVE_PERCENT", BAND_GREEN_ABOVE_PERCENT),
+            "yellow_from_percent": _env_float("BAND_YELLOW_FROM_PERCENT", BAND_YELLOW_FROM_PERCENT),
             "labels": {"green": "green", "yellow": "yellow", "red": "red"},
         },
         "upload_limits": {
-            "image_max_bytes": _env_int("MAX_IMAGE_UPLOAD_BYTES", 10 * 1024 * 1024),
-            "csv_max_bytes": _env_int("MAX_CSV_UPLOAD_BYTES", 5 * 1024 * 1024),
+            "image_max_bytes": _env_int("MAX_IMAGE_UPLOAD_BYTES", MAX_IMAGE_UPLOAD_BYTES),
+            "csv_max_bytes": _env_int("MAX_CSV_UPLOAD_BYTES", MAX_CSV_UPLOAD_BYTES),
         },
-        "chat_confirm_expiry_minutes": _env_int("CHAT_CONFIRM_EXPIRY_MINUTES", 5),
-        "access_token_ttl_minutes": _env_int("ACCESS_TOKEN_TTL_MINUTES", 15),
+        "chat_confirm_expiry_minutes": _env_int("CHAT_CONFIRM_EXPIRY_MINUTES", CHAT_CONFIRM_EXPIRY_MINUTES),
+        "access_token_ttl_minutes": _env_int("ACCESS_TOKEN_TTL_MINUTES", ACCESS_TOKEN_TTL_MINUTES),
         "subject_codes": subject_codes,
     }
