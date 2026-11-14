@@ -2,22 +2,23 @@ import os
 import sys
 from logging.config import fileConfig
 
-from dotenv import load_dotenv
-from sqlalchemy import engine_from_config
-from sqlalchemy import pool
-from sqlalchemy import text
-
 from alembic import context
+from dotenv import load_dotenv
+from sqlalchemy import engine_from_config, pool, text
 
-# Load the repository .env so CLI runs (`alembic upgrade head`) see
-# DATABASE_URL_SYNC without requiring the operator to export it manually.
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-for _env_file in (os.path.join(os.getcwd(), ".env"), os.path.join(_REPO_ROOT, ".env")):
+# Load repository and current working directory .env files so CLI runs see
+# DATABASE_URL_SYNC without requiring manual environment export.
+_BACKEND_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+_REPO_ROOT = os.path.abspath(os.path.join(_BACKEND_DIR, ".."))
+sys.path.insert(0, _BACKEND_DIR)
+
+for _env_file in (
+    os.path.join(os.getcwd(), ".env"),
+    os.path.join(_BACKEND_DIR, ".env"),
+    os.path.join(_REPO_ROOT, ".env"),
+):
     if os.path.exists(_env_file):
         load_dotenv(dotenv_path=_env_file, override=False)
-
-# Ensure project root is on sys.path
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from app.db.base import Base
 import app.db.models  # Ensure models are loaded into Base.metadata
@@ -27,27 +28,30 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-# Resolve the migration URL. Supabase is the only supported runtime backend, so
-# DATABASE_URL_SYNC is required unless a test/tool has explicitly set
-# sqlalchemy.url on the Config object (e.g. a disposable SQLite database).
+# Resolve migration URL:
+# 1. Tests/tooling set an explicit sqlalchemy.url on Config -> respect verbatim.
+# 2. When DB_BACKEND == "sqlite", target local SQLite DEFAULT_DB_PATH.
+# 3. If DATABASE_URL_SYNC is configured, target Supabase PostgreSQL.
+# 4. Fallback to local SQLite DEFAULT_DB_PATH.
+db_backend = os.getenv("DB_BACKEND", "").strip().lower()
 sync_db_url = (os.getenv("DATABASE_URL_SYNC") or "").strip()
 current_url = config.get_main_option("sqlalchemy.url")
 is_default_postgres_url = bool(current_url) and "localhost:5432/postgres" in current_url
 is_explicit_url = bool(current_url) and not is_default_postgres_url
 
 if is_explicit_url:
-    # Tests/tooling set a dedicated URL (often SQLite); respect it verbatim.
+    # Explicit URL supplied by caller (e.g. test fixture); respect it verbatim
     pass
+elif db_backend == "sqlite":
+    from app.db.connection import DEFAULT_DB_PATH
+    db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path_posix}")
 elif sync_db_url:
     config.set_main_option("sqlalchemy.url", sync_db_url)
 else:
-    raise RuntimeError(
-        "DATABASE_URL_SYNC is not configured. Supabase is the only supported "
-        "backend; set DATABASE_URL_SYNC to a postgresql+psycopg:// URL. "
-        "Tests must pass an explicit sqlalchemy.url (e.g. a disposable SQLite DB)."
-    )
-
-
+    from app.db.connection import DEFAULT_DB_PATH
+    db_path_posix = DEFAULT_DB_PATH.replace(os.sep, "/") if DEFAULT_DB_PATH != ":memory:" else ":memory:"
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{db_path_posix}")
 
 target_metadata = Base.metadata
 
@@ -81,8 +85,6 @@ def run_migrations_online() -> None:
         # changes). PRAGMA is SQLite-only: issuing it on PostgreSQL aborts the
         # transaction, so it must never run against Supabase.
         if connection.dialect.name == "sqlite":
-            # PRAGMA foreign_keys cannot run inside a SQLite transaction, so
-            # execute it on the raw DBAPI connection outside the migration tx.
             raw_dbapi_conn = connection.connection
             try:
                 cursor = raw_dbapi_conn.cursor()
@@ -90,6 +92,7 @@ def run_migrations_online() -> None:
                 cursor.close()
             except Exception:
                 pass
+
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
@@ -104,4 +107,3 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
-

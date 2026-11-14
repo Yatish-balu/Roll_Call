@@ -1,5 +1,6 @@
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useMemo } from "react";
 import { fetchAuditLogs, type AuditLogItem, type AuditLogQueryParams } from "@/services/api/audit";
+import { useResource } from "@/hooks/useResource";
 
 const EVENT_TYPES = [
   "ALL",
@@ -12,11 +13,6 @@ const EVENT_TYPES = [
 ];
 
 export function AuditLogView() {
-  const [logs, setLogs] = useState<AuditLogItem[]>([]);
-  const [total, setTotal] = useState(0);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   // Filters
   const [eventType, setEventType] = useState("ALL");
   const [actorFilter, setActorFilter] = useState("");
@@ -27,43 +23,36 @@ export function AuditLogView() {
   const [page, setPage] = useState(0);
   const pageSize = 15;
 
-  const loadLogs = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-
-    const params: AuditLogQueryParams = {
+  const params: AuditLogQueryParams = useMemo(() => {
+    const p: AuditLogQueryParams = {
       limit: pageSize,
       offset: page * pageSize,
     };
-    if (eventType !== "ALL") params.event_type = eventType;
-    if (actorFilter.trim()) params.actor = actorFilter.trim();
-    if (startDate) params.start_date = startDate;
-    if (endDate) params.end_date = endDate;
-
-    try {
-      const res = await fetchAuditLogs(params);
-      setLogs(res.items || []);
-      setTotal(res.total || 0);
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Failed to retrieve audit log trail from server.");
-      }
-    } finally {
-      setIsLoading(false);
-    }
+    if (eventType !== "ALL") p.event_type = eventType;
+    if (actorFilter.trim()) p.actor = actorFilter.trim();
+    if (startDate) p.start_date = startDate;
+    if (endDate) p.end_date = endDate;
+    return p;
   }, [eventType, actorFilter, startDate, endDate, page]);
 
-  useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadLogs();
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadLogs]);
+  const auditKey = `/api/v1/audit/logs?limit=${pageSize}&offset=${page * pageSize}&type=${eventType}&actor=${actorFilter}&start=${startDate}&end=${endDate}`;
+  const auditRes = useResource<{ items?: AuditLogItem[]; total?: number }>(
+    auditKey,
+    () => fetchAuditLogs(params)
+  );
+
+  const logs = auditRes.data?.items ?? [];
+  const total = auditRes.data?.total ?? 0;
+  const isLoading = auditRes.isLoading && !auditRes.data;
+  const error = auditRes.error
+    ? auditRes.error instanceof Error
+      ? auditRes.error.message
+      : "Failed to retrieve audit log trail from server."
+    : null;
+
+  const loadLogs = () => {
+    void auditRes.refresh();
+  };
 
   const formatLocalTime = (isoStr: string) => {
     try {

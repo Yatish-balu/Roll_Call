@@ -10,13 +10,13 @@ from __future__ import annotations
 import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
-from xml.sax.saxutils import escape as xml_escape
 
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import A4, landscape
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.lib.units import mm
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from xml.sax.saxutils import escape
 
 from app.db.models import Semester, Student
 
@@ -112,11 +112,13 @@ def export_students_pdf(
         title=title,
     )
 
+    # Every value that reaches ReportLab markup is escaped: the title and the
+    # applied filters are request controlled.
     story = [
-        Paragraph(xml_escape(str(title)), title_style),
+        Paragraph(escape(title), title_style),
         Paragraph(
             f"Generated {datetime.datetime.now().strftime('%d %b %Y, %H:%M')} &nbsp;|&nbsp; "
-            f"{xml_escape(describe_filters(branch, semester))} &nbsp;|&nbsp; "
+            f"{escape(describe_filters(branch, semester))} &nbsp;|&nbsp; "
             f"Students: {len(students)}",
             meta_style,
         ),

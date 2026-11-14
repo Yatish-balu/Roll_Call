@@ -81,9 +81,15 @@ def _client_ip(request: Request) -> str:
     because otherwise any client could spoof the header and dodge the per-IP
     quota.
     """
-    from app.security.client_ip import get_client_ip
-
-    return get_client_ip(request, default="127.0.0.1") or "127.0.0.1"
+    peer = request.client.host if request.client else "127.0.0.1"
+    trust_proxy = os.getenv("TRUST_PROXY_HEADERS", "").strip().lower() in {"1", "true", "yes", "on"}
+    if trust_proxy:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first[:45]
+    return peer[:45]
 
 
 def _too_many_requests(retry_after: int, message: str) -> JSONResponse:
@@ -374,6 +380,20 @@ def login(request: Request, payload: LoginRequest):
             if user.role.upper() == "ADMIN":
                 configured_admin_key = os.getenv("ADMIN_KEY")
                 if not configured_admin_key or len(configured_admin_key.strip()) == 0:
+                    try:
+                        from dotenv import dotenv_values
+                        _here = Path(__file__).resolve()
+                        for _candidate in (_here.parents[3] / ".env", _here.parents[2] / ".env"):
+                            if _candidate.exists():
+                                _val = dotenv_values(_candidate).get("ADMIN_KEY")
+                                if _val and _val.strip():
+                                    configured_admin_key = _val.strip()
+                                    os.environ["ADMIN_KEY"] = configured_admin_key
+                                    break
+                    except Exception:
+                        pass
+
+                if not configured_admin_key or len(configured_admin_key.strip()) == 0:
                     logger.error("ADMIN login failed closed: ADMIN_KEY is not configured on the server.")
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                     return generic_401
@@ -382,7 +402,17 @@ def login(request: Request, payload: LoginRequest):
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                     return generic_401
 
-                if not hmac.compare_digest(payload.admin_key.strip(), configured_admin_key.strip()):
+                # compare_digest() on str raises TypeError for non-ASCII input;
+                # compare UTF-8 bytes instead so any key value fails closed
+                # with 401 rather than crashing with a 500.
+                try:
+                    admin_key_matches = hmac.compare_digest(
+                        payload.admin_key.strip().encode("utf-8"),
+                        configured_admin_key.strip().encode("utf-8"),
+                    )
+                except Exception:
+                    admin_key_matches = False
+                if not admin_key_matches:
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                     return generic_401
 
@@ -545,7 +575,7 @@ def login(request: Request, payload: LoginRequest):
             content={
                 "token": token,
                 "role": user.role,
-                "name": user.email.split("@")[0] if user.email else user.user_id,
+                "name": getattr(user, "name", None) or (user.email.split("@")[0] if user.email else user.user_id),
                 "subject_codes": subject_codes,
                 "expires_at_utc": exp_iso,
             },
@@ -776,7 +806,7 @@ def refresh(request: Request):
             content={
                 "token": new_access_token,
                 "role": user.role,
-                "name": user.email.split("@")[0] if user.email else user.user_id,
+                "name": getattr(user, "name", None) or (user.email.split("@")[0] if user.email else user.user_id),
                 "subject_codes": subject_codes,
                 "expires_at_utc": exp_iso,
             },
@@ -869,6 +899,7 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
             return UserMeResponse(
                 user_id=user.user_id,
                 email=user.email or f"{user.user_id}@rollcall.internal",
+                name=getattr(user, "name", None) or user.user_id,
                 role=user.role.value,
                 is_active=1,
                 subject_codes=[],
@@ -886,12 +917,13 @@ def get_current_user_profile(user: AuthenticatedUser = Depends(get_current_user)
         return UserMeResponse(
             user_id=db_user.user_id,
             email=db_user.email,
+            name=getattr(db_user, "name", None) or (db_user.email.split("@")[0] if db_user.email else db_user.user_id),
             role=db_user.role,
             is_active=db_user.is_active,
             subject_codes=subject_codes,
         )
-# -- Password Lifecycle Helpers --
 
+# -- Password Lifecycle Helpers --
 def _validate_password_strength(password: str) -> None:
     """Validate password meets complexity requirements.
 

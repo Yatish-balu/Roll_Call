@@ -150,7 +150,7 @@ def test_process_file_photo_success(seeded_client):
     ]
     fake_result = PhotoExtractionResult(image_path="sheet.png", rows=fake_rows, source=ExtractionSource.LLM)
 
-    with patch("app.agent.read_photo_tool", return_value=fake_result):
+    with patch("app.agent.legacy_agent.read_photo_tool", return_value=fake_result):
         # A minimal but *valid* 1x1 PNG image (the upload endpoint rejects
         # malformed images, so the fixture must be decodable).
         png_bytes = (
@@ -192,7 +192,7 @@ def test_process_file_low_confidence_triggers_confirmation(seeded_client):
     ]
     fake_result = PhotoExtractionResult(image_path="sheet.png", rows=fake_rows, source=ExtractionSource.LLM)
 
-    with patch("app.agent.read_photo_tool", return_value=fake_result):
+    with patch("app.agent.legacy_agent.read_photo_tool", return_value=fake_result):
         # A minimal but *valid* 1x1 PNG image.
         png_bytes = (
             b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"

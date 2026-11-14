@@ -1,4 +1,5 @@
 export * from "./client";
+export * from "./cache";
 export * from "./health";
 export * from "./students";
 export * from "./attendance";

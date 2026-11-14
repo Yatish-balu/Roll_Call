@@ -20,6 +20,8 @@ import {
   todayIso,
   weekdayOfIsoDate,
 } from "@/lib/schedule";
+import { useResource } from "@/hooks/useResource";
+import { invalidate } from "@/services/api/cache";
 
 type CalendarViewMode = "month" | "week" | "day";
 
@@ -36,14 +38,7 @@ export function CalendarView() {
   const [viewMode, setViewMode] = useState<CalendarViewMode>(defaultView);
   const [anchorDate, setAnchorDate] = useState<string>(today);
   const [selectedDate, setSelectedDate] = useState<string>(today);
-
-  const [monthData, setMonthData] = useState<CalendarMonthData | null>(null);
-  const [weekSessions, setWeekSessions] = useState<SessionItem[]>([]);
-  const [weekAllocations, setWeekAllocations] = useState<SessionAllocation[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [selectedSubject, setSelectedSubject] = useState("ALL");
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
 
   const subjectOptions = useMemo(() => {
     const codes = new Set<string>();
@@ -56,86 +51,91 @@ export function CalendarView() {
     return { year: Number(parts[0]), month: Number(parts[1]) - 1 };
   }, [anchorDate]);
 
-  /* ------------------------------------------------------------------ */
-  /* Loading                                                             */
-  /* ------------------------------------------------------------------ */
+  const weekStart = useMemo(() => startOfWeekIso(anchorDate), [anchorDate]);
+  const weekEnd = useMemo(() => addDaysIso(weekStart, 6), [weekStart]);
 
-  const loadMonth = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const data = await loadMonthCalendarData(year, month, selectedSubject, today);
-      setMonthData(data);
-      setLastUpdated(new Date());
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "The calendar could not be loaded.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, [year, month, selectedSubject, today]);
+  // SWR Caching: served instantly from cache on tab switch; revalidates silently in background
+  const monthKey = viewMode === "month" ? `calendar:month:${year}-${month}:${selectedSubject}` : null;
+  const monthRes = useResource<CalendarMonthData>(
+    monthKey,
+    () => loadMonthCalendarData(year, month, selectedSubject, today)
+  );
 
-  const loadWeek = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const weekStart = startOfWeekIso(anchorDate);
-      const weekEnd = addDaysIso(weekStart, 6);
+  const weekKey = viewMode === "week" ? `calendar:week:${weekStart}:${weekEnd}` : null;
+  const weekRes = useResource<{ sessions: SessionItem[]; allocations: SessionAllocation[] }>(
+    weekKey,
+    async () => {
       const [sessionsRes, allocationsRes] = await Promise.all([
         fetchSessions({ limit: 200, from_date: weekStart, to_date: weekEnd }),
         fetchSessionAllocations({ from_date: weekStart, to_date: weekEnd }),
       ]);
-      setWeekSessions(sessionsRes.items || []);
-      setWeekAllocations(allocationsRes.items || []);
-      setLastUpdated(new Date());
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "The week could not be loaded.");
-    } finally {
-      setIsLoading(false);
+      return {
+        sessions: sessionsRes.items || [],
+        allocations: allocationsRes.items || [],
+      };
     }
-  }, [anchorDate]);
+  );
 
-  const loadDay = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
+  const dayKey = viewMode === "day" ? `calendar:day:${anchorDate}` : null;
+  const dayRes = useResource<{ sessions: SessionItem[]; allocations: SessionAllocation[] }>(
+    dayKey,
+    async () => {
       const [sessionsRes, allocationsRes] = await Promise.all([
         fetchSessions({ limit: 50, date: anchorDate }),
         fetchSessionAllocations({ date: anchorDate }),
       ]);
-      setWeekSessions(sessionsRes.items || []);
-      setWeekAllocations(allocationsRes.items || []);
-      setLastUpdated(new Date());
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "The day could not be loaded.");
-    } finally {
-      setIsLoading(false);
+      return {
+        sessions: sessionsRes.items || [],
+        allocations: allocationsRes.items || [],
+      };
     }
-  }, [anchorDate]);
+  );
+
+  const monthData = monthRes.data ?? null;
+
+  const weekSessions = useMemo(() => {
+    if (viewMode === "week") return weekRes.data?.sessions ?? [];
+    if (viewMode === "day") return dayRes.data?.sessions ?? [];
+    return [];
+  }, [viewMode, weekRes.data, dayRes.data]);
+
+  const weekAllocations = useMemo(() => {
+    if (viewMode === "week") return weekRes.data?.allocations ?? [];
+    if (viewMode === "day") return dayRes.data?.allocations ?? [];
+    return [];
+  }, [viewMode, weekRes.data, dayRes.data]);
+
+  const activeRes = viewMode === "month" ? monthRes : viewMode === "week" ? weekRes : dayRes;
+  const isLoading = activeRes.isLoading && !activeRes.data;
+  const error = activeRes.error
+    ? activeRes.error instanceof Error
+      ? activeRes.error.message
+      : "The calendar could not be loaded."
+    : null;
+
+  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  useEffect(() => {
+    if (activeRes.data) {
+      setLastUpdated(new Date());
+    }
+  }, [activeRes.data]);
 
   const reload = useCallback(() => {
-    if (viewMode === "month") {
-      void loadMonth();
-    } else if (viewMode === "week") {
-      void loadWeek();
-    } else {
-      void loadDay();
-    }
-  }, [viewMode, loadMonth, loadWeek, loadDay]);
-
-  useEffect(() => {
-    void reload();
-  }, [reload]);
+    void activeRes.refresh();
+  }, [activeRes]);
 
   // Refresh after attendance changes and after session initialisation.
   useEffect(() => {
-    const handler = () => reload();
+    const handler = () => {
+      invalidate("calendar");
+    };
     window.addEventListener("rollcall:attendance-changed", handler);
     window.addEventListener("rollcall:sessions-changed", handler);
     return () => {
       window.removeEventListener("rollcall:attendance-changed", handler);
       window.removeEventListener("rollcall:sessions-changed", handler);
     };
-  }, [reload]);
+  }, []);
 
   /* ------------------------------------------------------------------ */
   /* Derived data                                                        */

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import {
@@ -10,6 +10,11 @@ import {
   type TimetableReference,
   type TimetableWeek,
 } from "@/services/api/timetable";
+import { useResource } from "@/hooks/useResource";
+import { invalidate } from "@/services/api/cache";
+
+const TIMETABLE_WEEK_KEY = "/api/v1/timetable/week";
+const TIMETABLE_REF_KEY = "/api/v1/timetable/reference";
 import {
   ACADEMIC_DAY_END,
   ACADEMIC_DAY_START,
@@ -25,12 +30,30 @@ export function TimetableView() {
   const { session, canScheduleSessions, isAdmin } = useAuth();
   const today = todayIso();
 
-  const [week, setWeek] = useState<TimetableWeek | null>(null);
-  const [reference, setReference] = useState<TimetableReference | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const weekRes = useResource<TimetableWeek>(
+    TIMETABLE_WEEK_KEY,
+    () => fetchTimetableWeek()
+  );
+  const refRes = useResource<TimetableReference>(
+    TIMETABLE_REF_KEY,
+    () => fetchTimetableReference()
+  );
+
+  const week = weekRes.data ?? null;
+  const reference = refRes.data ?? null;
+  const isLoading = weekRes.isLoading && !weekRes.data;
+  const error = weekRes.error
+    ? weekRes.error instanceof Error
+      ? weekRes.error.message
+      : "The timetable could not be loaded."
+    : null;
+
   const [selectedDay, setSelectedDay] = useState<string>("Monday");
   const [viewType, setViewType] = useState<"day" | "grid">("day");
+
+  const loadWeek = useCallback(async () => {
+    await weekRes.refresh();
+  }, [weekRes]);
 
   // Entry editor
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -48,26 +71,6 @@ export function TimetableView() {
   });
   const [formError, setFormError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
-
-  const loadWeek = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const data = await fetchTimetableWeek();
-      setWeek(data);
-    } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "The timetable could not be loaded.");
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void loadWeek();
-    fetchTimetableReference()
-      .then(setReference)
-      .catch(() => setReference(null));
-  }, [loadWeek]);
 
   const dayEntries = useMemo(() => {
     const day = week?.days.find((entry) => entry.day_of_week === selectedDay);
@@ -175,7 +178,13 @@ export function TimetableView() {
         await createTimetableEntry(payload);
       }
       setIsEditorOpen(false);
-      await loadWeek();
+      invalidate([
+        TIMETABLE_WEEK_KEY,
+        TIMETABLE_REF_KEY,
+        "/api/v1/sessions",
+        "calendar",
+        "dashboard",
+      ]);
       window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : "The class could not be saved.");

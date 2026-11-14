@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState } from "react";
 import {
   fetchAnalyticsSummary,
   downloadExcelReport,
@@ -6,12 +6,31 @@ import {
 } from "@/services/api/reports";
 import { fetchSessions, type SessionItem } from "@/services/api/sessions";
 import type { VerifiedSummaryReport } from "@/types/dashboard";
+import { useResource } from "@/hooks/useResource";
 
 export function ReportsView() {
-  const [summary, setSummary] = useState<VerifiedSummaryReport | null>(null);
-  const [sessions, setSessions] = useState<SessionItem[]>([]);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
+  const summaryRes = useResource<VerifiedSummaryReport>(
+    "/api/v1/reports/analytics-summary",
+    () => fetchAnalyticsSummary()
+  );
+  const sessionsRes = useResource<{ items?: SessionItem[]; total?: number }>(
+    "/api/v1/sessions?limit=50",
+    () => fetchSessions({ limit: 50 })
+  );
+
+  const summary = summaryRes.data ?? null;
+  const sessions = sessionsRes.data?.items ?? [];
+  const isLoading = (summaryRes.isLoading && !summaryRes.data) || (sessionsRes.isLoading && !sessionsRes.data);
+  const error = summaryRes.error
+    ? summaryRes.error instanceof Error
+      ? summaryRes.error.message
+      : "Unable to load analytics report data."
+    : null;
+
+  const loadData = () => {
+    void summaryRes.refresh();
+    void sessionsRes.refresh();
+  };
 
   // Filters
   const [selectedSessionId, setSelectedSessionId] = useState("");
@@ -22,42 +41,6 @@ export function ReportsView() {
   const [isExportingExcel, setIsExportingExcel] = useState(false);
   const [isExportingPdf, setIsExportingPdf] = useState(false);
   const [exportMessage, setExportMessage] = useState<string | null>(null);
-
-  const loadData = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const [sumRes, sessRes] = await Promise.allSettled([
-        fetchAnalyticsSummary(),
-        fetchSessions({ limit: 50 }),
-      ]);
-
-      if (sumRes.status === "fulfilled") {
-        setSummary(sumRes.value);
-      }
-      if (sessRes.status === "fulfilled") {
-        setSessions(sessRes.value.items || []);
-      }
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Unable to load analytics report data.");
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadData();
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadData]);
 
   const handleExportExcel = async () => {
     setIsExportingExcel(true);

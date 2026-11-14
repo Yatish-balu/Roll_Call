@@ -35,7 +35,7 @@ export function AppShell({ children, title = "Dashboard" }: AppShellProps) {
   }
 
   return (
-    <div className="flex min-h-screen bg-[#F2EDE0]">
+    <div className="flex min-h-screen bg-[#F2EDE0] dark:bg-[#11120D] text-[#24251C] dark:text-[#EDE8D8] transition-colors">
       <Sidebar
         isOpen={isMobileSidebarOpen}
         onClose={() => setIsMobileSidebarOpen(false)}

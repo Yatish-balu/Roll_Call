@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useState, useCallback } from "react";
 import {
   fetchDefaulters,
   downloadDefaulterPdf,
@@ -10,79 +10,56 @@ import {
 import { useAuth } from "@/hooks/useAuth";
 import { fetchStudentRosterFilters } from "@/services/api/reports";
 import { fetchMetaConfig } from "@/services/api/defaulters";
+import { useResource } from "@/hooks/useResource";
 
 const SEMESTER_OPTIONS = [1, 2, 3, 4, 5, 6, 7, 8];
 
 export function DefaultersView() {
   const { isAdmin } = useAuth();
-  const [data, setData] = useState<DefaultersResponse | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-
   // Filters
   const [selectedBranch, setSelectedBranch] = useState("ALL");
   const [selectedSubject, setSelectedSubject] = useState("ALL");
   const [selectedSemester, setSelectedSemester] = useState("ALL");
 
-  // Dynamic filter options (loaded from the backend)
-  const [branchOptions, setBranchOptions] = useState<string[]>([]);
-  const [subjectOptions, setSubjectOptions] = useState<string[]>([]);
+  // Dynamic filter options served from shared cache
+  const filtersRes = useResource<{ branches?: string[] }>(
+    "/api/v1/reports/students/filters",
+    () => fetchStudentRosterFilters()
+  );
+  const metaRes = useResource<{ subject_codes?: string[] }>(
+    "/api/v1/meta/config",
+    () => fetchMetaConfig()
+  );
+  const branchOptions = filtersRes.data?.branches || [];
+  const subjectOptions = metaRes.data?.subject_codes || [];
 
   // PDF Export state
   const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
   const [pdfMessage, setPdfMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  const loadDefaulters = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
-    try {
-      const res = await fetchDefaulters({
+  // SWR Caching: instantaneous rendering when switching tabs; revalidates silently in background
+  const defaultersKey = `/api/v1/defaulters?branch=${selectedBranch}&subject=${selectedSubject}&semester=${selectedSemester}`;
+  const defaultersRes = useResource<DefaultersResponse>(
+    defaultersKey,
+    () =>
+      fetchDefaulters({
         branch: selectedBranch,
         subject: selectedSubject,
         semester: selectedSemester,
-      });
-      setData(res);
-    } catch (err: unknown) {
-      if (err instanceof Error) {
-        setError(err.message);
-      } else {
-        setError("Unable to load institutional defaulters list.");
-      }
-    } finally {
-      setIsLoading(false);
-    }
-  }, [selectedBranch, selectedSubject, selectedSemester]);
-
-  useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadDefaulters();
-    });
-    return () => {
-      isMounted = false;
-    };
-  }, [loadDefaulters]);
-
-  useEffect(() => {
-    let isMounted = true;
-    fetchStudentRosterFilters()
-      .then((filters) => {
-        if (isMounted) setBranchOptions(filters.branches || []);
       })
-      .catch(() => {
-        if (isMounted) setBranchOptions([]);
-      });
-    fetchMetaConfig()
-      .then((meta) => {
-        if (isMounted) setSubjectOptions(meta.subject_codes || []);
-      })
-      .catch(() => {
-        if (isMounted) setSubjectOptions([]);
-      });
-    return () => {
-      isMounted = false;
-    };
-  }, []);
+  );
+
+  const data = defaultersRes.data ?? null;
+  const isLoading = defaultersRes.isLoading && !defaultersRes.data;
+  const error = defaultersRes.error
+    ? defaultersRes.error instanceof Error
+      ? defaultersRes.error.message
+      : "Unable to load institutional defaulters list."
+    : null;
+
+  const loadDefaulters = useCallback(async () => {
+    await defaultersRes.refresh();
+  }, [defaultersRes]);
 
   const handleDownloadPdf = async () => {
     if (!isAdmin) return;

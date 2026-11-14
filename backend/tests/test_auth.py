@@ -133,6 +133,59 @@ def client(auth_test_db):
     return TestClient(app)
 
 
+def test_admin_login_with_admin_key_success_and_failures(client, auth_test_db):
+    """
+    Regression test for the ADMIN-key login flow:
+
+    * an ADMIN account with ``mfa_enabled = 0`` must never be blocked by the
+      MFA branch, and
+    * ``admin_key`` must be accepted after client/server-side whitespace
+      trimming (the path used by the React login form) while missing and
+      mismatched keys fail closed with 401.
+    """
+    _, SessionLocal = auth_test_db
+    with SessionLocal() as db:
+        admin = db.get(User, "admin_john")
+        assert admin is not None
+        assert admin.mfa_enabled in (0, None)  # MFA must not gate this login
+
+    correct_key = TEST_ADMIN_KEY
+
+    # 1. Valid admin_key -> 200 with an ADMIN token.
+    ok = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "admin_john", "password": "AdminPass123!", "admin_key": correct_key},
+    )
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["role"] == "ADMIN"
+    verified = decode_and_verify_token(ok.json()["token"], secret=TEST_JWT_SECRET)
+    assert verified.user_id == "admin_john"
+
+    # 2. Whitespace-padded admin_key -> still 200 (matches backend trimming).
+    padded = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "admin_john", "password": "AdminPass123!", "admin_key": f"  {correct_key}  "},
+    )
+    assert padded.status_code == 200, padded.text
+    assert padded.json()["role"] == "ADMIN"
+
+    # 3. Missing admin_key -> 401 generic error.
+    missing = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "admin_john", "password": "AdminPass123!"},
+    )
+    assert missing.status_code == 401
+    assert missing.json()["error"]["code"] == "UNAUTHORIZED"
+
+    # 4. Mismatched admin_key -> 401 generic error.
+    mismatch = client.post(
+        "/api/v1/auth/login",
+        json={"user_id": "admin_john", "password": "AdminPass123!", "admin_key": f"{correct_key}-typo"},
+    )
+    assert mismatch.status_code == 401
+    assert mismatch.json()["error"]["code"] == "UNAUTHORIZED"
+
+
 def test_login_success_with_valid_credentials(client):
     """Test 1: Correct credentials return HTTP 200, signed token, role, and subject codes."""
     res = client.post(

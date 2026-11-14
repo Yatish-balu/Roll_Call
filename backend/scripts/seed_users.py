@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import secrets
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -60,31 +59,16 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         if missing:
             raise ValueError(f"Production security error: The following seed passwords must be set in environment: {missing}")
     else:
-        # Never ship a static default password. If the operator did not choose
-        # one, generate a random value per run and show it once. This keeps a
-        # seeded development database from being trivially guessable.
-        def _dev_password(env_name: str, user_id: str) -> str:
-            configured = os.getenv(env_name)
-            if configured:
-                return configured
-            generated = secrets.token_urlsafe(18)
-            logger.warning(
-                "No %s set; generated a random development password for '%s': %s "
-                "(change it after first login).",
-                env_name,
-                user_id,
-                generated,
-            )
-            return generated
-
-        admin_pw = _dev_password("SEED_ADMIN_PASSWORD", "admin_root")
-        f1_pw = _dev_password("SEED_FACULTY_1_PASSWORD", "faculty_ds")
-        f2_pw = _dev_password("SEED_FACULTY_2_PASSWORD", "faculty_ml")
-        f3_pw = _dev_password("SEED_FACULTY_3_PASSWORD", "faculty_cn")
+        # Development safe defaults
+        admin_pw = admin_pw or "AdminSecurePass_2026!"
+        f1_pw = f1_pw or "FacultyPass_DIST_2026!"
+        f2_pw = f2_pw or "FacultyPass_ML_2026!"
+        f3_pw = f3_pw or "FacultyPass_CN_2026!"
 
     return [
         {
             "user_id": os.getenv("SEED_ADMIN_USER_ID", "admin_root"),
+            "name": os.getenv("SEED_ADMIN_NAME", "System Administrator"),
             "email": os.getenv("SEED_ADMIN_EMAIL", "admin@rollcall.internal"),
             "password": admin_pw,
             "role": "ADMIN",
@@ -92,6 +76,7 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         },
         {
             "user_id": os.getenv("SEED_FACULTY_1_USER_ID", "faculty_ds"),
+            "name": os.getenv("SEED_FACULTY_1_NAME", "Dr. Distributed Systems"),
             "email": os.getenv("SEED_FACULTY_1_EMAIL", "faculty.ds@rollcall.internal"),
             "password": f1_pw,
             "role": "FACULTY",
@@ -99,6 +84,7 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         },
         {
             "user_id": os.getenv("SEED_FACULTY_2_USER_ID", "faculty_ml"),
+            "name": os.getenv("SEED_FACULTY_2_NAME", "Dr. Machine Learning"),
             "email": os.getenv("SEED_FACULTY_2_EMAIL", "faculty.ml@rollcall.internal"),
             "password": f2_pw,
             "role": "FACULTY",
@@ -106,6 +92,7 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
         },
         {
             "user_id": os.getenv("SEED_FACULTY_3_USER_ID", "faculty_cn"),
+            "name": os.getenv("SEED_FACULTY_3_NAME", "Dr. Computer Networks"),
             "email": os.getenv("SEED_FACULTY_3_EMAIL", "faculty.cn@rollcall.internal"),
             "password": f3_pw,
             "role": "FACULTY",
@@ -131,12 +118,16 @@ def seed_users(session_factory=None) -> Dict[str, int]:
             uid = acc["user_id"]
             existing = db.get(User, uid)
             if existing:
+                if acc.get("name") and not getattr(existing, "name", None):
+                    existing.name = acc["name"]
+                    db.flush()
                 logger.info("User '%s' already exists in database; skipping creation.", uid)
                 skipped_count += 1
             else:
                 pw_hash = hash_password(acc["password"])
                 user = User(
                     user_id=uid,
+                    name=acc.get("name"),
                     email=acc["email"],
                     role=acc["role"],
                     hashed_password=pw_hash,

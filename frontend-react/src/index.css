@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 :root {
   --rollcall-beige: #EDE8D8;
   --rollcall-olive: #72785E;
@@ -19,6 +21,48 @@
   --primary: var(--rollcall-gold);
   --primary-foreground: #FBF8F0;
   --border: var(--rollcall-border);
+}
+
+.dark, [data-theme="dark"] {
+  --rollcall-beige: #1C1E16;
+  --rollcall-olive: #92997C;
+  --rollcall-gold: #D2A847;
+  --rollcall-deep-olive: #242A16;
+  --rollcall-active-nav: #D2A847;
+  --rollcall-cream: #181913;
+  --rollcall-workspace: #11120D;
+  --rollcall-text-primary: #EDE8D8;
+  --rollcall-text-secondary: #A9AE8C;
+  --rollcall-border: #2C3022;
+
+  --background: #11120D;
+  --foreground: #EDE8D8;
+  --card: #181913;
+  --card-foreground: #EDE8D8;
+  --primary: #D2A847;
+  --primary-foreground: #11120D;
+  --border: #2C3022;
+}
+
+[data-theme="light"] {
+  --rollcall-beige: #F5F5F5;
+  --rollcall-olive: #5A6248;
+  --rollcall-gold: #6C5119;
+  --rollcall-deep-olive: #33381B;
+  --rollcall-active-nav: #A77A13;
+  --rollcall-cream: #FFFFFF;
+  --rollcall-workspace: #FAFAFA;
+  --rollcall-text-primary: #1C1D18;
+  --rollcall-text-secondary: #6B6F57;
+  --rollcall-border: #E0E0E0;
+
+  --background: #FAFAFA;
+  --foreground: #1C1D18;
+  --card: #FFFFFF;
+  --card-foreground: #1C1D18;
+  --primary: #6C5119;
+  --primary-foreground: #FFFFFF;
+  --border: #E0E0E0;
 }
 
 @theme inline {
@@ -54,5 +98,52 @@ body {
   padding: 0;
   display: flex;
   flex-direction: column;
+}
+
+/* Global Dark Theme Element Adaptations */
+.dark body {
+  background-color: var(--background);
+  color: var(--foreground);
+}
+
+.dark .bg-\[\#F2EDE0\] {
+  background-color: var(--background) !important;
+}
+
+.dark .bg-\[\#FBF8F0\] {
+  background-color: var(--card) !important;
+}
+
+.dark .bg-white {
+  background-color: #191B14 !important;
+}
+
+.dark .text-\[\#24251C\] {
+  color: var(--foreground) !important;
+}
+
+.dark .text-\[\#77735F\] {
+  color: var(--rollcall-text-secondary) !important;
+}
+
+.dark .border-\[\#E4DDCA\] {
+  border-color: var(--border) !important;
+}
+
+.dark .border-\[\#E4DDCA\]\/60 {
+  border-color: rgba(44, 48, 34, 0.6) !important;
+}
+
+.dark input:not([type="checkbox"]):not([type="radio"]),
+.dark select,
+.dark textarea {
+  background-color: #1A1C15;
+  color: var(--foreground);
+  border-color: var(--border);
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: rgba(169, 174, 140, 0.5);
 }
 

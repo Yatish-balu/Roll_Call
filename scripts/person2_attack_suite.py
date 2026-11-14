@@ -45,6 +45,7 @@ os.environ.update(
         "ALLOWED_ORIGINS": ALLOWED_ORIGIN,
         "REDIS_URL": "",
         "SMTP_HOST": "",
+        "SESSION_AUTO_INIT": "0",
     }
 )
 

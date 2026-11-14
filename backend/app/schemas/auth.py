@@ -65,6 +65,7 @@ class UserMeResponse(BaseModel):
     """Current authenticated user profile payload."""
     user_id: str = Field(..., description="Unique user identifier")
     email: str = Field(..., description="User email address")
+    name: Optional[str] = Field(None, description="Human-readable display name")
     role: str = Field(..., description="Current authoritative authorization role from database")
     is_active: int = Field(1, description="Account active status")
     subject_codes: List[str] = Field(default_factory=list, description="Assigned subject codes")

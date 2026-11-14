@@ -159,6 +159,12 @@ def test_postgresql_ssl_psycopg_connect_args(monkeypatch):
         connect_args = kwargs.get("connect_args", {})
         assert connect_args.get("sslmode") == "require", \
             f"Expected sslmode=require in connect_args, got {connect_args}"
+        # Supabase's PgBouncer (transaction pooling) cannot keep psycopg3's
+        # auto-prepared statements between requests; leaving them on produced
+        # DuplicatePreparedStatement -> aborted transactions -> HTTP 500 on
+        # attendance saves.
+        assert connect_args.get("prepare_threshold") is None, \
+            f"Expected prepare_threshold=None in connect_args, got {connect_args}"
 
 
 def test_postgresql_engine_url_is_postgresql(monkeypatch):

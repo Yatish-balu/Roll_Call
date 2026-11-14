@@ -21,6 +21,8 @@ from unittest.mock import MagicMock
 import pandas as pd
 import pytest
 
+pytest.importorskip("streamlit")
+
 from app.agent import AttendanceAgent
 from app.security.ai_policy import TRUSTED_INTERNAL
 from app.db import init_db, insert_student, insert_room, insert_session, get_attendance_by_session

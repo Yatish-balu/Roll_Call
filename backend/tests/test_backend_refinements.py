@@ -330,3 +330,19 @@ def test_cors_get_allowed_origins_rejects_wildcard():
         assert origins == DEFAULT_ALLOWED_ORIGINS
         assert "http://localhost:3000" in origins
         assert "http://localhost:5173" in origins
+
+
+# ==============================================================================
+# 7. Model Discovery Endpoints (/models, /v1/models)
+# ==============================================================================
+
+def test_models_endpoints_support_openai_discovery():
+    client = TestClient(app)
+    for path in ("/models", "/v1/models", "/api/v1/models", "/api/models"):
+        res = client.get(path)
+        assert res.status_code == 200, f"Failed for {path}"
+        data = res.json()
+        assert data["object"] == "list"
+        ids = [m["id"] for m in data["data"]]
+        assert "gemini-3.5-flash-lite" in ids
+        assert "rollcall-ai-agent" in ids

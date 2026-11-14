@@ -15,11 +15,12 @@ from sqlalchemy import (
     Integer,
     String,
     Float,
+    Text,
     UniqueConstraint,
     event,
     text,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, foreign
 from app.db.base import Base
 
 
@@ -40,6 +41,7 @@ class User(Base):
     __tablename__ = "users"
 
     user_id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[Optional[str]] = mapped_column(String, nullable=True, default=None)
     email: Mapped[str] = mapped_column(String, unique=True, nullable=False)
     role: Mapped[str] = mapped_column(String, nullable=False)
     hashed_password: Mapped[Optional[str]] = mapped_column(String, nullable=True)
@@ -56,9 +58,18 @@ class User(Base):
     mfa_recovery_codes: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     mfa_last_counter: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
-    teacher_subjects: Mapped[List["TeacherSubject"]] = relationship(
-        "TeacherSubject", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
+    faculty_subjects: Mapped[List["FacultySubject"]] = relationship(
+        "FacultySubject", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
+
+    @property
+    def teacher_subjects(self) -> List["FacultySubject"]:
+        return self.faculty_subjects
+
+    @property
+    def faculty_subjects_new(self) -> List["FacultySubject"]:
+        return self.faculty_subjects
+
     sessions: Mapped[List["Session"]] = relationship(
         "Session",
         primaryjoin="Session.teacher_id == User.user_id",
@@ -78,9 +89,6 @@ class User(Base):
     headed_departments: Mapped[List["Department"]] = relationship(
         "Department", back_populates="head_of_dept"
     )
-    faculty_subjects_new: Mapped[List["FacultySubject"]] = relationship(
-        "FacultySubject", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
-    )
     department_staff_records: Mapped[List["DepartmentStaff"]] = relationship(
         "DepartmentStaff", back_populates="user", cascade="all, delete-orphan", passive_deletes=True
     )
@@ -89,28 +97,98 @@ class User(Base):
         primaryjoin="Session.coordinator_faculty_id == User.user_id",
         back_populates="coordinator",
     )
+    profile: Mapped[Optional["UserProfile"]] = relationship(
+        "UserProfile",
+        primaryjoin="UserProfile.user_id == User.user_id",
+        viewonly=True,
+    )
 
     def __repr__(self) -> str:
         return f"<User(user_id={self.user_id!r}, email={self.email!r}, role={self.role!r})>"
 
+    @property
+    def display_name(self) -> str:
+        """Human-readable display name, falling back to email prefix or user_id."""
+        return self.name or (self.email.split("@")[0] if self.email else self.user_id)
 
-class TeacherSubject(Base):
-    __tablename__ = "teacher_subjects"
+
+class UserProfile(Base):
+    """Descriptive faculty/staff profile, 1:1 with ``users``.
+
+    Identity fields (user_id, role, hashed password, display name ``name`` and
+    email) live on ``users``; this table holds the descriptive details edited
+    through the Profile Settings UI. Text-list fields (expertise tags,
+    mastered subjects) are stored as JSON strings.
+    """
+
+    __tablename__ = "user_profiles"
+
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), primary_key=True
+    )
+    # Mirrors of the identity fields: users.name / users.email remain
+    # authoritative for login and refresh responses; these copies keep the
+    # profile row self-contained for the Profile Settings UI.
+    full_name: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    mobile: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    branch: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    designation: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    experience_years: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    qualifications: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    specialization: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    expertise: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    mastered_subjects: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    photo_url: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    user: Mapped["User"] = relationship("User", back_populates="profile", viewonly=True)
+
+    def __repr__(self) -> str:
+        return f"<UserProfile(user_id={self.user_id!r}, designation={self.designation!r})>"
+
+
+class FacultySubject(Base):
+    """Faculty-subject assignment (consolidated mapping table), with optional department and semester."""
+
+    __tablename__ = "faculty_subjects"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(
         String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
     )
     subject_code: Mapped[str] = mapped_column(String, nullable=False)
+    dept_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, default=None
+    )
+    semester: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True, default=None
+    )
 
-    user: Mapped["User"] = relationship("User", back_populates="teacher_subjects")
+    user: Mapped["User"] = relationship("User", back_populates="faculty_subjects")
+    subject: Mapped[Optional["Subject"]] = relationship(
+        "Subject",
+        primaryjoin="foreign(FacultySubject.subject_code) == Subject.subject_code",
+        back_populates="faculty_assignments",
+    )
+    dept: Mapped[Optional["Department"]] = relationship(
+        "Department",
+        primaryjoin="foreign(FacultySubject.dept_id) == Department.dept_id",
+        back_populates="faculty_subjects",
+    )
 
     __table_args__ = (
-        UniqueConstraint("user_id", "subject_code", name="uq_teacher_subject"),
+        UniqueConstraint("user_id", "subject_code", name="uq_faculty_subject"),
+        Index("idx_faculty_subjects_user_id", "user_id"),
+        Index("idx_faculty_subjects_subject_code", "subject_code"),
     )
 
     def __repr__(self) -> str:
-        return f"<TeacherSubject(user_id={self.user_id!r}, subject_code={self.subject_code!r})>"
+        return f"<FacultySubject(user_id={self.user_id!r}, subject_code={self.subject_code!r})>"
+
+
+# Backwards compatibility alias:
+TeacherSubject = FacultySubject
 
 
 class AuditLog(Base):
@@ -148,6 +226,24 @@ class AuditLog(Base):
 
     def __repr__(self) -> str:
         return f"<AuditLog(log_id={self.log_id}, actor_id={self.actor_id!r}, action={self.action!r})>"
+
+    @property
+    def event(self) -> str:
+        """Playbook-compatible alias for action."""
+        return self.action
+
+    @event.setter
+    def event(self, val: str) -> None:
+        self.action = val
+
+    @property
+    def at_utc(self) -> str:
+        """Playbook-compatible alias for timestamp."""
+        return self.timestamp
+
+    @at_utc.setter
+    def at_utc(self, val: str) -> None:
+        self.timestamp = val
 
 
 class AuditChainHead(Base):
@@ -314,6 +410,24 @@ class PendingEdit(Base):
     def __repr__(self) -> str:
         return f"<PendingEdit(edit_id={self.edit_id!r}, user_id={self.user_id!r}, consumed={self.consumed})>"
 
+    @property
+    def pending_id(self) -> str:
+        """Playbook-compatible alias for edit_id."""
+        return self.edit_id
+
+    @pending_id.setter
+    def pending_id(self, val: str) -> None:
+        self.edit_id = val
+
+    @property
+    def used(self) -> int:
+        """Playbook-compatible alias for consumed."""
+        return self.consumed
+
+    @used.setter
+    def used(self, val: int) -> None:
+        self.consumed = val
+
 
 class AuthSession(Base):
     __tablename__ = "auth_sessions"
@@ -467,6 +581,12 @@ class Session(Base):
     __table_args__ = (
         Index("idx_sessions_teacher_created", "teacher_id", "created_at"),
         Index("idx_sessions_lifecycle", "lifecycle_status"),
+        # Dashboard/report queries filter and sort on the session date.
+        Index("idx_sessions_date", "date"),
+        # Attendance report filtering by subject code (D8 proxy selector).
+        Index("idx_sessions_subject_code", "subject_code"),
+        # Session visibility scoping resolves coordinator-owned sessions.
+        Index("idx_sessions_coordinator_faculty", "coordinator_faculty_id"),
     )
 
     def __repr__(self) -> str:
@@ -602,7 +722,11 @@ class Department(Base):
         "Subject", back_populates="dept", cascade="all, delete-orphan", passive_deletes=True
     )
     faculty_subjects: Mapped[List["FacultySubject"]] = relationship(
-        "FacultySubject", back_populates="dept", cascade="all, delete-orphan", passive_deletes=True
+        "FacultySubject",
+        primaryjoin="Department.dept_id == foreign(FacultySubject.dept_id)",
+        back_populates="dept",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     staff_records: Mapped[List["DepartmentStaff"]] = relationship(
         "DepartmentStaff", back_populates="dept", cascade="all, delete-orphan", passive_deletes=True
@@ -789,7 +913,11 @@ class Subject(Base):
 
     dept: Mapped["Department"] = relationship("Department", back_populates="subjects")
     faculty_assignments: Mapped[List["FacultySubject"]] = relationship(
-        "FacultySubject", back_populates="subject", cascade="all, delete-orphan", passive_deletes=True
+        "FacultySubject",
+        primaryjoin="Subject.subject_code == foreign(FacultySubject.subject_code)",
+        back_populates="subject",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )
 
     __table_args__ = (
@@ -798,36 +926,6 @@ class Subject(Base):
 
     def __repr__(self) -> str:
         return f"<Subject(subject_code={self.subject_code!r}, name={self.name!r})>"
-
-
-class FacultySubject(Base):
-    """Faculty-subject-department assignment (extends teacher_subjects with dept scoping)."""
-
-    __tablename__ = "faculty_subjects"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id: Mapped[str] = mapped_column(
-        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
-    )
-    subject_code: Mapped[str] = mapped_column(
-        String, ForeignKey("subjects.subject_code", ondelete="CASCADE"), nullable=False
-    )
-    dept_id: Mapped[str] = mapped_column(
-        String, ForeignKey("departments.dept_id", ondelete="CASCADE"), nullable=False
-    )
-
-    user: Mapped["User"] = relationship("User", back_populates="faculty_subjects_new")
-    subject: Mapped["Subject"] = relationship("Subject", back_populates="faculty_assignments")
-    dept: Mapped["Department"] = relationship("Department", back_populates="faculty_subjects")
-
-    __table_args__ = (
-        UniqueConstraint("user_id", "subject_code", "dept_id", name="uq_faculty_subject_dept"),
-        Index("idx_faculty_subjects_user_id", "user_id"),
-        Index("idx_faculty_subjects_subject_code", "subject_code"),
-    )
-
-    def __repr__(self) -> str:
-        return f"<FacultySubject(user_id={self.user_id!r}, subject_code={self.subject_code!r})>"
 
 
 class DepartmentStaff(Base):

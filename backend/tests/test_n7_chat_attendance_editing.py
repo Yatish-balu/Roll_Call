@@ -666,7 +666,7 @@ def test_confirmation_of_a_session_the_user_cannot_edit_is_forbidden(api):
     )
     # The mapping is revoked before the confirmation.
     with factory() as db:
-        db.execute(text("DELETE FROM teacher_subjects WHERE user_id = 'faculty_ml'"))
+        db.execute(text("DELETE FROM faculty_subjects WHERE user_id = 'faculty_ml'"))
         db.commit()
 
     res = client.post(

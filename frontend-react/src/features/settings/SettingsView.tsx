@@ -125,6 +125,9 @@ export function SettingsView() {
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [showOldPassword, setShowOldPassword] = useState(false);
+  const [showNewPassword, setShowNewPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [passwordBusy, setPasswordBusy] = useState(false);
   const [passwordMessage, setPasswordMessage] = useState<string | null>(null);
   const [passwordError, setPasswordError] = useState<string | null>(null);
@@ -132,6 +135,7 @@ export function SettingsView() {
   // MFA
   const [mfaStatus, setMfaStatus] = useState<MfaStatus | null>(null);
   const [mfaPassword, setMfaPassword] = useState("");
+  const [showMfaPassword, setShowMfaPassword] = useState(false);
   const [mfaCode, setMfaCode] = useState("");
   const [mfaSecret, setMfaSecret] = useState<string | null>(null);
   const [mfaRecoveryCodes, setMfaRecoveryCodes] = useState<string[]>([]);
@@ -386,43 +390,103 @@ export function SettingsView() {
             <label className={labelClass} htmlFor="oldPassword">
               Current password
             </label>
-            <input
-              id="oldPassword"
-              type="password"
-              autoComplete="current-password"
-              className={inputClass}
-              value={oldPassword}
-              onChange={(e) => setOldPassword(e.target.value)}
-              required
-            />
+            <div className="relative">
+              <input
+                id="oldPassword"
+                type={showOldPassword ? "text" : "password"}
+                autoComplete="current-password"
+                className={`${inputClass} pr-10`}
+                value={oldPassword}
+                onChange={(e) => setOldPassword(e.target.value)}
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowOldPassword((prev) => !prev)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[#77735F] hover:text-[#24251C] focus-visible:outline-none focus-visible:text-[#24251C] cursor-pointer p-1"
+                aria-label={showOldPassword ? "Hide current password" : "Show current password"}
+                title={showOldPassword ? "Hide current password" : "Show current password"}
+              >
+                {showOldPassword ? (
+                  <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
           <div>
             <label className={labelClass} htmlFor="newPassword">
               New password
             </label>
-            <input
-              id="newPassword"
-              type="password"
-              autoComplete="new-password"
-              className={inputClass}
-              value={newPassword}
-              onChange={(e) => setNewPassword(e.target.value)}
-              required
-            />
+            <div className="relative">
+              <input
+                id="newPassword"
+                type={showNewPassword ? "text" : "password"}
+                autoComplete="new-password"
+                className={`${inputClass} pr-10`}
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowNewPassword((prev) => !prev)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[#77735F] hover:text-[#24251C] focus-visible:outline-none focus-visible:text-[#24251C] cursor-pointer p-1"
+                aria-label={showNewPassword ? "Hide new password" : "Show new password"}
+                title={showNewPassword ? "Hide new password" : "Show new password"}
+              >
+                {showNewPassword ? (
+                  <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
           <div>
             <label className={labelClass} htmlFor="confirmPassword">
               Confirm new password
             </label>
-            <input
-              id="confirmPassword"
-              type="password"
-              autoComplete="new-password"
-              className={inputClass}
-              value={confirmPassword}
-              onChange={(e) => setConfirmPassword(e.target.value)}
-              required
-            />
+            <div className="relative">
+              <input
+                id="confirmPassword"
+                type={showConfirmPassword ? "text" : "password"}
+                autoComplete="new-password"
+                className={`${inputClass} pr-10`}
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                required
+              />
+              <button
+                type="button"
+                onClick={() => setShowConfirmPassword((prev) => !prev)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[#77735F] hover:text-[#24251C] focus-visible:outline-none focus-visible:text-[#24251C] cursor-pointer p-1"
+                aria-label={showConfirmPassword ? "Hide confirmed password" : "Show confirmed password"}
+                title={showConfirmPassword ? "Hide confirmed password" : "Show confirmed password"}
+              >
+                {showConfirmPassword ? (
+                  <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                  </svg>
+                ) : (
+                  <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                  </svg>
+                )}
+              </button>
+            </div>
           </div>
           <div className="sm:col-span-3 flex flex-wrap items-center gap-3">
             <button
@@ -501,14 +565,34 @@ export function SettingsView() {
               <label className={labelClass} htmlFor="mfaPassword">
                 Current account password
               </label>
-              <input
-                id="mfaPassword"
-                type="password"
-                autoComplete="current-password"
-                className={inputClass}
-                value={mfaPassword}
-                onChange={(e) => setMfaPassword(e.target.value)}
-              />
+              <div className="relative">
+                <input
+                  id="mfaPassword"
+                  type={showMfaPassword ? "text" : "password"}
+                  autoComplete="current-password"
+                  className={`${inputClass} pr-10`}
+                  value={mfaPassword}
+                  onChange={(e) => setMfaPassword(e.target.value)}
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowMfaPassword((prev) => !prev)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[#77735F] hover:text-[#24251C] focus-visible:outline-none focus-visible:text-[#24251C] cursor-pointer p-1"
+                  aria-label={showMfaPassword ? "Hide password" : "Show password"}
+                  title={showMfaPassword ? "Hide password" : "Show password"}
+                >
+                  {showMfaPassword ? (
+                    <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l18 18" />
+                    </svg>
+                  ) : (
+                    <svg className="w-4 h-4 pointer-events-none" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+                    </svg>
+                  )}
+                </button>
+              </div>
             </div>
             <div>
               <label className={labelClass} htmlFor="mfaCode">
@@ -638,12 +722,13 @@ export function SettingsView() {
         description="Interface preferences. These are stored on this device."
         badge="Device"
       >
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {(
             [
-              { value: "warm", label: "Warm (RollCall)", hint: "Default cream and olive" },
-              { value: "light", label: "Light", hint: "Neutral light surfaces" },
-              { value: "dark", label: "Dark", hint: "Reduced glare at night" },
+              { value: "light", label: "Light", hint: "Clean neutral light surfaces" },
+              { value: "dark", label: "Dark", hint: "Reduced glare for night viewing" },
+              { value: "system", label: "System", hint: "Sync with OS appearance" },
+              { value: "warm", label: "Warm (RollCall)", hint: "Classic cream and olive" },
             ] as const
           ).map((option) => (
             <button
@@ -652,12 +737,12 @@ export function SettingsView() {
               onClick={() => updatePreference("theme", option.value as ThemePreference)}
               className={`p-4 rounded-xl border text-left transition-all cursor-pointer ${
                 preferences.theme === option.value
-                  ? "border-[#6C5119] bg-[#EDE8D8]/50 ring-1 ring-[#6C5119]"
-                  : "border-[#E4DDCA] bg-white hover:border-[#A77A13]"
+                  ? "border-[#6C5119] bg-[#EDE8D8]/50 ring-1 ring-[#6C5119] dark:bg-[#2C3022] dark:border-[#D2A847] dark:ring-[#D2A847]"
+                  : "border-[#E4DDCA] bg-white hover:border-[#A77A13] dark:bg-[#1A1C15] dark:border-[#2C3022]"
               }`}
             >
-              <span className="block text-sm font-bold text-[#24251C]">{option.label}</span>
-              <span className="block text-[11px] text-[#77735F] mt-0.5">{option.hint}</span>
+              <span className="block text-sm font-bold text-[#24251C] dark:text-[#EDE8D8]">{option.label}</span>
+              <span className="block text-[11px] text-[#77735F] dark:text-[#A9AE8C] mt-0.5">{option.hint}</span>
             </button>
           ))}
         </div>

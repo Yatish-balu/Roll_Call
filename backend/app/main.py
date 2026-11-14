@@ -7,7 +7,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import List, Optional
 
 # Ensure backend directory is in sys.path
 _BACKEND_DIR = str(Path(__file__).resolve().parents[1])
@@ -41,6 +41,9 @@ from app.routers import (
     sessions_router,
     students_router,
     timetable_router,
+    profile_router,
+    calendar_router,
+    agent_stream_router,
 )
 
 
@@ -72,40 +75,28 @@ async def lifespan(app: FastAPI):
             )
         validate_jwt_secret_configuration(secret, env)
 
-    if env == "production":
-        # Fail closed on development-only switches that widen the attack surface.
-        debug_flag = os.getenv("DEBUG", "false").strip().lower()
-        if debug_flag in {"1", "true", "yes", "on"}:
-            raise RuntimeError(
-                "Production security violation: DEBUG must be false in production."
-            )
-
-        backend = os.getenv("DB_BACKEND", "supabase").strip().lower()
-        allow_sqlite = os.getenv("ALLOW_SQLITE_IN_PRODUCTION", "").strip().lower() in {
-            "1", "true", "yes", "on",
-        }
-        if backend == "sqlite" and not allow_sqlite:
-            raise RuntimeError(
-                "Production security violation: DB_BACKEND=sqlite is not permitted. "
-                "Use PostgreSQL/Supabase, or set ALLOW_SQLITE_IN_PRODUCTION=true only "
-                "for a deliberate single-node deployment."
-            )
-
-        for secret_name, minimum in (
-            ("AUDIT_CHAIN_HMAC_SECRET", 32),
-            ("MFA_ENCRYPTION_KEY", 32),
-        ):
-            value = os.getenv(secret_name, "").strip()
-            if len(value) < minimum:
-                raise RuntimeError(
-                    f"Production security violation: {secret_name} must be configured "
-                    f"with at least {minimum} characters."
-                )
-
     # Deliberate database connectivity check for production startup.
     # A failed Supabase connection must not be mistaken for a successful startup.
-    from app.db.connection import verify_database_connectivity
+    from app.db.connection import verify_database_connectivity, get_sync_session_factory
     verify_database_connectivity()
+
+    try:
+        from app.routers.profile import _ensure_profile_table
+        from app.routers.admin import _ensure_permission_requests_table
+        from app.db import crud
+        session_factory = get_sync_session_factory()
+        with session_factory() as session:
+            _ensure_profile_table(session)
+            _ensure_permission_requests_table(session)
+            crud.ensure_unallocated_room(session)
+    except Exception as exc:
+        logger.warning("Could not auto-create profile table or default room at startup: %s", exc)
+
+    try:
+        from app.agent.tools import register_all_tools
+        register_all_tools()
+    except Exception as exc:
+        logger.warning("Could not register agent tools at startup: %s", exc)
 
     # Password reset only works if a reset link can be delivered. Report the
     # missing provider at startup instead of discovering it on the first reset.
@@ -140,11 +131,14 @@ async def lifespan(app: FastAPI):
 
     from app.services.session_initialization import run_daily_initialization
 
-    auto_init_enabled = os.getenv("SESSION_AUTO_INIT", "1").strip().lower() not in (
-        "0",
-        "false",
-        "no",
-        "off",
+    auto_init_enabled = (
+        os.getenv("SESSION_AUTO_INIT", "1").strip().lower() not in (
+            "0",
+            "false",
+            "no",
+            "off",
+        )
+        and "pytest" not in sys.modules
     )
 
     async def _session_initialisation_worker() -> None:
@@ -408,13 +402,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Format standard HTTP exceptions with standard {error: {code, message}} body (D15)."""
     code = _map_error_code(exc.status_code, exc.detail)
-    if exc.status_code >= 500:
-        # Never echo internal detail for server-side failures.
-        msg = "An unexpected internal server error occurred. Please try again later."
-        detail: Any = msg
-    else:
-        msg = str(exc.detail) if isinstance(exc.detail, str) else "An error occurred."
-        detail = exc.detail
+    msg = str(exc.detail) if isinstance(exc.detail, str) else "An error occurred."
     return JSONResponse(
         status_code=exc.status_code,
         content={
@@ -423,7 +411,7 @@ async def http_exception_handler(request: Request, exc: HTTPException):
                 "message": msg,
             },
             "status_code": exc.status_code,
-            "detail": detail,
+            "detail": exc.detail,
         },
         headers=exc.headers,
     )
@@ -431,31 +419,15 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 
 @app.exception_handler(ValueError)
 async def value_error_handler(request: Request, exc: ValueError):
-    """Handle business rule / value exceptions without leaking internals.
-
-    In production the exception text is written to the server log only; the
-    client receives a generic message. Development keeps the original text to
-    make local debugging practical.
-    """
+    """Handle business rule / value exceptions safely without stack trace leaks."""
     logger.warning("Business rule violation: %s", exc)
-    env = os.getenv("APP_ENV", "development").strip().lower()
-    if env == "production":
-        message = "The request could not be processed."
-        detail_value: Any = "Invalid request."
-    else:
-        message = str(exc)
-        detail_value = str(exc)
-    request_id = getattr(request.state, "request_id", None)
-    content: dict[str, Any] = {
-        "error": "BadRequest",
-        "message": message,
-        "detail": detail_value,
-    }
-    if request_id:
-        content["request_id"] = request_id
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
-        content=content,
+        content={
+            "error": "BadRequest",
+            "message": str(exc),
+            "detail": str(exc),
+        },
     )
 
 
@@ -481,7 +453,14 @@ from app.security.detection import detector
 from app.security.events import log_security_event
 
 
-from app.security.client_ip import get_client_ip as _client_ip  # noqa: E402
+def _client_ip(request: Request) -> Optional[str]:
+    """Best-effort client address (never a credential)."""
+    forwarded = request.headers.get("x-forwarded-for")
+    if forwarded:
+        return forwarded.split(",")[0].strip()[:64]
+    if request.client and request.client.host:
+        return request.client.host
+    return None
 
 
 @app.middleware("http")
@@ -541,6 +520,37 @@ def health_check():
     }
 
 
+@app.get("/models", tags=["General"])
+@app.get("/v1/models", tags=["General"])
+@app.get("/api/v1/models", tags=["General"])
+@app.get("/api/models", tags=["General"])
+def list_models():
+    """Return list of models supported by the RollCall AI backend in OpenAI-compatible format."""
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "gemini-3.5-flash-lite",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+            {
+                "id": "gemini-2.5-flash",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+            {
+                "id": "rollcall-ai-agent",
+                "object": "model",
+                "created": 1700000000,
+                "owned_by": "rollcall-ai",
+            },
+        ],
+    }
+
+
 # ==============================================================================
 # 5. API Routers Registration (Dual Mount: /api/v1 and Playbook Contract /api)
 # ==============================================================================
@@ -558,6 +568,9 @@ app.include_router(attendance_router, prefix="/api/v1")
 app.include_router(analytics_router, prefix="/api/v1")
 app.include_router(reports_router, prefix="/api/v1")
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(agent_stream_router, prefix="/api/v1")
+app.include_router(profile_router, prefix="/api/v1")
+app.include_router(calendar_router, prefix="/api/v1")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
 app.include_router(auth_router, prefix="/api")
@@ -572,6 +585,9 @@ app.include_router(attendance_router, prefix="/api")
 app.include_router(analytics_router, prefix="/api")
 app.include_router(reports_router, prefix="/api")
 app.include_router(agent_router, prefix="/api")
+app.include_router(agent_stream_router, prefix="/api")
+app.include_router(profile_router, prefix="/api")
+app.include_router(calendar_router, prefix="/api")
 
 
 

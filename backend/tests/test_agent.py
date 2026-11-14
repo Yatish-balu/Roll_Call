@@ -194,8 +194,9 @@ def _find_repo_root() -> Path:
     return current.parents[1]
 
 
-def test_photo_genuine_ocr_pipeline(agent):
+def test_photo_genuine_ocr_pipeline(agent, monkeypatch):
     """Integration test using genuine EasyOCR on generated sheet_clean.jpg without mocking."""
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     sheet_clean = _find_repo_root() / "data" / "photos" / "sheet_clean.jpg"
     if not sheet_clean.exists():
         pytest.skip("data/photos/sheet_clean.jpg not present")

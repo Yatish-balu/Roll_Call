@@ -21,6 +21,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.connection import DEFAULT_DB_PATH, get_connection
+from app.security.ai_input import validate_usn, validate_room_id
+import re
 from app.security.audit_chain import (
     DEFAULT_CHAIN_ID,
     compute_row_hash,
@@ -33,8 +35,10 @@ from app.db.models import (
     Session as DbSession,
     Attendance,
     User,
-    TeacherSubject,
     FacultySubject,
+    TeacherSubject,
+    Subject,
+    Department,
     AuditLog,
     AuditChainHead,
     LoginAttempt,
@@ -71,7 +75,16 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
     if row is None:
         return None
     if isinstance(row, sqlite3.Row):
-        return dict(row)
+        d = dict(row)
+        if "edit_id" in d and "pending_id" not in d:
+            d["pending_id"] = d["edit_id"]
+        if "consumed" in d and "used" not in d:
+            d["used"] = d["consumed"]
+        if "action" in d and "event" not in d:
+            d["event"] = d["action"]
+        if "timestamp" in d and "at_utc" not in d:
+            d["at_utc"] = d["timestamp"]
+        return d
     if isinstance(row, Student):
         return {"usn": row.usn, "name": row.name, "branch": row.branch}
     if isinstance(row, Room):
@@ -99,22 +112,26 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
     if isinstance(row, User):
         return {
             "user_id": row.user_id,
+            "name": getattr(row, "name", None),
             "email": row.email,
             "role": row.role,
             "is_active": row.is_active,
             "created_at": row.created_at,
         }
-    if isinstance(row, TeacherSubject):
+    if isinstance(row, (TeacherSubject, FacultySubject)):
         return {
             "id": row.id,
             "user_id": row.user_id,
             "subject_code": row.subject_code,
+            "dept_id": getattr(row, "dept_id", None),
+            "semester": getattr(row, "semester", None),
         }
     if isinstance(row, AuditLog):
         return {
             "log_id": row.log_id,
             "actor_id": row.actor_id,
             "action": row.action,
+            "event": row.action,
             "session_id": row.session_id,
             "usn": row.usn,
             "entity_type": row.entity_type,
@@ -123,6 +140,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
             "new_value": row.new_value,
             "reason": row.reason,
             "timestamp": row.timestamp,
+            "at_utc": row.timestamp,
         }
     if isinstance(row, LoginAttempt):
         return {
@@ -135,6 +153,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
     if isinstance(row, PendingEdit):
         return {
             "edit_id": row.edit_id,
+            "pending_id": row.edit_id,
             "user_id": row.user_id,
             "session_id": row.session_id,
             "usn": row.usn,
@@ -143,6 +162,7 @@ def _row_to_dict(row: Optional[Union[sqlite3.Row, Student, Room, DbSession, Atte
             "created_at": row.created_at,
             "expires_at": row.expires_at,
             "consumed": row.consumed,
+            "used": row.consumed,
         }
     if hasattr(row, "_mapping"):
         return dict(row._mapping)
@@ -166,6 +186,7 @@ def insert_student(
     branch: str,
 ) -> Dict[str, Any]:
     """Insert a new student."""
+    validate_usn(usn)
     clean_usn = usn.strip()
     clean_name = name.strip()
     clean_branch = branch.strip()
@@ -196,10 +217,12 @@ def insert_students_bulk(
         target = target_or_students  # type: ignore[assignment]
         actual_students = students or []
 
-    records = [
-        {"usn": s["usn"].strip(), "name": s["name"].strip(), "branch": s["branch"].strip()}
-        for s in actual_students
-    ]
+    records = []
+    for s in actual_students:
+        validate_usn(s["usn"])
+        records.append(
+            {"usn": s["usn"].strip(), "name": s["name"].strip(), "branch": s["branch"].strip()}
+        )
 
     if isinstance(target, Session):
         if not records:
@@ -320,17 +343,18 @@ def get_students_paginated(
         if scope_condition is not None:
             conditions.append(scope_condition)
 
-        count_stmt = select(func.count(Student.usn))
-        if conditions:
-            count_stmt = count_stmt.where(and_(*conditions))
-        total = target.scalar(count_stmt) or 0
-
-        stmt = select(Student)
+        # Single round trip: count(*) OVER () piggybacks the filtered total on
+        # the page query instead of paying a separate COUNT query per request
+        # (one full RTT to the Supabase pooler each).
+        total_col = func.count(Student.usn).over().label("_total_count")
+        stmt = select(total_col, Student)
         if conditions:
             stmt = stmt.where(and_(*conditions))
         stmt = stmt.order_by(Student.usn.asc()).limit(limit_val).offset(offset_val)
-        rows = target.scalars(stmt).all()
-        return _rows_to_dicts(list(rows)), total
+        rows = target.execute(stmt).all()
+        total = rows[0][0] if rows else 0
+        students = [row[1] for row in rows]
+        return _rows_to_dicts(students), total
 
     where_clauses = []
     params: List[Any] = []
@@ -372,6 +396,7 @@ def insert_room(
     name: str,
 ) -> Dict[str, Any]:
     """Insert a new room."""
+    validate_room_id(room_id)
     clean_id = room_id.strip()
     clean_name = name.strip()
 
@@ -401,8 +426,10 @@ def insert_rooms_bulk(
         target = target_or_rooms  # type: ignore[assignment]
         actual_rooms = rooms or []
 
-    records = [{"room_id": r["room_id"].strip(), "name": r["name"].strip()} for r in actual_rooms]
-
+    records = []
+    for r in actual_rooms:
+        validate_room_id(r["room_id"])
+        records.append({"room_id": r["room_id"].strip(), "name": r["name"].strip()})
     if isinstance(target, Session):
         if not records:
             return 0
@@ -443,6 +470,78 @@ def get_room(
     with _get_conn(target) as conn:
         cursor = conn.execute(query, (clean_id,))
         return _row_to_dict(cursor.fetchone())
+
+
+def get_existing_student_usns(
+    target: Union[sqlite3.Connection, Session],
+    usns: Sequence[str],
+) -> Set[str]:
+    """Return the USNs that exist, using one query for the whole roster.
+
+    Validating a 45-student save one USN at a time cost 45 remote round trips.
+    """
+    clean = {str(u).strip().upper() for u in usns if str(u).strip()}
+    if not clean:
+        return set()
+    if isinstance(target, Session):
+        rows = target.scalars(select(Student.usn).where(Student.usn.in_(clean))).all()
+        return {str(r).strip().upper() for r in rows}
+    placeholders = ",".join("?" for _ in clean)
+    with _get_conn(target) as conn:
+        rows = conn.execute(
+            f"SELECT usn FROM students WHERE usn IN ({placeholders})", tuple(clean)  # nosec B608 - placeholders only contains '?'
+        ).fetchall()
+        return {str(r[0]).strip().upper() for r in rows}
+
+
+def ensure_unallocated_room(target: Union[sqlite3.Connection, Session, str]) -> None:
+    """Ensure the fallback UNALLOCATED room exists in the rooms table."""
+    try:
+        if isinstance(target, Session):
+            existing = target.scalar(select(Room.room_id).where(Room.room_id == "UNALLOCATED"))
+            if not existing:
+                fallback = Room(
+                    room_id="UNALLOCATED",
+                    name="Unallocated Classroom",
+                    dept_id="GEN",
+                    room_type="Classroom",
+                    capacity=200,
+                )
+                target.add(fallback)
+                target.commit()
+        else:
+            with _get_conn(target) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT room_id FROM rooms WHERE room_id = 'UNALLOCATED'")
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO rooms (room_id, name, dept_id, room_type, capacity) VALUES (?, ?, ?, ?, ?)",
+                        ("UNALLOCATED", "Unallocated Classroom", "GEN", "Classroom", 200),
+                    )
+                    conn.commit()
+    except Exception as exc:
+        logger.warning("Could not ensure UNALLOCATED room: %s", exc)
+
+
+def get_existing_room_ids(
+    target: Union[sqlite3.Connection, Session],
+    room_ids: Sequence[str],
+) -> Set[str]:
+    """Return the room IDs that exist, using one query for the whole roster."""
+    clean = {str(r).strip() for r in room_ids if str(r).strip()}
+    if not clean:
+        return set()
+    if "UNALLOCATED" in clean:
+        ensure_unallocated_room(target)
+    if isinstance(target, Session):
+        rows = target.scalars(select(Room.room_id).where(Room.room_id.in_(clean))).all()
+        return {str(r).strip() for r in rows}
+    placeholders = ",".join("?" for _ in clean)
+    with _get_conn(target) as conn:
+        rows = conn.execute(
+            f"SELECT room_id FROM rooms WHERE room_id IN ({placeholders})", tuple(clean)  # nosec B608 - placeholders only contains '?'
+        ).fetchall()
+        return {str(r[0]).strip() for r in rows}
 
 
 def get_all_rooms(
@@ -738,17 +837,16 @@ def get_sessions_paginated(
                 )
             )
 
-        count_stmt = select(func.count(DbSession.session_id))
-        if conditions:
-            count_stmt = count_stmt.where(and_(*conditions))
-        total = target.scalar(count_stmt) or 0
-
-        stmt = select(DbSession)
+        # Single round trip: the filtered total piggybacks on the page query.
+        total_col = func.count(DbSession.session_id).over().label("_total_count")
+        stmt = select(total_col, DbSession)
         if conditions:
             stmt = stmt.where(and_(*conditions))
         stmt = stmt.order_by(DbSession.date.desc(), DbSession.session_id.asc()).limit(limit_val).offset(offset_val)
-        rows = target.scalars(stmt).all()
-        return _rows_to_dicts(list(rows)), total
+        rows = target.execute(stmt).all()
+        total = rows[0][0] if rows else 0
+        sessions = [row[1] for row in rows]
+        return _rows_to_dicts(sessions), total
 
     where_clauses = []
     params: List[Any] = []
@@ -989,6 +1087,10 @@ def insert_attendance(
     recorded_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Insert or optionally upsert an attendance record."""
+    validate_usn(usn)
+    validate_room_id(room_id)
+    if room_id.strip() == "UNALLOCATED":
+        ensure_unallocated_room(target)
     clean_status = normalize_attendance_status(status)
     clean_allocation_id = allocation_id.strip() if allocation_id else None
     clean_attendance_id = attendance_id.strip() if attendance_id else str(uuid4())
@@ -1197,20 +1299,23 @@ def insert_attendance_bulk(
         target = target_or_records  # type: ignore[assignment]
         actual_records = records or []
 
-    formatted_records = [
-        {
-            "attendance_id": str(uuid4()),
-            "session_id": r["session_id"].strip(),
-            "allocation_id": (r.get("allocation_id") or None),
-            "usn": r["usn"].strip(),
-            "room_id": r["room_id"].strip(),
-            "status": normalize_attendance_status(r["status"]),
-            "source": r["source"].strip(),
-            "confidence": float(r.get("confidence", 1.0)),
-            "recorded_at": r.get("recorded_at") or _utcnow_iso(),
-        }
-        for r in actual_records
-    ]
+    formatted_records = []
+    for r in actual_records:
+        validate_usn(r["usn"])
+        validate_room_id(r["room_id"])
+        formatted_records.append(
+            {
+                "attendance_id": str(uuid4()),
+                "session_id": r["session_id"].strip(),
+                "allocation_id": (r.get("allocation_id") or None),
+                "usn": r["usn"].strip(),
+                "room_id": r["room_id"].strip(),
+                "status": normalize_attendance_status(r["status"]),
+                "source": r["source"].strip(),
+                "confidence": float(r.get("confidence", 1.0)),
+                "recorded_at": r.get("recorded_at") or _utcnow_iso(),
+            }
+        )
 
     if not formatted_records:
         return 0
@@ -1532,15 +1637,6 @@ def replace_session_attendance(
             "recorded_at": _utcnow_iso(),
         })
 
-    def _match_clause(rec: Dict[str, Any]):
-        if rec["allocation_id"]:
-            return (Attendance.allocation_id == rec["allocation_id"], Attendance.usn == rec["usn"])
-        return (
-            Attendance.session_id == clean_id,
-            Attendance.usn == rec["usn"],
-            Attendance.allocation_id.is_(None),
-        )
-
     if isinstance(target, Session):
         # Transaction safety: execute within nested transaction if one exists, or rely on caller session
         # Use a SAVEPOINT if in an outer transaction so partial failure rolls back cleanly
@@ -1549,9 +1645,27 @@ def replace_session_attendance(
             # UPDATE-first so an existing row keeps its surrogate attendance_id;
             # pending_edits.attendance_id is ON DELETE CASCADE and must survive a
             # re-upload of the same session roster.
+            #
+            # One SELECT for the whole session instead of one per record: the
+            # previous per-row lookup turned a 45-student save into ~90 remote
+            # round trips (34 s against Supabase), which left the UI spinning.
+            existing_rows = target.execute(
+                select(Attendance).where(Attendance.session_id == clean_id)
+            ).scalars().all()
+            by_key: Dict[tuple, Attendance] = {}
+            for row in existing_rows:
+                if row.allocation_id:
+                    by_key[("alloc", str(row.allocation_id), row.usn)] = row
+                else:
+                    by_key[("plain", row.usn)] = row
+
             kept_ids: Set[str] = set()
             for rec in validated_records:
-                existing = target.execute(select(Attendance).where(*_match_clause(rec))).scalars().first()
+                if rec["allocation_id"]:
+                    key = ("alloc", str(rec["allocation_id"]), rec["usn"])
+                else:
+                    key = ("plain", rec["usn"])
+                existing = by_key.get(key)
                 if existing is not None:
                     existing.room_id = rec["room_id"]
                     existing.status = rec["status"]
@@ -1564,10 +1678,11 @@ def replace_session_attendance(
                     kept_ids.add(rec["attendance_id"])
 
             # Only rows no longer present in the payload are removed.
-            stale_stmt = select(Attendance.attendance_id).where(Attendance.session_id == clean_id)
-            if kept_ids:
-                stale_stmt = stale_stmt.where(Attendance.attendance_id.notin_(kept_ids))
-            stale_ids = [row[0] for row in target.execute(stale_stmt).all()]
+            stale_ids = [
+                row.attendance_id
+                for row in existing_rows
+                if row.attendance_id not in kept_ids
+            ]
             if stale_ids:
                 blocked = target.scalars(
                     select(PendingEdit.usn)
@@ -1857,46 +1972,20 @@ def is_teacher_assigned_to_subject(
     user_id: str = "",
     subject_code: str = "",
 ) -> bool:
-    """True when ``user_id`` is mapped to ``subject_code`` in teacher_subjects or faculty_subjects."""
+    """True when ``user_id`` is mapped to ``subject_code`` in faculty_subjects."""
     clean_user = (user_id or "").strip()
     clean_code = (subject_code or "").strip().upper()
     if not clean_user or not clean_code:
         return False
 
     if isinstance(target, Session):
-        try:
-            stmt = select(TeacherSubject.id).where(
-                TeacherSubject.user_id == clean_user,
-                func.upper(TeacherSubject.subject_code) == clean_code,
-            )
-            if target.execute(stmt).first() is not None:
-                return True
-        except Exception:
-            pass
-
-        try:
-            stmt = select(FacultySubject.id).where(
-                FacultySubject.user_id == clean_user,
-                func.upper(FacultySubject.subject_code) == clean_code,
-            )
-            if target.execute(stmt).first() is not None:
-                return True
-        except Exception:
-            pass
-
-        return False
+        stmt = select(FacultySubject.id).where(
+            FacultySubject.user_id == clean_user,
+            func.upper(FacultySubject.subject_code) == clean_code,
+        )
+        return target.execute(stmt).first() is not None
 
     with _get_conn(target) as conn:
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
-                (clean_user, clean_code),
-            ).fetchone()
-            if row is not None:
-                return True
-        except Exception:
-            pass
-
         try:
             row = conn.execute(
                 "SELECT 1 FROM faculty_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
@@ -1906,8 +1995,14 @@ def is_teacher_assigned_to_subject(
                 return True
         except Exception:
             pass
-
-        return False
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ? LIMIT 1",
+                (clean_user, clean_code),
+            ).fetchone()
+            return row is not None
+        except Exception:
+            return False
 
 
 def get_attendance_by_student(
@@ -2100,22 +2195,81 @@ def assign_teacher_subject(
     *,
     user_id: str,
     subject_code: str,
+    dept_id: Optional[str] = None,
+    semester: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Assign a subject code to a teacher."""
+    """Assign a subject code to a teacher in faculty_subjects."""
+    clean_uid = user_id.strip()
+    clean_code = subject_code.strip().upper()
+    clean_dept = dept_id.strip() if dept_id else None
+
+    if isinstance(target, Session):
+        fs = FacultySubject(
+            user_id=clean_uid,
+            subject_code=clean_code,
+            dept_id=clean_dept,
+            semester=semester,
+        )
+        target.add(fs)
+        target.flush()
+        return _row_to_dict(fs)  # type: ignore
+
+    query = "INSERT INTO faculty_subjects (user_id, subject_code, dept_id, semester) VALUES (?, ?, ?, ?)"
+    with _get_conn(target) as conn:
+        try:
+            cursor = conn.execute(query, (clean_uid, clean_code, clean_dept, semester))
+            new_id = cursor.lastrowid
+        except Exception:
+            # Fallback for unmigrated temporary test fixtures that only have teacher_subjects
+            cursor = conn.execute(
+                "INSERT INTO teacher_subjects (user_id, subject_code) VALUES (?, ?)",
+                (clean_uid, clean_code),
+            )
+            new_id = cursor.lastrowid
+    return {"id": new_id, "user_id": clean_uid, "subject_code": clean_code, "dept_id": clean_dept, "semester": semester}
+
+
+def remove_teacher_subject(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    *,
+    user_id: str,
+    subject_code: str,
+) -> bool:
+    """Remove a subject assignment for a teacher from faculty_subjects."""
+    from sqlalchemy import delete as sql_delete
     clean_uid = user_id.strip()
     clean_code = subject_code.strip().upper()
 
     if isinstance(target, Session):
-        ts = TeacherSubject(user_id=clean_uid, subject_code=clean_code)
-        target.add(ts)
-        target.flush()
-        return _row_to_dict(ts)  # type: ignore
+        stmt = sql_delete(FacultySubject).where(
+            FacultySubject.user_id == clean_uid,
+            FacultySubject.subject_code == clean_code,
+        )
+        res = target.execute(stmt)
+        try:
+            target.execute(
+                sql_delete(TeacherSubject).where(
+                    TeacherSubject.user_id == clean_uid,
+                    TeacherSubject.subject_code == clean_code,
+                )
+            )
+        except Exception:
+            pass
+        return bool(res.rowcount and res.rowcount > 0)
 
-    query = "INSERT INTO teacher_subjects (user_id, subject_code) VALUES (?, ?)"
+    deleted = False
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, (clean_uid, clean_code))
-        new_id = cursor.lastrowid
-    return {"id": new_id, "user_id": clean_uid, "subject_code": clean_code}
+        try:
+            c1 = conn.execute("DELETE FROM faculty_subjects WHERE user_id = ? AND UPPER(subject_code) = ?", (clean_uid, clean_code))
+            deleted = bool(c1.rowcount and c1.rowcount > 0)
+        except Exception:
+            pass
+        try:
+            c2 = conn.execute("DELETE FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ?", (clean_uid, clean_code))
+            deleted = deleted or bool(c2.rowcount and c2.rowcount > 0)
+        except Exception:
+            pass
+    return deleted
 
 
 def get_teacher_subjects(
@@ -2123,39 +2277,28 @@ def get_teacher_subjects(
     *,
     user_id: str,
 ) -> List[str]:
-    """List all subject codes assigned to a given teacher across teacher_subjects and faculty_subjects."""
+    """List all subject codes assigned to a given teacher exclusively from faculty_subjects."""
     clean_uid = user_id.strip()
-    codes: Set[str] = set()
     if isinstance(target, Session):
-        try:
-            stmt = select(TeacherSubject.subject_code).where(TeacherSubject.user_id == clean_uid)
-            codes.update(r[0] for r in target.execute(stmt).all() if r[0])
-        except Exception:
-            pass
-
-        try:
-            stmt = select(FacultySubject.subject_code).where(FacultySubject.user_id == clean_uid)
-            codes.update(r[0] for r in target.execute(stmt).all() if r[0])
-        except Exception:
-            pass
-
+        stmt = select(FacultySubject.subject_code).where(FacultySubject.user_id == clean_uid)
+        codes = set(target.execute(stmt).scalars().all())
         return sorted(codes)
 
+    codes = set()
     with _get_conn(target) as conn:
         try:
-            query = "SELECT subject_code FROM teacher_subjects WHERE user_id = ? ORDER BY subject_code ASC"
-            cursor = conn.execute(query, (clean_uid,))
-            codes.update(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0] for r in cursor.fetchall())
+            cursor = conn.execute("SELECT subject_code FROM faculty_subjects WHERE user_id = ?", (clean_uid,))
+            for r in cursor.fetchall():
+                codes.add(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0])
         except Exception:
             pass
-
-        try:
-            query = "SELECT subject_code FROM faculty_subjects WHERE user_id = ? ORDER BY subject_code ASC"
-            cursor = conn.execute(query, (clean_uid,))
-            codes.update(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0] for r in cursor.fetchall())
-        except Exception:
-            pass
-
+        if not codes:
+            try:
+                cursor2 = conn.execute("SELECT subject_code FROM teacher_subjects WHERE user_id = ?", (clean_uid,))
+                for r in cursor2.fetchall():
+                    codes.add(r["subject_code"] if isinstance(r, sqlite3.Row) else r[0])
+            except Exception:
+                pass
     return sorted(codes)
 
 
@@ -2166,50 +2309,32 @@ def list_teacher_subject_mappings(
     subject_code: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    List teacher-subject mappings, optionally filtered by user and/or subject code.
+    List teacher-subject mappings from faculty_subjects exclusively.
     Admin-facing helper for the teacher-subject management endpoint (N4).
     """
     clean_uid = user_id.strip() if user_id else None
     clean_code = subject_code.strip().upper() if subject_code else None
 
     if isinstance(target, Session):
-        mappings = []
-        seen = set()
-        try:
-            stmt = select(TeacherSubject)
-            if clean_uid:
-                stmt = stmt.where(TeacherSubject.user_id == clean_uid)
-            if clean_code:
-                stmt = stmt.where(TeacherSubject.subject_code == clean_code)
-            stmt = stmt.order_by(TeacherSubject.user_id.asc(), TeacherSubject.subject_code.asc())
-            rows = target.execute(stmt).scalars().all()
-            for r in rows:
-                key = (r.user_id, r.subject_code)
-                if key not in seen:
-                    seen.add(key)
-                    mappings.append({"id": r.id, "user_id": r.user_id, "subject_code": r.subject_code})
-        except Exception:
-            pass
+        stmt = select(FacultySubject)
+        if clean_uid:
+            stmt = stmt.where(FacultySubject.user_id == clean_uid)
+        if clean_code:
+            stmt = stmt.where(FacultySubject.subject_code == clean_code)
+        stmt = stmt.order_by(FacultySubject.user_id.asc(), FacultySubject.subject_code.asc())
+        rows = target.execute(stmt).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "user_id": r.user_id,
+                "subject_code": r.subject_code,
+                "dept_id": getattr(r, "dept_id", None),
+                "semester": getattr(r, "semester", None),
+            }
+            for r in rows
+        ]
 
-        try:
-            stmt2 = select(FacultySubject)
-            if clean_uid:
-                stmt2 = stmt2.where(FacultySubject.user_id == clean_uid)
-            if clean_code:
-                stmt2 = stmt2.where(FacultySubject.subject_code == clean_code)
-            stmt2 = stmt2.order_by(FacultySubject.user_id.asc(), FacultySubject.subject_code.asc())
-            rows2 = target.execute(stmt2).scalars().all()
-            for r in rows2:
-                key = (r.user_id, r.subject_code)
-                if key not in seen:
-                    seen.add(key)
-                    mappings.append({"id": r.id, "user_id": r.user_id, "subject_code": r.subject_code})
-        except Exception:
-            pass
-
-        return mappings
-
-    query = "SELECT id, user_id, subject_code FROM teacher_subjects WHERE 1=1"
+    query = "SELECT id, user_id, subject_code, dept_id, semester FROM faculty_subjects WHERE 1=1"
     params: List[Any] = []
     if clean_uid:
         query += " AND user_id = ?"
@@ -2218,49 +2343,22 @@ def list_teacher_subject_mappings(
         query += " AND subject_code = ?"
         params.append(clean_code)
     query += " ORDER BY user_id ASC, subject_code ASC"
-    try:
-        with _get_conn(target) as conn:
-            cursor = conn.execute(query, tuple(params))
-            return [
-                {
-                    "id": r["id"] if isinstance(r, sqlite3.Row) else r[0],
-                    "user_id": r["user_id"] if isinstance(r, sqlite3.Row) else r[1],
-                    "subject_code": r["subject_code"] if isinstance(r, sqlite3.Row) else r[2],
-                }
-                for r in cursor.fetchall()
-            ]
-    except Exception:
-        # Fallback to faculty_subjects in SQLite if teacher_subjects doesn't exist
-        try:
-            f_query = "SELECT id, user_id, subject_code FROM faculty_subjects WHERE 1=1"
-            f_params: List[Any] = []
-            if clean_uid:
-                f_query += " AND user_id = ?"
-                f_params.append(clean_uid)
-            if clean_code:
-                f_query += " AND subject_code = ?"
-                f_params.append(clean_code)
-            f_query += " ORDER BY user_id ASC, subject_code ASC"
-            with _get_conn(target) as conn:
-                cursor = conn.execute(f_query, tuple(f_params))
-                return [
-                    {
-                        "id": r["id"] if isinstance(r, sqlite3.Row) else r[0],
-                        "user_id": r["user_id"] if isinstance(r, sqlite3.Row) else r[1],
-                        "subject_code": r["subject_code"] if isinstance(r, sqlite3.Row) else r[2],
-                    }
-                    for r in cursor.fetchall()
-                ]
-        except Exception:
-            return []
+    result: List[Dict[str, Any]] = []
     with _get_conn(target) as conn:
-        cursor = conn.execute(query, tuple(params))
-        return [
-            {"id": r["id"], "user_id": r["user_id"], "subject_code": r["subject_code"]}
-            if isinstance(r, sqlite3.Row)
-            else {"id": r[0], "user_id": r[1], "subject_code": r[2]}
-            for r in cursor.fetchall()
-        ]
+        try:
+            cursor = conn.execute(query, tuple(params))
+            for r in cursor.fetchall():
+                result.append(_row_to_dict(r))
+        except Exception:
+            # Fallback for unmigrated temporary test fixtures
+            try:
+                fb_q = "SELECT id, user_id, subject_code FROM teacher_subjects WHERE 1=1"
+                cursor = conn.execute(fb_q, tuple(params))
+                for r in cursor.fetchall():
+                    result.append(_row_to_dict(r))
+            except Exception:
+                pass
+    return result
 
 
 _AUDIT_ROLE_SUPPORT_CACHE: "WeakKeyDictionary[Any, bool]" = WeakKeyDictionary()
@@ -2727,6 +2825,7 @@ def _audit_row_to_dict(row: Any) -> Dict[str, Any]:
         "actor_role": data.get("actor_role"),
         "event_type": data.get("action"),
         "action": data.get("action"),
+        "event": data.get("action"),
         "session_id": data.get("session_id"),
         "usn": data.get("usn"),
         "entity_type": data.get("entity_type"),
@@ -2737,6 +2836,7 @@ def _audit_row_to_dict(row: Any) -> Dict[str, Any]:
         "new_value": data.get("new_value"),
         "reason": data.get("reason"),
         "timestamp": data.get("timestamp"),
+        "at_utc": data.get("timestamp"),
     }
 
 
@@ -2821,6 +2921,7 @@ def create_pending_edit(
         conn.execute(query, (edit_id, clean_uid, clean_sid, clean_usn, clean_old, clean_new, now_ts, exp_ts))
     return {
         "edit_id": edit_id,
+        "pending_id": edit_id,
         "user_id": clean_uid,
         "session_id": clean_sid,
         "usn": clean_usn,
@@ -2829,6 +2930,7 @@ def create_pending_edit(
         "created_at": now_ts,
         "expires_at": exp_ts,
         "consumed": 0,
+        "used": 0,
     }
 
 
@@ -2930,9 +3032,9 @@ def apply_attendance_edit_atomic(
         if not teacher_assigned and sess.coordinator_faculty_id == clean_uid:
             teacher_assigned = True
         if not teacher_assigned and subj_code:
-            stmt = select(TeacherSubject).where(
-                TeacherSubject.user_id == clean_uid,
-                TeacherSubject.subject_code == subj_code,
+            stmt = select(FacultySubject).where(
+                FacultySubject.user_id == clean_uid,
+                FacultySubject.subject_code == subj_code,
             )
             teacher_assigned = session.execute(stmt).first() is not None
 
