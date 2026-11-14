@@ -294,6 +294,8 @@ async def agent_process_file(
     session_id: Optional[str] = Form(None),
     default_room: Optional[str] = Form(None),
     default_branch: Optional[str] = Form(None),
+    user_input: Optional[str] = Form(None),
+    user_confirmation: Optional[str] = Form(None),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -505,7 +507,32 @@ async def agent_process_file(
                 logger.debug("Unable to inspect upload for embedded instructions: %s", exc)
 
         scope = resolve_data_scope(db, current_user)
-        agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role, actor_role=current_user.role)
+        assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
+        actor_name = getattr(current_user, "name", None) or current_user.user_id
+        try:
+            from app.db.models import User
+            u = db.query(User).filter(User.user_id == current_user.user_id).first()
+            if u and u.name:
+                actor_name = u.name
+            from sqlalchemy import text
+            prof_row = db.execute(
+                text("SELECT full_name FROM user_profiles WHERE user_id = :uid"),
+                {"uid": current_user.user_id},
+            ).fetchone()
+            if prof_row and prof_row[0] and prof_row[0].strip():
+                actor_name = prof_row[0].strip()
+        except Exception:
+            pass
+
+        agent = AttendanceAgent(
+            db_target=db,
+            scope=scope,
+            role=current_user.role,
+            actor_role=current_user.role,
+            actor_id=current_user.user_id,
+            actor_name=actor_name,
+            assigned_subjects=assigned_subs,
+        )
 
         # Pre-load master USNs and Rooms if available for master data validation.
         # The master list is restricted to the caller's scope, so validation
@@ -520,8 +547,7 @@ async def agent_process_file(
 
         # Resolve target session if not explicitly provided
         target_session = session_id
-        assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
-        if not target_session:
+        if not target_session and not user_input:
             from datetime import date
             today_str = date.today().isoformat()
             today_sessions = crud.get_sessions_by_date(db, date=today_str)
@@ -531,7 +557,9 @@ async def agent_process_file(
                     target_session = s_dict.get("session_id")
                     break
 
-        req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
+        req_text = (user_input or "").strip()
+        if not req_text:
+            req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
 
         resp = agent.process_request(
             user_input=req_text,

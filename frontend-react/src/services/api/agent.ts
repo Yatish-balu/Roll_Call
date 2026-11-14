@@ -218,12 +218,14 @@ export async function processAttendanceFile(
   file: File,
   sessionId?: string,
   userConfirmation?: string,
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  userInput?: string
 ): Promise<AgentResponse> {
   const formData = new FormData();
   formData.append("file", file);
   if (sessionId) formData.append("session_id", sessionId);
   if (userConfirmation) formData.append("user_confirmation", userConfirmation);
+  if (userInput && userInput.trim()) formData.append("user_input", userInput.trim());
 
   return apiClient.post<AgentResponse>("/api/v1/agent/process-file", formData, {
     onUploadProgress: (event) => {

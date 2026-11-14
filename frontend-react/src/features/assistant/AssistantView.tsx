@@ -99,6 +99,151 @@ function getFormattedTime(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+interface ContextAction {
+  label: string;
+  prompt: string;
+  variant?: "primary" | "danger" | "default";
+}
+
+function getContextualActions(m: ChatMessage): ContextAction[] {
+  const text = m.text || "";
+  const lower = text.toLowerCase();
+  const actions: ContextAction[] = [];
+
+  // 1. Proposal or Confirmation
+  if (
+    lower.includes("proceed") ||
+    lower.includes("proposal") ||
+    lower.includes("would you like me to proceed") ||
+    lower.includes("reply 'yes'") ||
+    lower.includes("please confirm")
+  ) {
+    return [
+      { label: "✓ Yes, Proceed & Apply", prompt: "proceed", variant: "primary" },
+      { label: "✕ Cancel Action", prompt: "cancel", variant: "danger" },
+    ];
+  }
+
+  // 2. Profile View (e.g. "Faculty Profile for...")
+  if (lower.includes("faculty profile for") || lower.includes("profile for")) {
+    return [
+      { label: "✏️ Change Name to Yatish Balu", prompt: "change my name in my profile to Yatish Balu", variant: "primary" },
+      { label: "📱 Update Mobile", prompt: "update my mobile number in my profile to 9876543210" },
+      { label: "📅 Show Today's Schedule", prompt: "Show my class schedule for today" },
+    ];
+  }
+
+  // 3. Profile Updated Successfully
+  if (lower.includes("profile updated successfully")) {
+    return [
+      { label: "👤 View Updated Profile", prompt: "Show my profile", variant: "primary" },
+      { label: "📅 Show Today's Schedule", prompt: "Show my class schedule for today" },
+      { label: "📊 Today's Attendance", prompt: "Summarize today's overall attendance" },
+    ];
+  }
+
+  // 4. Pending / Unreviewed Sessions
+  if (
+    lower.includes("pending or unreviewed") ||
+    lower.includes("requiring attention or review") ||
+    lower.includes("pending sessions")
+  ) {
+    const sessionMatches = Array.from(text.matchAll(/\*\*([A-Za-z0-9_-]+)\*\*/g))
+      .map((match) => match[1])
+      .filter((id) => id && !["Session", "ID", "Date", "Subject", "Status", "Total", "Found"].includes(id));
+    const uniqueIds = Array.from(new Set(sessionMatches)).slice(0, 2);
+
+    uniqueIds.forEach((sid) => {
+      actions.push({
+        label: `📝 Inspect Session ${sid}`,
+        prompt: `Show attendance details for session ${sid}`,
+        variant: "primary",
+      });
+    });
+
+    actions.push({ label: "📊 Today's Summary", prompt: "Summarize today's overall attendance" });
+    actions.push({ label: "🚪 Vacant Rooms", prompt: "Find vacant classrooms right now" });
+    return actions;
+  }
+
+  // 5. Live Real-Time Date & Day Query
+  if (
+    lower.includes("live real-time date") ||
+    lower.includes("current real-time date") ||
+    lower.includes("day of the week")
+  ) {
+    return [
+      { label: "📅 Today's Class Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "📊 Today's Attendance Overview", prompt: "Summarize today's overall attendance" },
+      { label: "🚪 Find Vacant Rooms Now", prompt: "Find vacant classrooms right now" },
+    ];
+  }
+
+  // 6. Defaulters List
+  if (
+    lower.includes("defaulter") ||
+    lower.includes("<75%") ||
+    lower.includes("attendance shortage") ||
+    lower.includes("below 75")
+  ) {
+    return [
+      { label: "📊 Branch Attendance Breakdown", prompt: "Show attendance statistics for Computer Science (CSE)", variant: "primary" },
+      { label: "📅 Today's Schedule", prompt: "Show my class schedule for today" },
+      { label: "🕒 Check Pending Sessions", prompt: "Which sessions have pending unreviewed attendance?" },
+    ];
+  }
+
+  // 7. Class Schedule / Timetable
+  if (lower.includes("class schedule for") || lower.includes("timetable")) {
+    return [
+      { label: "🚪 Find Vacant Rooms for Next Class", prompt: "Find vacant classrooms right now", variant: "primary" },
+      { label: "🕒 Check Pending Reviews for Today", prompt: "Which sessions have pending unreviewed attendance?" },
+      { label: "➕ Create New Session", prompt: "Create a session for today" },
+    ];
+  }
+
+  // 8. Vacant Classrooms
+  if (
+    lower.includes("vacant") ||
+    lower.includes("available classrooms") ||
+    lower.includes("classroom availability")
+  ) {
+    return [
+      { label: "📅 Today's Class Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "➕ Schedule Class in Available Room", prompt: "Create a session for today in vacant room" },
+      { label: "📊 Today's Summary", prompt: "Summarize today's overall attendance" },
+    ];
+  }
+
+  // 9. Session Created
+  if (lower.includes("session created successfully")) {
+    return [
+      { label: "📅 View Today's Updated Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "🕒 Check Pending Sessions", prompt: "Which sessions have pending unreviewed attendance?" },
+    ];
+  }
+
+  // 10. Attendance Summary
+  if (
+    lower.includes("attendance summary") ||
+    lower.includes("attendance statistics") ||
+    lower.includes("overall attendance")
+  ) {
+    return [
+      { label: "⚠️ Show Defaulters (<75%)", prompt: "List students with attendance below 75%", variant: "primary" },
+      { label: "📅 Today's Schedule", prompt: "Show my class schedule for today" },
+      { label: "🕒 Check Pending Sessions", prompt: "Which sessions have pending unreviewed attendance?" },
+    ];
+  }
+
+  // Smart Contextual Fallback
+  return [
+    { label: "📊 Today's Attendance", prompt: "Summarize today's overall attendance" },
+    { label: "📅 Today's Schedule", prompt: "Show my class schedule for today" },
+    { label: "🕒 Pending Reviews", prompt: "Which sessions have pending unreviewed attendance?" },
+  ];
+}
+
 function ExpiryBadge({ expiresAt }: { expiresAt?: string }) {
   const [secondsLeft, setSecondsLeft] = useState<number | null>(() => {
     if (!expiresAt) return null;
@@ -230,6 +375,10 @@ export function AssistantView() {
     size: number;
   } | null>(null);
 
+  // Staged pending attachment (waits for user to type/send instead of auto-firing)
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingFilePreview, setPendingFilePreview] = useState<string | null>(null);
+
   // Confirmation Modal (legacy)
   const [_pendingConfirmation, setPendingConfirmation] = useState<{
     request: ConfirmationRequest;
@@ -265,9 +414,230 @@ export function AssistantView() {
     };
   }, []);
 
+  const handleRemovePendingFile = useCallback(() => {
+    if (pendingFilePreview) {
+      URL.revokeObjectURL(pendingFilePreview);
+    }
+    setPendingFile(null);
+    setPendingFilePreview(null);
+  }, [pendingFilePreview]);
+
+  const handleStageFile = useCallback(
+    (file: File) => {
+      const extension = file.name.includes(".")
+        ? `.${file.name.split(".").pop()?.toLowerCase()}`
+        : "";
+      const supported = SUPPORTED_UPLOAD_EXTENSIONS.includes(extension);
+      const isImage = file.type.startsWith("image/");
+
+      if (!supported && !isImage) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId("err"),
+            sender: "assistant",
+            text: `Unsupported file type "${extension || file.type || "unknown"}". Supported formats: ${SUPPORTED_UPLOAD_EXTENSIONS.join(", ")} and images (PNG, JPEG).`,
+            timestamp: getFormattedTime(),
+            error: true,
+          },
+        ]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+
+      if (file.size > MAX_UPLOAD_BYTES) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId("err"),
+            sender: "assistant",
+            text: `The file is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). The maximum upload size is ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`,
+            timestamp: getFormattedTime(),
+            error: true,
+          },
+        ]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+
+      if (pendingFilePreview) {
+        URL.revokeObjectURL(pendingFilePreview);
+      }
+
+      setPendingFile(file);
+      if (file.type.startsWith("image/")) {
+        setPendingFilePreview(URL.createObjectURL(file));
+      } else {
+        setPendingFilePreview(null);
+      }
+    },
+    [pendingFilePreview]
+  );
+
+  const uploadFile = useCallback(
+    async (file: File, promptQuery?: string) => {
+      const extension = file.name.includes(".")
+        ? `.${file.name.split(".").pop()?.toLowerCase()}`
+        : "";
+
+      setSelectedFile({
+        name: file.name,
+        type: file.type || extension.toUpperCase().replace(".", "") || "FILE",
+        size: file.size,
+      });
+      setUploadProgress(0);
+      setUploadStage("uploading");
+      setIsUploading(true);
+
+      const userDisplayText = promptQuery?.trim()
+        ? `${promptQuery.trim()} (attached: ${file.name})`
+        : `Uploaded file for attendance extraction: ${file.name}`;
+
+      const userMsg: ChatMessage = {
+        id: nextMsgId("u"),
+        sender: "user",
+        text: userDisplayText,
+        timestamp: getFormattedTime(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+
+      try {
+        const res = await processAttendanceFile(
+          file,
+          activeSessionId || undefined,
+          undefined,
+          (percent) => setUploadProgress(percent),
+          promptQuery?.trim() || undefined
+        );
+        setUploadStage("processing");
+
+        const confirmationCardData: ConfirmationCardData | null =
+          res.needs_confirmation && res.confirmation_request
+            ? {
+                confirmationId:
+                  (res.confirmation_request.affected_rows?.[0]?.confirmation_id as string) || "",
+                requestId: res.request_id,
+                sessionId:
+                  activeSessionId ||
+                  ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
+                question:
+                  res.confirmation_request.question || "Do you confirm the extracted attendance records?",
+                issues: res.confirmation_request.issues || [],
+                affectedRows: res.confirmation_request.affected_rows || [],
+                status: "pending",
+                isN7Proposal: false,
+              }
+            : null;
+
+        const assistantMsg: ChatMessage = {
+          id: nextMsgId("a"),
+          sender: "assistant",
+          text: res.message || "Processed attendance sheet.",
+          timestamp: getFormattedTime(),
+          toolCalls: res.tool_calls,
+          confirmation: res.confirmation_request,
+          confirmationCard: confirmationCardData,
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
+
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("rollcall-attendance-updated", {
+              detail: { sessionId: activeSessionId || res.session_id },
+            })
+          );
+        }
+
+        if (res.needs_confirmation && res.confirmation_request) {
+          setPendingConfirmation({
+            request: res.confirmation_request,
+            requestId: res.request_id,
+            sessionId:
+              activeSessionId ||
+              ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
+          });
+        }
+      } catch (err: unknown) {
+        const anyErr = err as {
+          statusCode?: number;
+          status?: number;
+          code?: string;
+          message?: string;
+          details?: Record<string, unknown>;
+        };
+
+        const isQualityRejected =
+          (anyErr?.statusCode === 422 || anyErr?.status === 422) &&
+          (anyErr?.code === "QUALITY_REJECTED" ||
+            String(anyErr?.message || "").toLowerCase().includes("quality") ||
+            String(anyErr?.message || "").toLowerCase().includes("blur") ||
+            String(anyErr?.message || "").toLowerCase().includes("photo") ||
+            String(anyErr?.message || "").toLowerCase().includes("sharpness"));
+
+        if (isQualityRejected) {
+          const details = anyErr.details || {};
+          const reasons = Array.isArray(details.reasons)
+            ? (details.reasons as string[])
+            : [
+                "Image sharpness is below the required optical threshold (Laplacian variance check failed).",
+                "Lighting across the attendance sheet is uneven, shadowed, or underexposed.",
+              ];
+
+          const rejectionData: PhotoQualityRejectionData = {
+            reasons,
+            measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 42.5,
+            sharpnessThreshold:
+              typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 100.0,
+            measuredBrightness: typeof details.brightness === "number" ? details.brightness : 54.2,
+            brightnessThreshold:
+              typeof details.brightness_threshold === "number" ? details.brightness_threshold : 80.0,
+          };
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: nextMsgId("rej"),
+              sender: "assistant",
+              text: "The uploaded photograph did not pass automatic quality evaluation.",
+              timestamp: getFormattedTime(),
+              qualityRejection: rejectionData,
+            },
+          ]);
+        } else {
+          const msg = err instanceof Error ? err.message : "File processing failed.";
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: nextMsgId("err"),
+              sender: "assistant",
+              text: `OCR / Parsing Error: ${msg}`,
+              timestamp: getFormattedTime(),
+              error: true,
+            },
+          ]);
+        }
+      } finally {
+        setIsUploading(false);
+        setUploadProgress(100);
+        setUploadStage("done");
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    },
+    [activeSessionId]
+  );
+
   const handleSendMessage = useCallback(async (textToSend?: string) => {
     const query = (textToSend || inputQuery).trim();
-    if (!query || isProcessing) return;
+    if ((!query && !pendingFile) || isProcessing || isUploading) return;
+
+    if (pendingFile) {
+      const fileToUpload = pendingFile;
+      const promptText = query;
+      handleRemovePendingFile();
+      setInputQuery("");
+      await uploadFile(fileToUpload, promptText);
+      return;
+    }
 
     const userMsg: ChatMessage = {
       id: nextMsgId("u"),
@@ -449,184 +819,50 @@ export function AssistantView() {
     } finally {
       setIsProcessing(false);
     }
-  }, [inputQuery, isProcessing, activeSessionId]);
+  }, [inputQuery, isProcessing, isUploading, activeSessionId, pendingFile, handleRemovePendingFile, uploadFile]);
 
-  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (file) handleStageFile(file);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [handleStageFile]);
 
-    // Client side validation (the backend validates the bytes again).
-    const extension = file.name.includes(".")
-      ? `.${file.name.split(".").pop()?.toLowerCase()}`
-      : "";
-    const supported = SUPPORTED_UPLOAD_EXTENSIONS.includes(extension);
-    const isImage = file.type.startsWith("image/");
-
-    if (!supported && !isImage) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextMsgId("err"),
-          sender: "assistant",
-          text: `Unsupported file type "${extension || file.type || "unknown"}". Supported formats: ${SUPPORTED_UPLOAD_EXTENSIONS.join(", ")} and images (PNG, JPEG).`,
-          timestamp: getFormattedTime(),
-          error: true,
-        },
-      ]);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      return;
+  // Handle Clipboard Ctrl+V Paste for images and files
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          handleStageFile(file);
+          return;
+        }
+      }
     }
+  }, [handleStageFile]);
 
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextMsgId("err"),
-          sender: "assistant",
-          text: `The file is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). The maximum upload size is ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`,
-          timestamp: getFormattedTime(),
-          error: true,
-        },
-      ]);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      return;
-    }
-
-    setSelectedFile({
-      name: file.name,
-      type: file.type || extension.toUpperCase().replace(".", ""),
-      size: file.size,
-    });
-    setUploadProgress(0);
-    setUploadStage("uploading");
-    setIsUploading(true);
-
-    const userMsg: ChatMessage = {
-      id: nextMsgId("u"),
-      sender: "user",
-      text: `Uploaded file for attendance extraction: ${file.name}`,
-      timestamp: getFormattedTime(),
+  // Window-level Paste Listener so pasting anywhere in chat window works
+  useEffect(() => {
+    const handleWindowPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].kind === "file") {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            handleStageFile(file);
+            return;
+          }
+        }
+      }
     };
-    setMessages((prev) => [...prev, userMsg]);
-
-    try {
-      const res = await processAttendanceFile(
-        file,
-        activeSessionId || undefined,
-        undefined,
-        (percent) => setUploadProgress(percent)
-      );
-      setUploadStage("processing");
-
-      const confirmationCardData: ConfirmationCardData | null =
-        res.needs_confirmation && res.confirmation_request
-          ? {
-              confirmationId: (res.confirmation_request.affected_rows?.[0]?.confirmation_id as string) || "",
-              requestId: res.request_id,
-              sessionId:
-                activeSessionId ||
-                ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
-              question: res.confirmation_request.question || "Do you confirm the extracted attendance records?",
-              issues: res.confirmation_request.issues || [],
-              affectedRows: res.confirmation_request.affected_rows || [],
-              status: "pending",
-              isN7Proposal: false,
-            }
-          : null;
-
-      const assistantMsg: ChatMessage = {
-        id: nextMsgId("a"),
-        sender: "assistant",
-        text: res.message || "Processed attendance sheet.",
-        timestamp: getFormattedTime(),
-        toolCalls: res.tool_calls,
-        confirmation: res.confirmation_request,
-        confirmationCard: confirmationCardData,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(
-          new CustomEvent("rollcall-attendance-updated", {
-            detail: { sessionId: activeSessionId || res.session_id },
-          })
-        );
-      }
-
-      if (res.needs_confirmation && res.confirmation_request) {
-        setPendingConfirmation({
-          request: res.confirmation_request,
-          requestId: res.request_id,
-          sessionId:
-            activeSessionId ||
-            ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
-        });
-      }
-    } catch (err: unknown) {
-      // Check for HTTP 422 QUALITY_REJECTED error
-      const anyErr = err as {
-        statusCode?: number;
-        status?: number;
-        code?: string;
-        message?: string;
-        details?: Record<string, unknown>;
-      };
-
-      const isQualityRejected =
-        (anyErr?.statusCode === 422 || anyErr?.status === 422) &&
-        (anyErr?.code === "QUALITY_REJECTED" ||
-          String(anyErr?.message || "").toLowerCase().includes("quality") ||
-          String(anyErr?.message || "").toLowerCase().includes("blur") ||
-          String(anyErr?.message || "").toLowerCase().includes("photo") ||
-          String(anyErr?.message || "").toLowerCase().includes("sharpness"));
-
-      if (isQualityRejected) {
-        const details = anyErr.details || {};
-        const reasons = Array.isArray(details.reasons)
-          ? (details.reasons as string[])
-          : [
-              "Image sharpness is below the required optical threshold (Laplacian variance check failed).",
-              "Lighting across the attendance sheet is uneven, shadowed, or underexposed.",
-            ];
-
-        const rejectionData: PhotoQualityRejectionData = {
-          reasons,
-          measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 42.5,
-          sharpnessThreshold: typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 100.0,
-          measuredBrightness: typeof details.brightness === "number" ? details.brightness : 54.2,
-          brightnessThreshold: typeof details.brightness_threshold === "number" ? details.brightness_threshold : 80.0,
-        };
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: nextMsgId("rej"),
-            sender: "assistant",
-            text: "The uploaded photograph did not pass automatic quality evaluation.",
-            timestamp: getFormattedTime(),
-            qualityRejection: rejectionData,
-          },
-        ]);
-      } else {
-        const msg = err instanceof Error ? err.message : "File processing failed.";
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: nextMsgId("err"),
-            sender: "assistant",
-            text: `OCR / Parsing Error: ${msg}`,
-            timestamp: getFormattedTime(),
-            error: true,
-          },
-        ]);
-      }
-    } finally {
-      setIsUploading(false);
-      setUploadProgress(100);
-      setUploadStage("done");
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }, [activeSessionId]);
+    window.addEventListener("paste", handleWindowPaste);
+    return () => window.removeEventListener("paste", handleWindowPaste);
+  }, [handleStageFile]);
 
   // Local Dismiss Action (N7: Never calls confirmation endpoint)
   const handleCardDismiss = useCallback((msgId: string) => {
@@ -988,62 +1224,38 @@ export function AssistantView() {
                   )}
                 </div>
 
-                {/* Interactive Suggestion Chips for Assistant Messages */}
-                {!isUser && !m.error && (
-                  <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 flex flex-wrap items-center gap-1.5">
-                    {m.text?.toLowerCase().includes("proceed") ? (
-                      <>
-                        <span className="text-[10px] uppercase font-bold text-[#3F451F] mr-1">Confirm Action:</span>
-                        <button
-                          onClick={() => void handleSendMessage("proceed")}
-                          disabled={isProcessing}
-                          className="px-3 py-1 rounded-lg bg-[#3F451F] hover:bg-[#343919] text-[#FBF8F0] text-[11px] font-bold transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5 flex items-center gap-1"
-                        >
-                          <span>✓ Yes, Proceed</span>
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("cancel")}
-                          disabled={isProcessing}
-                          className="px-3 py-1 rounded-lg bg-white hover:bg-rose-50 border border-rose-300 text-[11px] text-rose-700 font-bold transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          <span>✕ Cancel</span>
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="text-[10px] uppercase font-bold text-[#77735F] mr-1">Quick Actions:</span>
-                        <button
-                          onClick={() => void handleSendMessage("Summarize today's overall attendance")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          📊 Summarize
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("List students with attendance below 75%")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          ⚠️ Defaulters (&lt;75%)
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("Which sessions have pending unreviewed attendance?")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          🕒 Pending Sessions
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("Find vacant classrooms right now")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          🚪 Vacant Rooms
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
+                {/* Interactive Real-Time Actions for Assistant Messages */}
+                {!isUser && !m.error && (() => {
+                  const actions = getContextualActions(m);
+                  if (actions.length === 0) return null;
+                  return (
+                    <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] uppercase font-bold text-[#77735F] mr-1 flex items-center gap-1">
+                        <span>⚡ Real-Time Actions:</span>
+                      </span>
+                      {actions.map((act, aIdx) => {
+                        let btnClass = "px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5 flex items-center gap-1";
+                        if (act.variant === "primary") {
+                          btnClass += " bg-[#3F451F] hover:bg-[#343919] text-[#FBF8F0]";
+                        } else if (act.variant === "danger") {
+                          btnClass += " bg-white hover:bg-rose-50 border border-rose-300 text-rose-700";
+                        } else {
+                          btnClass += " bg-white/90 hover:bg-white border border-[#E4DDCA] text-[#3F451F] hover:border-[#3F451F]";
+                        }
+                        return (
+                          <button
+                            key={aIdx}
+                            onClick={() => void handleSendMessage(act.prompt)}
+                            disabled={isProcessing}
+                            className={btnClass}
+                          >
+                            <span>{act.label}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  );
+                })()}
 
                 {/* Tool Call Audit Trace (if present) */}
                 {m.toolCalls && m.toolCalls.length > 0 && (
@@ -1414,11 +1626,44 @@ export function AssistantView() {
           className="hidden"
         />
 
+        {/* Staged file attachment chip: waits for user to send */}
+        {pendingFile && (
+          <div className="mb-2 flex items-center gap-2 bg-[#FBF8F0] px-3 py-1.5 rounded-xl border border-[#E4DDCA] w-fit max-w-full shadow-2xs">
+            {pendingFilePreview ? (
+              <img
+                src={pendingFilePreview}
+                alt="Upload preview"
+                className="w-8 h-8 object-cover rounded-lg border border-[#E4DDCA]"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-lg bg-[#E4DDCA] flex items-center justify-center text-xs font-bold text-[#3F451F]">
+                📄
+              </div>
+            )}
+            <div className="flex flex-col text-xs min-w-0 pr-1">
+              <span className="font-semibold text-[#24251C] truncate max-w-[220px]">
+                {pendingFile.name}
+              </span>
+              <span className="text-[10px] text-[#77735F]">
+                {(pendingFile.size / 1024).toFixed(0)} KB · Ready to send
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleRemovePendingFile}
+              className="p-1 rounded-lg text-[#77735F] hover:text-[#C62828] hover:bg-rose-50 transition-colors cursor-pointer"
+              title="Remove attachment"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         <div className="flex items-center gap-2 bg-[#F2EDE0] p-1.5 rounded-2xl border border-[#E4DDCA]">
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Upload an attendance roster (PDF, XLSX, CSV, TXT, PNG or JPEG)"
+            title="Attach a roster or timetable file (PNG, JPG, PDF, XLSX, CSV)"
             className="p-2.5 rounded-xl text-[#77735F] hover:text-[#24251C] hover:bg-[#E4DDCA]/50 transition-colors disabled:opacity-50 cursor-pointer"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1430,20 +1675,25 @@ export function AssistantView() {
             type="text"
             value={inputQuery}
             onChange={(e) => setInputQuery(e.target.value)}
+            onPaste={handlePaste}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleSendMessage();
               }
             }}
-            placeholder="Ask about student attendance, propose an edit (e.g. 'mark 1MS21CS001 absent in SESS-001'), or upload a photo..."
+            placeholder={
+              pendingFile
+                ? "Type instructions (e.g. 'Register my CN classes from this timetable') or hit Send..."
+                : "Ask about student attendance, propose an edit, paste (Ctrl+V) or attach a file..."
+            }
             disabled={isProcessing || isUploading}
             className="flex-1 bg-transparent border-none text-sm text-[#24251C] placeholder-[#77735F] focus:outline-none px-2"
           />
 
           <button
             onClick={() => void handleSendMessage()}
-            disabled={!inputQuery.trim() || isProcessing || isUploading}
+            disabled={(!inputQuery.trim() && !pendingFile) || isProcessing || isUploading}
             className="p-2.5 bg-[#3F451F] text-[#FBF8F0] rounded-xl hover:bg-[#323719] transition-all disabled:opacity-40 disabled:hover:bg-[#3F451F] cursor-pointer"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

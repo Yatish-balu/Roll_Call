@@ -11,136 +11,93 @@ interface TopStatsProps {
 }
 
 export function TopStats({ sessions, overallReport, todayReport, isLoading }: TopStatsProps) {
-  // Live attendance metrics from backend
   const overallPercentage = overallReport?.overall?.percentage ?? null;
-  // A date with no attendance recorded has no rate. Showing 0% would claim
-  // every student was absent, so fall back to the "no sessions" state.
   const todayTotal = todayReport?.overall?.total ?? 0;
   const todayPercentage = todayTotal > 0 ? todayReport?.overall?.percentage ?? null : null;
+  const effectiveRate = todayPercentage !== null ? todayPercentage : overallPercentage;
+
+  const totalPresent = todayReport?.overall?.present ?? overallReport?.overall?.present ?? 0;
+  const totalAbsent = todayReport?.overall?.absent ?? overallReport?.overall?.absent ?? 0;
   const sessionsCount = sessions?.total ?? sessions?.items?.length ?? 0;
 
-  // Rate for circular progress. This ring belongs to the Today's Attendance
-  // panel, so it must never borrow the all-time rate when today has no data.
-  const hasRate = todayPercentage !== null;
-  const displayRate = todayPercentage !== null ? Math.round(todayPercentage) : null;
-  const strokeDash = displayRate !== null ? Math.min(100, Math.max(0, displayRate)) : 0;
-  const circumference = 2 * Math.PI * 28; // radius 28 -> 175.93
-  const strokeOffset = circumference - (strokeDash / 100) * circumference;
-
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 sm:gap-6">
-      {/* 1. Today's Attendance Panel */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs flex items-center justify-between">
-        <div className="flex items-center space-x-4">
-          <div className="w-13 h-13 rounded-2xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]/60">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-          </div>
-          <div>
-            <p className="text-xs font-bold text-[#77735F] uppercase tracking-wider">
-              Today&apos;s Attendance
-            </p>
-            <div className="flex items-baseline space-x-2 mt-1">
-              <h2 className="text-2xl sm:text-3xl font-extrabold text-[#24251C]">
-                {isLoading
-                  ? "..."
-                  : todayTotal > 0 && todayReport?.overall
-                  ? `${todayReport.overall.confirmed} / ${todayTotal}`
-                  : sessionsCount > 0
-                  ? `${sessionsCount} ${sessionsCount === 1 ? "Session" : "Sessions"}`
-                  : "—"}
-              </h2>
-            </div>
-            <p className="text-xs text-[#77735F] font-medium mt-0.5">
-              {todayTotal > 0
-                ? "Recorded Marks"
-                : sessionsCount > 0
-                ? "Active Timetable Sessions"
-                : "No sessions recorded today"}
-            </p>
-          </div>
+    <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+      {/* 1. Attendance Rate */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex items-center justify-between">
+        <div>
+          <span className="text-[11px] font-bold text-[#77735F] uppercase tracking-wider block">
+            Attendance Rate
+          </span>
+          <p className="text-xl sm:text-2xl font-black text-[#24251C] mt-0.5">
+            {isLoading ? "..." : effectiveRate !== null ? `${effectiveRate.toFixed(1)}%` : "—"}
+          </p>
+          <span className="text-[10px] text-[#77735F] font-semibold">
+            {todayPercentage !== null ? "Today's Live Metric" : "Institutional Aggregate"}
+          </span>
         </div>
-
-        {/* Circular SVG Progress Ring */}
-        <div className="relative w-18 h-18 shrink-0 flex items-center justify-center">
-          <svg className="w-full h-full -rotate-90" viewBox="0 0 68 68">
-            <circle
-              cx="34"
-              cy="34"
-              r="28"
-              fill="none"
-              stroke="#EDE8D8"
-              strokeWidth="6"
-            />
-            <circle
-              cx="34"
-              cy="34"
-              r="28"
-              fill="none"
-              stroke="#72785E"
-              strokeWidth="6"
-              strokeDasharray={circumference}
-              strokeDashoffset={strokeOffset}
-              strokeLinecap="round"
-              className="transition-all duration-700 ease-out"
-            />
+        <div className="w-10 h-10 rounded-xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
           </svg>
-          <div className="absolute inset-0 flex items-center justify-center">
-            <span className="text-xs font-extrabold text-[#24251C]">
-              {isLoading ? "..." : hasRate ? `${displayRate}%` : "—"}
-            </span>
-          </div>
         </div>
       </div>
 
-      {/* 2. Overall Attendance Panel */}
-      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 sm:p-6 shadow-2xs flex items-center justify-between relative overflow-hidden">
-        <div className="flex items-center space-x-4 z-10">
-          <div className="w-13 h-13 rounded-2xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]/60">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
-            </svg>
-          </div>
-          <div>
-            <p className="text-xs font-bold text-[#77735F] uppercase tracking-wider">
-              Overall Attendance
-            </p>
-            <div className="flex items-baseline space-x-2 mt-1">
-              <h2 className="text-2xl sm:text-3xl font-extrabold text-[#24251C]">
-                {isLoading
-                  ? "..."
-                  : overallPercentage !== null
-                  ? `${overallPercentage.toFixed(1)}%`
-                  : "—"}
-              </h2>
-            </div>
-            <div className="flex items-center space-x-1.5 mt-0.5">
-              <span className="text-xs font-bold text-emerald-700">
-                {overallReport?.overall?.total
-                  ? `↑ ${overallReport.overall.confirmed} Confirmed`
-                  : "Live Metric"}
-              </span>
-              <span className="text-[11px] text-[#77735F]">
-                ({overallReport?.overall?.total ?? 0} total records)
-              </span>
-            </div>
-          </div>
+      {/* 2. Total Present */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex items-center justify-between">
+        <div>
+          <span className="text-[11px] font-bold text-emerald-800 uppercase tracking-wider block">
+            Total Present
+          </span>
+          <p className="text-xl sm:text-2xl font-black text-emerald-700 mt-0.5">
+            {isLoading ? "..." : totalPresent}
+          </p>
+          <span className="text-[10px] text-[#77735F] font-semibold">
+            Verified Marks
+          </span>
         </div>
-
-        {/* Decorative Vertical Bar Chart with Wave Accent */}
-        <div className="flex items-end space-x-1.5 h-12 z-10 opacity-85 shrink-0 pl-2">
-          <div className="w-2 rounded-t-xs bg-[#6C5119]/40 h-5" />
-          <div className="w-2 rounded-t-xs bg-[#72785E]/60 h-8" />
-          <div className="w-2 rounded-t-xs bg-[#6C5119]/70 h-6" />
-          <div className="w-2 rounded-t-xs bg-[#3F451F]/80 h-10" />
-          <div className="w-2 rounded-t-xs bg-[#6C5119] h-12" />
+        <div className="w-10 h-10 rounded-xl bg-emerald-100 text-emerald-800 flex items-center justify-center shrink-0 border border-emerald-300">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
+          </svg>
         </div>
+      </div>
 
-        {/* Subtle Wave Backdrop */}
-        <div className="absolute right-0 bottom-0 pointer-events-none opacity-15">
-          <svg width="140" height="60" viewBox="0 0 140 60" fill="none">
-            <path d="M0 45 C40 10, 80 55, 140 25 L140 60 L0 60 Z" fill="#6C5119" />
+      {/* 3. Total Absent */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex items-center justify-between">
+        <div>
+          <span className="text-[11px] font-bold text-rose-800 uppercase tracking-wider block">
+            Total Absent
+          </span>
+          <p className="text-xl sm:text-2xl font-black text-rose-700 mt-0.5">
+            {isLoading ? "..." : totalAbsent}
+          </p>
+          <span className="text-[10px] text-[#77735F] font-semibold">
+            Confirmed Absentees
+          </span>
+        </div>
+        <div className="w-10 h-10 rounded-xl bg-rose-100 text-rose-800 flex items-center justify-center shrink-0 border border-rose-300">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        </div>
+      </div>
+
+      {/* 4. Total Sessions */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex items-center justify-between">
+        <div>
+          <span className="text-[11px] font-bold text-[#6C5119] uppercase tracking-wider block">
+            Active Sessions
+          </span>
+          <p className="text-xl sm:text-2xl font-black text-[#24251C] mt-0.5">
+            {isLoading ? "..." : sessionsCount}
+          </p>
+          <span className="text-[10px] text-[#77735F] font-semibold">
+            {todayTotal > 0 ? "Today's Schedule" : "Institutional Register"}
+          </span>
+        </div>
+        <div className="w-10 h-10 rounded-xl bg-[#EDE8D8] text-[#6C5119] flex items-center justify-center shrink-0 border border-[#E4DDCA]">
+          <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
           </svg>
         </div>
       </div>

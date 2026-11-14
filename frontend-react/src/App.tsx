@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/context/AuthContext";
 import { AppShell } from "@/components/layout";
+import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { ProtectedRoute } from "@/components/auth";
 import { DashboardView } from "@/features/dashboard";
 import { StudentsView } from "@/features/students";
@@ -20,8 +21,9 @@ import { CalendarView } from "@/features/calendar";
 export function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
-        <Routes>
+      <ErrorBoundary>
+        <BrowserRouter>
+          <Routes>
           <Route
             path="/login"
             element={
@@ -173,7 +175,8 @@ export function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
-    </AuthProvider>
+    </ErrorBoundary>
+  </AuthProvider>
   );
 }
 

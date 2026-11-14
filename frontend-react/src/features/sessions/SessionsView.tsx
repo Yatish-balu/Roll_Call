@@ -38,6 +38,7 @@ export function SessionsView() {
   // Search & filter
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedSubject, setSelectedSubject] = useState("ALL");
+  const [selectedTeacher, setSelectedTeacher] = useState("ALL");
 
   // Create modal
   const [isCreateOpen, setIsCreateOpen] = useState(false);
@@ -128,19 +129,35 @@ export function SessionsView() {
     return map;
   }, [allocations]);
 
+  const availableTeachers = useMemo(() => {
+    const set = new Set<string>();
+    sessions.forEach((s) => {
+      if (s.teacher_id) set.add(s.teacher_id);
+    });
+    return Array.from(set).sort();
+  }, [sessions]);
+
   const filteredSessions = useMemo(
     () =>
       sessions.filter((s) => {
+        const q = searchQuery.toLowerCase().trim();
         const matchesSearch =
-          s.session_id.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          (s.subject ? s.subject.toLowerCase().includes(searchQuery.toLowerCase()) : false) ||
-          (s.subject_code ? s.subject_code.toLowerCase().includes(searchQuery.toLowerCase()) : false);
+          !q ||
+          s.session_id.toLowerCase().includes(q) ||
+          (s.subject ? s.subject.toLowerCase().includes(q) : false) ||
+          (s.subject_code ? s.subject_code.toLowerCase().includes(q) : false) ||
+          (s.teacher_id ? s.teacher_id.toLowerCase().includes(q) : false);
+
         const matchesSubject =
           selectedSubject === "ALL" ||
           (s.subject_code || s.subject || "").toUpperCase() === selectedSubject.toUpperCase();
-        return matchesSearch && matchesSubject;
+
+        const matchesTeacher =
+          selectedTeacher === "ALL" || s.teacher_id === selectedTeacher;
+
+        return matchesSearch && matchesSubject && matchesTeacher;
       }),
-    [sessions, searchQuery, selectedSubject]
+    [sessions, searchQuery, selectedSubject, selectedTeacher]
   );
 
   const subjectOptions = useMemo(() => {
@@ -238,6 +255,11 @@ export function SessionsView() {
             {isViewer && (
               <span className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700 border border-slate-300 text-xs font-bold flex items-center space-x-1.5 shadow-2xs">
                 Read-Only Viewer
+              </span>
+            )}
+            {isAdmin && (
+              <span className="px-2.5 py-1 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold shadow-2xs">
+                Admin View • All Faculty Sessions
               </span>
             )}
           </div>
@@ -358,20 +380,40 @@ export function SessionsView() {
           className="w-full sm:w-80 px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
         />
 
-        <div className="flex items-center space-x-2.5 w-full sm:w-auto">
-          <label className="text-xs font-semibold text-[#77735F] whitespace-nowrap">Subject:</label>
-          <select
-            value={selectedSubject}
-            onChange={(e) => setSelectedSubject(e.target.value)}
-            className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-medium text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
-          >
-            <option value="ALL">All Subjects</option>
-            {subjectOptions.map((sub) => (
-              <option key={sub} value={sub}>
-                {sub}
-              </option>
-            ))}
-          </select>
+        <div className="flex items-center space-x-2.5 w-full sm:w-auto flex-wrap gap-2">
+          {isAdmin && (
+            <div className="flex items-center space-x-1.5">
+              <label className="text-xs font-semibold text-[#77735F] whitespace-nowrap">Faculty:</label>
+              <select
+                value={selectedTeacher}
+                onChange={(e) => setSelectedTeacher(e.target.value)}
+                className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-medium text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
+              >
+                <option value="ALL">All Faculty</option>
+                {availableTeachers.map((t) => (
+                  <option key={t} value={t}>
+                    {t}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          <div className="flex items-center space-x-1.5">
+            <label className="text-xs font-semibold text-[#77735F] whitespace-nowrap">Subject:</label>
+            <select
+              value={selectedSubject}
+              onChange={(e) => setSelectedSubject(e.target.value)}
+              className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-medium text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
+            >
+              <option value="ALL">All Subjects</option>
+              {subjectOptions.map((sub) => (
+                <option key={sub} value={sub}>
+                  {sub}
+                </option>
+              ))}
+            </select>
+          </div>
         </div>
       </div>
 

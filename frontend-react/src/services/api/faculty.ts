@@ -102,3 +102,68 @@ export interface MySubjectsResponse {
 export async function fetchMySubjects(): Promise<MySubjectsResponse> {
   return apiClient.get<MySubjectsResponse>("/api/v1/me/subjects");
 }
+
+export interface AdminTeacherItem {
+  user_id: string;
+  teacher_id: string;
+  name: string;
+  email: string;
+  role: string;
+  is_active: boolean;
+  subject_codes: string[];
+  session_count: number;
+  created_at?: string;
+}
+
+export async function fetchAdminTeachers(): Promise<{ items: AdminTeacherItem[]; total: number }> {
+  return apiClient.get<{ items: AdminTeacherItem[]; total: number }>("/api/v1/admin/teachers");
+}
+
+export async function updateTeacherName(userId: string, newName: string): Promise<{ success: boolean; name: string; message: string }> {
+  return apiClient.patch<{ success: boolean; name: string; message: string }>(
+    `/api/v1/admin/teachers/${encodeURIComponent(userId)}/name`,
+    { name: newName }
+  );
+}
+
+export interface PermissionRequestItem {
+  request_id: string;
+  user_id: string;
+  teacher_name?: string;
+  request_type: string;
+  subject_code?: string | null;
+  reason: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  created_at: string;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  admin_comment?: string | null;
+}
+
+export async function fetchPermissionRequests(statusFilter?: string): Promise<{ items: PermissionRequestItem[]; total: number }> {
+  const params: Record<string, string> = {};
+  if (statusFilter && statusFilter !== "ALL") params.status = statusFilter;
+  return apiClient.get<{ items: PermissionRequestItem[]; total: number }>(
+    "/api/v1/admin/permission-requests",
+    params
+  );
+}
+
+export async function submitPermissionRequest(data: {
+  subject_code?: string;
+  request_type?: string;
+  reason: string;
+}): Promise<PermissionRequestItem> {
+  return apiClient.post<PermissionRequestItem>("/api/v1/admin/permission-requests", data);
+}
+
+export async function reviewPermissionRequest(
+  requestId: string,
+  decision: "APPROVE" | "REJECT",
+  comment?: string
+): Promise<{ success: boolean; request_id: string; status: string; message: string }> {
+  return apiClient.post<{ success: boolean; request_id: string; status: string; message: string }>(
+    `/api/v1/admin/permission-requests/${encodeURIComponent(requestId)}/review`,
+    { decision, comment }
+  );
+}

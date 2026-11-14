@@ -174,6 +174,11 @@ export class ApiClient {
     return res.data;
   }
 
+  public async patch<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
+    const res = await this.axiosInstance.patch<T>(url, data, config);
+    return res.data;
+  }
+
   public async delete<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const res = await this.axiosInstance.delete<T>(url, config);
     return res.data;

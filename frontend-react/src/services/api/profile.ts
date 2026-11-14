@@ -148,7 +148,7 @@ export async function loadFacultyProfile(userId: string): Promise<ProfileLoadRes
   let serverProfile: Partial<FacultyProfile> | null = null;
   try {
     serverProfile = await apiClient.get<Partial<FacultyProfile>>("/api/v1/profile");
-  } catch (err: unknown) {
+  } catch {
     serverProfile = null;
     if (!notice) {
       notice =

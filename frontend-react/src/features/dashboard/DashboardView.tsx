@@ -5,10 +5,7 @@ import { fetchDashboardData, type DashboardData } from "@/services/api/dashboard
 import { TopStats } from "./components/TopStats";
 import { TodaysClasses } from "./components/TodaysClasses";
 import { AiAssistantCard } from "./components/AiAssistantCard";
-import { RecentSessionsTable } from "./components/RecentSessionsTable";
 import { TodaysSummary } from "./components/TodaysSummary";
-import { InstitutionalBreakdownTables } from "./components/InstitutionalBreakdownTables";
-import { FacultyUploadActivityTable } from "./components/FacultyUploadActivityTable";
 import { useAuth } from "@/hooks/useAuth";
 import { todayIso } from "@/lib/schedule";
 
@@ -101,7 +98,7 @@ export function DashboardView() {
         </div>
       )}
 
-      {/* Row 1: Today's Attendance & Overall Attendance Stat Cards */}
+      {/* Row 1: KPI Statistics Ribbon */}
       <TopStats
         sessions={todaysSessionPage}
         overallReport={data?.overallAnalytics ?? null}
@@ -109,47 +106,23 @@ export function DashboardView() {
         isLoading={isLoading}
       />
 
-      {/* Row 2: Today's Classes (~62%) and AI Assistant (~38%) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <div className="lg:col-span-7 xl:col-span-8">
+      {/* Row 2: Today's / Recent Classes & AI Assistant + Summary */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+        <div className="lg:col-span-7 xl:col-span-7">
           <TodaysClasses
             sessions={todaysSessions}
+            allSessions={allSessions}
             isLoading={isLoading}
           />
         </div>
-        <div className="lg:col-span-5 xl:col-span-4">
+        <div className="lg:col-span-5 xl:col-span-5 space-y-4">
           <AiAssistantCard />
-        </div>
-      </div>
-
-      {/* Row 3: Recent Sessions Table (~60%) and Today's Summary (~40%) */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        <div className="lg:col-span-7 xl:col-span-7">
-          <RecentSessionsTable
-            sessions={allSessions}
-            isLoading={isLoading}
-          />
-        </div>
-        <div className="lg:col-span-5 xl:col-span-5">
           <TodaysSummary
             summary={data?.todayAnalytics?.overall ?? data?.overallAnalytics?.overall ?? null}
             isLoading={isLoading}
           />
         </div>
       </div>
-
-      {/* Row 4: Institutional KPIs, Branch Breakdown, and Room Breakdown (N8 - F5) */}
-      <InstitutionalBreakdownTables
-        overviewReport={data?.overallAnalytics ?? null}
-        isLoading={isLoading}
-      />
-
-      {/* Row 5: Faculty Session Generation & Upload Activity Table (N8 - F5) */}
-      <FacultyUploadActivityTable
-        sessions={allSessions}
-        teacherMappings={data?.teacherMappings ?? null}
-        isLoading={isLoading}
-      />
     </div>
   );
 }

@@ -231,16 +231,30 @@ export function MyProfileView() {
 
             <div className="flex-1 grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
-                <label className={labelClass} htmlFor="fullName">
-                  Full name
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className={labelClass} htmlFor="fullName">
+                    Full name
+                  </label>
+                  {!isAdmin && (
+                    <span className="text-[10px] font-bold text-amber-800 bg-amber-100 px-2 py-0.5 rounded-md border border-amber-200">
+                      Admin-Managed
+                    </span>
+                  )}
+                </div>
                 <input
                   id="fullName"
-                  className={inputClass}
+                  className={`${inputClass} ${!isAdmin ? "bg-stone-100/80 cursor-not-allowed opacity-80" : ""}`}
                   value={profile.fullName}
                   onChange={(e) => update("fullName", e.target.value)}
                   placeholder="e.g. Dr. Ananya Sharma"
+                  disabled={!isAdmin}
+                  title={!isAdmin ? "Only an administrator can change a teacher's official name." : undefined}
                 />
+                {!isAdmin && (
+                  <p className="text-[10px] text-[#77735F] mt-1">
+                    Official faculty name changes must be approved and edited by the Administrator.
+                  </p>
+                )}
               </div>
               <div>
                 <label className={labelClass} htmlFor="mobile">
