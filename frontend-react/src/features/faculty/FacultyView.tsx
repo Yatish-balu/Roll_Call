@@ -17,6 +17,11 @@ import {
   type PermissionRequestItem,
   KNOWN_SUBJECTS,
 } from "@/services/api/faculty";
+import {
+  fetchAttendanceUnlockRequests,
+  reviewAttendanceUnlockRequest,
+  type AttendanceUnlockRequest,
+} from "@/services/api/attendance";
 import { useAuth } from "@/hooks/useAuth";
 
 interface DepartmentInfo {
@@ -72,6 +77,7 @@ export function FacultyView() {
   const [teachers, setTeachers] = useState<AdminTeacherItem[]>([]);
   const [mappings, setMappings] = useState<TeacherSubjectMapping[]>([]);
   const [requests, setRequests] = useState<PermissionRequestItem[]>([]);
+  const [unlockRequests, setUnlockRequests] = useState<AttendanceUnlockRequest[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [feedbackMessage, setFeedbackMessage] = useState<{
@@ -81,6 +87,7 @@ export function FacultyView() {
 
   // Active Tab: TEACHERS | APPROVALS | MAPPINGS | DEPARTMENTS
   const [activeTab, setActiveTab] = useState<"TEACHERS" | "APPROVALS" | "MAPPINGS" | "DEPARTMENTS">("TEACHERS");
+  const [approvalFilter, setApprovalFilter] = useState<"ALL" | "UNLOCKS" | "SUBJECTS" | "RESOLVED">("ALL");
 
   // Admin Change Name Modal
   const [editNameTarget, setEditNameTarget] = useState<AdminTeacherItem | null>(null);
@@ -110,6 +117,7 @@ export function FacultyView() {
 
   // Reviewing a Request
   const [reviewingId, setReviewingId] = useState<string | null>(null);
+  const [reviewingUnlockId, setReviewingUnlockId] = useState<string | null>(null);
 
   // Add New Teacher Modal
   const [isAddTeacherOpen, setIsAddTeacherOpen] = useState(false);
@@ -136,18 +144,21 @@ export function FacultyView() {
       const promises: Array<Promise<unknown>> = [
         fetchTeacherSubjects().catch(() => ({ total: 0, items: [] })),
         fetchPermissionRequests().catch(() => ({ total: 0, items: [] })),
+        fetchAttendanceUnlockRequests().catch(() => []),
       ];
       if (isAdmin) {
         promises.push(fetchAdminTeachers().catch(() => ({ total: 0, items: [] })));
       }
 
-      const [mapRes, reqRes, teachRes] = await Promise.all(promises);
+      const [mapRes, reqRes, unlockRes, teachRes] = await Promise.all(promises);
       const mItems = (mapRes as { items: TeacherSubjectMapping[] })?.items || [];
       const rItems = (reqRes as { items: PermissionRequestItem[] })?.items || [];
+      const uItems = (unlockRes as AttendanceUnlockRequest[]) || [];
       const tItems = (teachRes as { items: AdminTeacherItem[] })?.items || [];
 
       setMappings(mItems);
       setRequests(rItems);
+      setUnlockRequests(uItems);
       setTeachers(tItems);
 
       if (tItems.length > 0 && !selectedTeacherId) {
@@ -161,18 +172,49 @@ export function FacultyView() {
   }, [isAdmin, selectedTeacherId]);
 
   useEffect(() => {
-    let isMounted = true;
-    Promise.resolve().then(() => {
-      if (isMounted) void loadData();
-    });
+    void loadData();
+    const handleSync = () => {
+      void loadData();
+    };
+    window.addEventListener("rollcall-unlock-request-updated", handleSync);
+    window.addEventListener("rollcall-attendance-updated", handleSync);
     return () => {
-      isMounted = false;
+      window.removeEventListener("rollcall-unlock-request-updated", handleSync);
+      window.removeEventListener("rollcall-attendance-updated", handleSync);
     };
   }, [loadData]);
 
-  const pendingRequestsCount = useMemo(() => {
-    return requests.filter((r) => r.status === "PENDING").length;
-  }, [requests]);
+  const pendingSubjectRequests = useMemo(() => requests.filter((r) => r.status === "PENDING"), [requests]);
+  const pendingUnlockRequests = useMemo(() => unlockRequests.filter((r) => r.status === "PENDING"), [unlockRequests]);
+  const totalPendingCount = pendingSubjectRequests.length + pendingUnlockRequests.length;
+  const pendingRequestsCount = totalPendingCount;
+  const activeTeachersCount = useMemo(() => teachers.filter((t) => Boolean(t.is_active)).length, [teachers]);
+  const totalSessionCount = useMemo(() => teachers.reduce((acc, t) => acc + (t.session_count || 0), 0), [teachers]);
+
+  const handleReviewUnlock = async (requestId: string, decision: "APPROVED" | "REJECTED") => {
+    setReviewingUnlockId(requestId);
+    try {
+      await reviewAttendanceUnlockRequest(requestId, {
+        decision,
+        unlock_hours: 24,
+        admin_notes: decision === "APPROVED" ? "Approved from Admin Command Center" : "Rejected from Admin Command Center",
+      });
+      setFeedbackMessage({
+        type: "success",
+        text: `Attendance unlock request ${decision === "APPROVED" ? "approved (24h edit window unlocked)" : "declined"}.`,
+      });
+      window.dispatchEvent(new CustomEvent("rollcall-unlock-request-updated"));
+      window.dispatchEvent(new CustomEvent("rollcall-attendance-updated"));
+      await loadData();
+    } catch (err: unknown) {
+      setFeedbackMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to review unlock request.",
+      });
+    } finally {
+      setReviewingUnlockId(null);
+    }
+  };
 
   // Handle Admin Name Change
   const handleSaveTeacherName = async (e: React.FormEvent) => {
@@ -356,19 +398,21 @@ export function FacultyView() {
         <div>
           <div className="flex items-center space-x-2.5 flex-wrap">
             <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] tracking-tight">
-              Faculty & Academic Directory
+              {isAdmin ? "Admin Command Center" : "Faculty & Academic Directory"}
             </h1>
             <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
-              {isAdmin ? "Admin Authority" : "Faculty Workspace"}
+              {isAdmin ? "Institutional Governance" : "Faculty Workspace"}
             </span>
-            {pendingRequestsCount > 0 && (
+            {totalPendingCount > 0 && (
               <span className="px-2.5 py-0.5 rounded-full text-xs font-black bg-amber-100 text-amber-900 border border-amber-300 animate-pulse">
-                {pendingRequestsCount} Pending Approval{pendingRequestsCount > 1 ? "s" : ""}
+                {totalPendingCount} Action Item{totalPendingCount > 1 ? "s" : ""} Requiring Review
               </span>
             )}
           </div>
           <p className="text-xs sm:text-sm text-[#77735F] mt-1">
-            Faculty accounts, official teacher names, subject allocations, and permission approvals.
+            {isAdmin
+              ? "Centralized administrative cockpit for faculty profiles, 24-hour attendance unlocks, subject allocations, and institutional oversight."
+              : "Faculty accounts, assigned subjects, and administrative permission requests."}
           </p>
         </div>
 
@@ -429,6 +473,76 @@ export function FacultyView() {
         </div>
       )}
 
+      {/* Admin KPI & Intelligence Overview Strip */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-3.5">
+        <div className="p-4 rounded-2xl bg-[#FBF8F0] border border-[#E4DDCA] shadow-2xs">
+          <div className="flex items-center justify-between text-xs font-bold text-[#77735F]">
+            <span>FACULTY ROSTER</span>
+            <span className="text-base">👨‍🏫</span>
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-black text-[#24251C]">{teachers.length}</span>
+            <span className="text-xs font-bold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+              {activeTeachersCount} Active
+            </span>
+          </div>
+          <p className="text-[11px] text-[#77735F] mt-1">Verified institutional teaching staff</p>
+        </div>
+
+        <div
+          onClick={() => setActiveTab("APPROVALS")}
+          className={`p-4 rounded-2xl border shadow-2xs cursor-pointer transition-all ${
+            totalPendingCount > 0
+              ? "bg-amber-50/90 border-amber-300 hover:bg-amber-100/80"
+              : "bg-[#FBF8F0] border-[#E4DDCA] hover:bg-[#EDE8D8]/30"
+          }`}
+        >
+          <div className="flex items-center justify-between text-xs font-bold text-[#77735F]">
+            <span>PENDING APPROVALS</span>
+            <span className="text-base">📥</span>
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className={`text-2xl font-black ${totalPendingCount > 0 ? "text-amber-900" : "text-[#24251C]"}`}>
+              {totalPendingCount}
+            </span>
+            {totalPendingCount > 0 ? (
+              <span className="text-xs font-bold text-amber-900 bg-amber-200/80 px-2 py-0.5 rounded-full animate-pulse border border-amber-300">
+                Action Needed
+              </span>
+            ) : (
+              <span className="text-xs font-semibold text-stone-500">All Clear</span>
+            )}
+          </div>
+          <p className="text-[11px] text-[#77735F] mt-1">
+            {pendingUnlockRequests.length} edit unlock{pendingUnlockRequests.length === 1 ? "" : "s"} • {pendingSubjectRequests.length} subject request{pendingSubjectRequests.length === 1 ? "" : "s"}
+          </p>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-[#FBF8F0] border border-[#E4DDCA] shadow-2xs">
+          <div className="flex items-center justify-between text-xs font-bold text-[#77735F]">
+            <span>COURSE ALLOCATIONS</span>
+            <span className="text-base">📚</span>
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-black text-[#24251C]">{mappings.length}</span>
+            <span className="text-xs font-semibold text-[#77735F]">Active mappings</span>
+          </div>
+          <p className="text-[11px] text-[#77735F] mt-1">Across {DEPARTMENTS.length} academic departments</p>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-[#FBF8F0] border border-[#E4DDCA] shadow-2xs">
+          <div className="flex items-center justify-between text-xs font-bold text-[#77735F]">
+            <span>SESSIONS CONDUCTED</span>
+            <span className="text-base">⏱️</span>
+          </div>
+          <div className="mt-2 flex items-baseline gap-2">
+            <span className="text-2xl font-black text-[#24251C]">{totalSessionCount}</span>
+            <span className="text-xs font-semibold text-emerald-700">Verified logs</span>
+          </div>
+          <p className="text-[11px] text-[#77735F] mt-1">Total recorded classroom roll calls</p>
+        </div>
+      </div>
+
       {/* Tab Navigation */}
       <div className="flex items-center gap-2 border-b border-[#E4DDCA] pb-3 flex-wrap">
         <button
@@ -439,7 +553,7 @@ export function FacultyView() {
               : "text-[#77735F] hover:bg-[#EDE8D8]/50"
           }`}
         >
-          Faculty Directory ({teachers.length})
+          👨‍🏫 Faculty Directory ({teachers.length})
         </button>
 
         <button
@@ -450,10 +564,10 @@ export function FacultyView() {
               : "text-[#77735F] hover:bg-[#EDE8D8]/50"
           }`}
         >
-          Approvals & Permissions ({requests.length})
-          {pendingRequestsCount > 0 && (
-            <span className="ml-1.5 px-1.5 py-0.2 bg-amber-500 text-white rounded-full text-[10px]">
-              {pendingRequestsCount}
+          📥 Approvals & Action Items ({totalPendingCount})
+          {totalPendingCount > 0 && (
+            <span className="ml-1.5 px-1.5 py-0.2 bg-amber-500 text-white rounded-full text-[10px] animate-pulse">
+              {totalPendingCount}
             </span>
           )}
         </button>
@@ -466,7 +580,7 @@ export function FacultyView() {
               : "text-[#77735F] hover:bg-[#EDE8D8]/50"
           }`}
         >
-          Curriculum Allocations ({mappings.length})
+          📚 Subject Allocations ({mappings.length})
         </button>
 
         <button
@@ -477,27 +591,27 @@ export function FacultyView() {
               : "text-[#77735F] hover:bg-[#EDE8D8]/50"
           }`}
         >
-          Departments
+          🏛️ Departments ({DEPARTMENTS.length})
         </button>
       </div>
 
-      {/* TAB 1: TEACHERS DIRECTORY (Admin Can Change Name) */}
+      {/* TAB 1: TEACHERS DIRECTORY (With Pending Request Badges and Integrated Action) */}
       {activeTab === "TEACHERS" && (
         <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
-          <div className="p-4 border-b border-[#E4DDCA] flex items-center justify-between bg-[#EDE8D8]/20">
+          <div className="p-4 border-b border-[#E4DDCA] flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-[#EDE8D8]/20">
             <div>
               <h2 className="text-sm font-bold text-[#24251C]">Institutional Faculty Members</h2>
               <p className="text-xs text-[#77735F]">
                 {isAdmin
-                  ? "As Administrator, you can update official teacher names and manage assignments."
+                  ? "View faculty details, pending requests, proctored students, or toggle active status."
                   : "Institutional faculty roster."}
               </p>
             </div>
             <button
               onClick={() => void loadData()}
-              className="text-xs font-bold text-[#6C5119] hover:underline cursor-pointer"
+              className="text-xs font-bold text-[#6C5119] hover:underline cursor-pointer self-start sm:self-auto"
             >
-              Refresh Directory
+              🔄 Refresh Directory
             </button>
           </div>
 
@@ -506,9 +620,9 @@ export function FacultyView() {
               <thead>
                 <tr className="border-b border-[#E4DDCA] bg-[#EDE8D8]/40 text-[#77735F] font-semibold text-[11px] uppercase tracking-wider">
                   <th className="py-3 px-4">Faculty Member</th>
-                  <th className="py-3 px-4">User ID</th>
-                  <th className="py-3 px-4">Email</th>
+                  <th className="py-3 px-4">User ID & Contact</th>
                   <th className="py-3 px-4">Assigned Subjects</th>
+                  <th className="py-3 px-4 text-center">Requests</th>
                   <th className="py-3 px-4 text-center">Status</th>
                   <th className="py-3 px-4 text-center">Sessions</th>
                   <th className="py-3 px-4 text-right">Actions</th>
@@ -529,89 +643,131 @@ export function FacultyView() {
                     </td>
                   </tr>
                 ) : (
-                  teachers.map((t) => (
-                    <tr key={t.user_id} className="hover:bg-[#EDE8D8]/20 transition-colors">
-                      <td className="py-3 px-4 font-bold text-[#24251C]">
-                        <div className="flex items-center space-x-2">
-                          <div className="w-7 h-7 rounded-lg bg-[#3F451F] text-[#EDE8D8] flex items-center justify-center font-bold text-xs uppercase">
-                            {t.name ? t.name.charAt(0) : t.user_id.charAt(0)}
-                          </div>
-                          <span>{t.name || t.user_id}</span>
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 font-mono text-xs text-[#77735F]">{t.user_id}</td>
-                      <td className="py-3 px-4 text-xs text-[#77735F]">{t.email || "—"}</td>
-                      <td className="py-3 px-4">
-                        <div className="flex flex-wrap gap-1">
-                          {t.subject_codes && t.subject_codes.length > 0 ? (
-                            t.subject_codes.map((sc) => (
-                              <span
-                                key={sc}
-                                className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]"
-                              >
-                                {sc}
+                  teachers.map((t) => {
+                    const teacherUnlocks = unlockRequests.filter(
+                      (u) => (u.teacher_id === t.user_id || u.teacher_name === t.name) && u.status === "PENDING"
+                    );
+                    const teacherSubjectsReq = requests.filter(
+                      (r) => r.user_id === t.user_id && r.status === "PENDING"
+                    );
+                    const pendingForThisTeacher = teacherUnlocks.length + teacherSubjectsReq.length;
+
+                    return (
+                      <tr key={t.user_id} className="hover:bg-[#EDE8D8]/20 transition-colors">
+                        <td className="py-3 px-4 font-bold text-[#24251C]">
+                          <div className="flex items-center space-x-2.5">
+                            <div className="w-8 h-8 rounded-lg bg-[#3F451F] text-[#EDE8D8] flex items-center justify-center font-bold text-xs uppercase shrink-0">
+                              {t.name ? t.name.charAt(0) : t.user_id.charAt(0)}
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span>{t.name || t.user_id}</span>
+                                {pendingForThisTeacher > 0 && (
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-black bg-amber-100 text-amber-900 border border-amber-300 animate-pulse">
+                                    {pendingForThisTeacher} Pending
+                                  </span>
+                                )}
+                              </div>
+                              <span className="text-[11px] text-[#77735F] font-normal block">
+                                {t.designation || "Faculty"} • {t.branch || "General"}
                               </span>
-                            ))
-                          ) : (
-                            <span className="text-xs text-[#77735F] italic">No subjects</span>
-                          )}
-                        </div>
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        {isAdmin ? (
-                          <button
-                            type="button"
-                            disabled={togglingActiveId === t.user_id}
-                            onClick={() => handleToggleActive(t)}
-                            title="Click to toggle teacher active/inactive status"
-                            className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50 ${
-                              Boolean(t.is_active)
-                                ? "bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200"
-                                : "bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200"
-                            }`}
-                          >
-                            {togglingActiveId === t.user_id ? "..." : Boolean(t.is_active) ? "● Active" : "○ Inactive"}
-                          </button>
-                        ) : (
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                              Boolean(t.is_active)
-                                ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
-                                : "bg-rose-50 text-rose-700 border border-rose-200"
-                            }`}
-                          >
-                            {Boolean(t.is_active) ? "Active" : "Inactive"}
-                          </span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-center font-semibold text-xs">
-                        {t.session_count}
-                      </td>
-                      <td className="py-3 px-4 text-right">
-                        <div className="flex items-center justify-end gap-1.5">
-                          <button
-                            onClick={() => setViewingProfileTeacher(t)}
-                            className="px-2.5 py-1.5 rounded-xl bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] text-xs font-bold transition-colors cursor-pointer"
-                            title="View complete faculty profile and contact details"
-                          >
-                            Details
-                          </button>
-                          {isAdmin && (
+                            </div>
+                          </div>
+                        </td>
+                        <td className="py-3 px-4">
+                          <p className="font-mono text-xs font-semibold text-[#24251C]">{t.user_id}</p>
+                          <p className="text-xs text-[#77735F]">{t.email || "—"}</p>
+                          {t.mobile && <p className="text-[10px] text-[#77735F]">{t.mobile}</p>}
+                        </td>
+                        <td className="py-3 px-4">
+                          <div className="flex flex-wrap gap-1">
+                            {t.subject_codes && t.subject_codes.length > 0 ? (
+                              t.subject_codes.map((sc) => (
+                                <span
+                                  key={sc}
+                                  className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]"
+                                >
+                                  {sc}
+                                </span>
+                              ))
+                            ) : (
+                              <span className="text-xs text-[#77735F] italic">No subjects</span>
+                            )}
+                          </div>
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          {pendingForThisTeacher > 0 ? (
                             <button
-                              onClick={() => {
-                                setEditNameTarget(t);
-                                setNewNameInput(t.name || "");
-                                setNameModalError(null);
-                              }}
-                              className="px-2.5 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#6C5119] hover:bg-[#EDE8D8]/50 shadow-2xs transition-colors cursor-pointer"
+                              onClick={() => setViewingProfileTeacher(t)}
+                              className="px-2 py-1 rounded-full text-[10px] font-bold bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-200 transition-colors cursor-pointer"
+                              title="Click to review pending requests for this teacher"
                             >
-                              Edit Name
+                              ⏳ {pendingForThisTeacher} Action Needed
                             </button>
+                          ) : (
+                            <span className="text-xs text-stone-400 font-medium">None</span>
                           )}
-                        </div>
-                      </td>
-                    </tr>
-                  ))
+                        </td>
+                        <td className="py-3 px-4 text-center">
+                          {isAdmin ? (
+                            <button
+                              type="button"
+                              disabled={togglingActiveId === t.user_id}
+                              onClick={() => handleToggleActive(t)}
+                              title="Click to toggle teacher active/inactive status"
+                              className={`px-2.5 py-1 rounded-full text-[10px] font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50 ${
+                                Boolean(t.is_active)
+                                  ? "bg-emerald-100 text-emerald-800 border border-emerald-300 hover:bg-emerald-200"
+                                  : "bg-rose-100 text-rose-800 border border-rose-300 hover:bg-rose-200"
+                              }`}
+                            >
+                              {togglingActiveId === t.user_id ? "..." : Boolean(t.is_active) ? "● Active" : "○ Inactive"}
+                            </button>
+                          ) : (
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                Boolean(t.is_active)
+                                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200"
+                                  : "bg-rose-50 text-rose-700 border border-rose-200"
+                              }`}
+                            >
+                              {Boolean(t.is_active) ? "Active" : "Inactive"}
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-center font-semibold text-xs">
+                          {t.session_count || 0}
+                        </td>
+                        <td className="py-3 px-4 text-right">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <button
+                              onClick={() => setViewingProfileTeacher(t)}
+                              className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-colors cursor-pointer ${
+                                pendingForThisTeacher > 0
+                                  ? "bg-amber-600 text-white hover:bg-amber-700 shadow-xs"
+                                  : "bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA]"
+                              }`}
+                              title="View complete faculty profile, contact, proctored students, and review pending approvals"
+                            >
+                              {pendingForThisTeacher > 0 ? "Review & Details" : "Details"}
+                            </button>
+                            {isAdmin && (
+                              <button
+                                onClick={() => {
+                                  setEditNameTarget(t);
+                                  setNewNameInput(t.name || "");
+                                  setNameModalError(null);
+                                }}
+                                className="px-2.5 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#6C5119] hover:bg-[#EDE8D8]/50 shadow-2xs transition-colors cursor-pointer"
+                              >
+                                Edit Name
+                              </button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -619,16 +775,16 @@ export function FacultyView() {
         </div>
       )}
 
-      {/* TAB 2: APPROVALS & PERMISSIONS (Teacher Requests & Admin Approval) */}
+      {/* TAB 2: UNIFIED APPROVALS & ACTION ITEMS INBOX */}
       {activeTab === "APPROVALS" && (
         <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden space-y-4 p-5">
-          <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-[#E4DDCA]">
             <div>
-              <h2 className="text-base font-bold text-[#24251C]">Teacher Permission & Approval Requests</h2>
+              <h2 className="text-base font-bold text-[#24251C]">Unified Approvals & Permissions Hub</h2>
               <p className="text-xs text-[#77735F]">
                 {isAdmin
-                  ? "Teachers must seek approval from Admin for new subjects or permissions. Approving automatically assigns the subject."
-                  : "Your submitted permission requests and their review status."}
+                  ? "Review 24-hour attendance edit unlock requests and subject allocation permissions in one unified inbox."
+                  : "Your submitted attendance unlock and permission requests."}
               </p>
             </div>
             {!isAdmin && (
@@ -641,83 +797,256 @@ export function FacultyView() {
             )}
           </div>
 
-          {requests.length === 0 ? (
-            <div className="py-12 text-center text-[#77735F]">
-              <p className="font-bold text-[#24251C]">No Permission Requests Found</p>
-              <p className="text-xs mt-1">
-                {isAdmin
-                  ? "When a faculty member requests permission or a subject, it will appear here for your approval."
-                  : "Click 'New Request' above to request permission or a subject allocation from the administrator."}
-              </p>
-            </div>
-          ) : (
+          {/* Sub-Filters for Approvals */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={() => setApprovalFilter("ALL")}
+              className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                approvalFilter === "ALL"
+                  ? "bg-[#3F451F] text-[#FBF8F0]"
+                  : "bg-white border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8]/40"
+              }`}
+            >
+              All Action Items ({totalPendingCount})
+            </button>
+            <button
+              onClick={() => setApprovalFilter("UNLOCKS")}
+              className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                approvalFilter === "UNLOCKS"
+                  ? "bg-[#3F451F] text-[#FBF8F0]"
+                  : "bg-white border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8]/40"
+              }`}
+            >
+              Attendance 24h Unlocks ({pendingUnlockRequests.length})
+            </button>
+            <button
+              onClick={() => setApprovalFilter("SUBJECTS")}
+              className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                approvalFilter === "SUBJECTS"
+                  ? "bg-[#3F451F] text-[#FBF8F0]"
+                  : "bg-white border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8]/40"
+              }`}
+            >
+              Subject Allocations ({pendingSubjectRequests.length})
+            </button>
+            <button
+              onClick={() => setApprovalFilter("RESOLVED")}
+              className={`px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                approvalFilter === "RESOLVED"
+                  ? "bg-[#3F451F] text-[#FBF8F0]"
+                  : "bg-white border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8]/40"
+              }`}
+            >
+              Resolved History ({requests.length + unlockRequests.length - totalPendingCount})
+            </button>
+          </div>
+
+          {/* Display Attendance Unlock Requests */}
+          {(approvalFilter === "ALL" || approvalFilter === "UNLOCKS" || approvalFilter === "RESOLVED") && (
             <div className="space-y-3">
-              {requests.map((req) => {
-                const isPending = req.status === "PENDING";
-                const isApproved = req.status === "APPROVED";
+              {approvalFilter !== "ALL" && (
+                <h3 className="text-xs font-black uppercase tracking-wider text-[#6C5119]">
+                  Attendance Edit Window (24h Lock) Requests
+                </h3>
+              )}
+              {unlockRequests
+                .filter((u) => (approvalFilter === "RESOLVED" ? u.status !== "PENDING" : u.status === "PENDING"))
+                .map((req) => {
+                  const isPending = req.status === "PENDING";
+                  const isApproved = req.status === "APPROVED";
+                  const matchingTeacher = teachers.find(
+                    (t) => t.user_id === req.teacher_id || t.name === req.teacher_name
+                  );
 
-                return (
-                  <div
-                    key={req.request_id}
-                    className="p-4 rounded-xl bg-white border border-[#E4DDCA] flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs"
-                  >
-                    <div className="space-y-1">
-                      <div className="flex items-center space-x-2">
-                        <span className="font-mono text-xs font-bold text-[#77735F]">
-                          {req.request_id}
-                        </span>
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
-                            isPending
-                              ? "bg-amber-100 text-amber-900 border border-amber-300"
-                              : isApproved
-                              ? "bg-emerald-100 text-emerald-900 border border-emerald-300"
-                              : "bg-rose-100 text-rose-900 border border-rose-300"
-                          }`}
-                        >
-                          {req.status}
-                        </span>
-                        {req.subject_code && (
-                          <span className="px-2 py-0.5 rounded text-xs font-bold bg-[#EDE8D8] text-[#6C5119]">
-                            Subject: {req.subject_code}
+                  return (
+                    <div
+                      key={req.request_id}
+                      className="p-4 rounded-xl bg-white border border-[#E4DDCA] flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs hover:border-[#6C5119]/40 transition-colors"
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center space-x-2 flex-wrap">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider bg-purple-100 text-purple-900 border border-purple-300">
+                            Attendance Unlock
                           </span>
-                        )}
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
+                              isPending
+                                ? "bg-amber-100 text-amber-900 border border-amber-300"
+                                : isApproved
+                                ? "bg-emerald-100 text-emerald-900 border border-emerald-300"
+                                : "bg-rose-100 text-rose-900 border border-rose-300"
+                            }`}
+                          >
+                            {req.status}
+                          </span>
+                          {req.subject_code && (
+                            <span className="px-2 py-0.5 rounded text-xs font-bold bg-[#EDE8D8] text-[#6C5119]">
+                              Subject: {req.subject_code}
+                            </span>
+                          )}
+                          <span className="text-xs text-[#77735F] font-mono">Session ID: {req.session_id}</span>
+                        </div>
+
+                        <p className="text-xs font-semibold text-[#24251C]">
+                          Faculty:{" "}
+                          <span className="font-bold text-[#6C5119]">
+                            {req.teacher_name || req.teacher_id}
+                          </span>{" "}
+                          <span className="text-[#77735F]">({req.teacher_id})</span>
+                          {matchingTeacher && (
+                            <button
+                              onClick={() => setViewingProfileTeacher(matchingTeacher)}
+                              className="ml-2 text-[11px] text-[#6C5119] underline font-bold cursor-pointer"
+                            >
+                              [View Teacher Profile]
+                            </button>
+                          )}
+                        </p>
+
+                        <div className="p-2.5 rounded-lg bg-[#FBF8F0] border border-[#E4DDCA] text-xs">
+                          <span className="font-bold text-[#24251C]">Teacher's Justification: </span>
+                          <span className="italic font-medium text-[#6C5119]">"{req.reason}"</span>
+                        </div>
+
+                        <div className="flex items-center gap-3 text-[10px] text-[#77735F]">
+                          <span>Requested: {new Date(req.created_at).toLocaleString()}</span>
+                          {req.reviewed_at && <span>Reviewed: {new Date(req.reviewed_at).toLocaleString()}</span>}
+                          {req.expires_at && (
+                            <span className="text-emerald-700 font-bold">
+                              Unlocked Until: {new Date(req.expires_at).toLocaleString()}
+                            </span>
+                          )}
+                        </div>
                       </div>
 
-                      <p className="text-xs font-semibold text-[#24251C]">
-                        Faculty: <span className="font-bold">{req.teacher_name || req.user_id}</span>{" "}
-                        <span className="text-[#77735F]">({req.user_id})</span>
-                      </p>
-
-                      <p className="text-xs text-[#77735F]">
-                        <span className="font-medium text-[#24251C]">Reason:</span> {req.reason}
-                      </p>
-
-                      <p className="text-[10px] text-[#77735F]">Submitted: {req.created_at}</p>
+                      {/* Admin Actions on Pending Attendance Unlock */}
+                      {isAdmin && isPending && (
+                        <div className="flex items-center gap-2 self-start md:self-auto shrink-0">
+                          <button
+                            disabled={reviewingUnlockId === req.request_id}
+                            onClick={() => void handleReviewUnlock(req.request_id, "APPROVED")}
+                            className="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+                          >
+                            ✓ Approve (24h Unlock)
+                          </button>
+                          <button
+                            disabled={reviewingUnlockId === req.request_id}
+                            onClick={() => void handleReviewUnlock(req.request_id, "REJECTED")}
+                            className="px-3 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+                          >
+                            ✕ Decline
+                          </button>
+                        </div>
+                      )}
                     </div>
+                  );
+                })}
+            </div>
+          )}
 
-                    {/* Actions for Admin on Pending Requests */}
-                    {isAdmin && isPending && (
-                      <div className="flex items-center gap-2 self-start md:self-auto shrink-0">
-                        <button
-                          disabled={reviewingId === req.request_id}
-                          onClick={() => void handleReviewRequest(req.request_id, "APPROVE")}
-                          className="px-3 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
-                        >
-                          ✓ Approve
-                        </button>
-                        <button
-                          disabled={reviewingId === req.request_id}
-                          onClick={() => void handleReviewRequest(req.request_id, "REJECT")}
-                          className="px-3 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold transition-colors shadow-2xs cursor-pointer disabled:opacity-50"
-                        >
-                          ✕ Reject
-                        </button>
+          {/* Display Subject Allocation Permission Requests */}
+          {(approvalFilter === "ALL" || approvalFilter === "SUBJECTS" || approvalFilter === "RESOLVED") && (
+            <div className="space-y-3 pt-2">
+              {approvalFilter !== "ALL" && (
+                <h3 className="text-xs font-black uppercase tracking-wider text-[#6C5119]">
+                  Subject Curriculum Permission Requests
+                </h3>
+              )}
+              {requests
+                .filter((r) => (approvalFilter === "RESOLVED" ? r.status !== "PENDING" : r.status === "PENDING"))
+                .map((req) => {
+                  const isPending = req.status === "PENDING";
+                  const isApproved = req.status === "APPROVED";
+                  const matchingTeacher = teachers.find(
+                    (t) => t.user_id === req.user_id || t.name === req.teacher_name
+                  );
+
+                  return (
+                    <div
+                      key={req.request_id}
+                      className="p-4 rounded-xl bg-white border border-[#E4DDCA] flex flex-col md:flex-row md:items-center justify-between gap-4 shadow-2xs hover:border-[#6C5119]/40 transition-colors"
+                    >
+                      <div className="space-y-1.5">
+                        <div className="flex items-center space-x-2 flex-wrap">
+                          <span className="px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider bg-blue-100 text-blue-900 border border-blue-300">
+                            Subject Allocation
+                          </span>
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-black uppercase tracking-wider ${
+                              isPending
+                                ? "bg-amber-100 text-amber-900 border border-amber-300"
+                                : isApproved
+                                ? "bg-emerald-100 text-emerald-900 border border-emerald-300"
+                                : "bg-rose-100 text-rose-900 border border-rose-300"
+                            }`}
+                          >
+                            {req.status}
+                          </span>
+                          {req.subject_code && (
+                            <span className="px-2 py-0.5 rounded text-xs font-bold bg-[#EDE8D8] text-[#6C5119]">
+                              Subject: {req.subject_code}
+                            </span>
+                          )}
+                          <span className="font-mono text-xs text-[#77735F]">{req.request_id}</span>
+                        </div>
+
+                        <p className="text-xs font-semibold text-[#24251C]">
+                          Faculty:{" "}
+                          <span className="font-bold text-[#6C5119]">{req.teacher_name || req.user_id}</span>{" "}
+                          <span className="text-[#77735F]">({req.user_id})</span>
+                          {matchingTeacher && (
+                            <button
+                              onClick={() => setViewingProfileTeacher(matchingTeacher)}
+                              className="ml-2 text-[11px] text-[#6C5119] underline font-bold cursor-pointer"
+                            >
+                              [View Teacher Profile]
+                            </button>
+                          )}
+                        </p>
+
+                        <div className="p-2.5 rounded-lg bg-[#FBF8F0] border border-[#E4DDCA] text-xs">
+                          <span className="font-bold text-[#24251C]">Reason: </span>
+                          <span className="font-medium text-[#77735F]">{req.reason}</span>
+                        </div>
+
+                        <p className="text-[10px] text-[#77735F]">Submitted: {req.created_at}</p>
                       </div>
-                    )}
-                  </div>
-                );
-              })}
+
+                      {/* Actions for Admin on Pending Requests */}
+                      {isAdmin && isPending && (
+                        <div className="flex items-center gap-2 self-start md:self-auto shrink-0">
+                          <button
+                            disabled={reviewingId === req.request_id}
+                            onClick={() => void handleReviewRequest(req.request_id, "APPROVE")}
+                            className="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+                          >
+                            ✓ Approve & Assign
+                          </button>
+                          <button
+                            disabled={reviewingId === req.request_id}
+                            onClick={() => void handleReviewRequest(req.request_id, "REJECT")}
+                            className="px-3 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white text-xs font-bold transition-all shadow-2xs cursor-pointer disabled:opacity-50"
+                          >
+                            ✕ Reject
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+            </div>
+          )}
+
+          {/* Empty state when no requests matching filter */}
+          {totalPendingCount === 0 && approvalFilter !== "RESOLVED" && (
+            <div className="py-12 text-center text-[#77735F] space-y-2">
+              <span className="text-3xl">🎉</span>
+              <p className="font-bold text-[#24251C]">All Action Items Resolved</p>
+              <p className="text-xs">
+                {isAdmin
+                  ? "No pending attendance unlocks or subject permissions requiring review."
+                  : "All your requests have been reviewed."}
+              </p>
             </div>
           )}
         </div>
@@ -1172,6 +1501,168 @@ export function FacultyView() {
                 )}
               </div>
             </div>
+
+            {/* Active Requests & Approvals for this Teacher (Direct Action) */}
+            {isAdmin && (() => {
+              const teacherUnlocks = unlockRequests.filter(
+                (u) => u.teacher_id === viewingProfileTeacher.user_id || u.teacher_name === viewingProfileTeacher.name
+              );
+              const teacherSubjectReqs = requests.filter(
+                (r) => r.user_id === viewingProfileTeacher.user_id
+              );
+              const hasAny = teacherUnlocks.length > 0 || teacherSubjectReqs.length > 0;
+
+              return (
+                <div className="space-y-3 pt-3 border-t border-[#E4DDCA]">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="font-bold text-[#6C5119] uppercase text-[10px] tracking-wider">
+                      Pending Approvals & Edit Requests for {viewingProfileTeacher.name || viewingProfileTeacher.user_id}
+                    </span>
+                    <span className="text-[11px] font-semibold text-[#77735F]">
+                      {teacherUnlocks.filter((u) => u.status === "PENDING").length +
+                        teacherSubjectReqs.filter((r) => r.status === "PENDING").length}{" "}
+                      Pending
+                    </span>
+                  </div>
+
+                  {!hasAny ? (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-800 flex items-center gap-2">
+                      <span>✓</span>
+                      <span>No pending edit unlocks or permission requests for this faculty member.</span>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {/* Attendance Unlocks */}
+                      {teacherUnlocks.map((u) => {
+                        const isPending = u.status === "PENDING";
+                        return (
+                          <div
+                            key={u.request_id}
+                            className={`p-3 rounded-xl border text-xs space-y-2 ${
+                              isPending
+                                ? "bg-amber-50/90 border-amber-300"
+                                : u.status === "APPROVED"
+                                ? "bg-emerald-50 border-emerald-200"
+                                : "bg-stone-50 border-stone-200"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between flex-wrap gap-1">
+                              <span className="font-bold text-[#24251C]">
+                                🕒 Attendance 24h Edit Unlock • {u.subject_code || "Session"}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                                  isPending
+                                    ? "bg-amber-200 text-amber-900 border border-amber-300 animate-pulse"
+                                    : u.status === "APPROVED"
+                                    ? "bg-emerald-200 text-emerald-900"
+                                    : "bg-rose-200 text-rose-900"
+                                }`}
+                              >
+                                {u.status}
+                              </span>
+                            </div>
+
+                            <p className="text-xs text-[#24251C]">
+                              <span className="font-semibold">Reason / Justification:</span>{" "}
+                              <span className="italic font-medium text-[#6C5119]">"{u.reason}"</span>
+                            </p>
+
+                            <p className="text-[10px] text-[#77735F] font-mono">
+                              Session ID: {u.session_id} • Requested: {new Date(u.created_at).toLocaleString()}
+                            </p>
+
+                            {isPending && (
+                              <div className="flex items-center gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  disabled={reviewingUnlockId === u.request_id}
+                                  onClick={() => void handleReviewUnlock(u.request_id, "APPROVED")}
+                                  className="px-3 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                                >
+                                  ✓ Approve 24h Window
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={reviewingUnlockId === u.request_id}
+                                  onClick={() => void handleReviewUnlock(u.request_id, "REJECTED")}
+                                  className="px-3 py-1 bg-rose-700 hover:bg-rose-800 text-white rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                                >
+                                  ✕ Reject
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+
+                      {/* Subject Requests */}
+                      {teacherSubjectReqs.map((r) => {
+                        const isPending = r.status === "PENDING";
+                        return (
+                          <div
+                            key={r.request_id}
+                            className={`p-3 rounded-xl border text-xs space-y-2 ${
+                              isPending
+                                ? "bg-amber-50/90 border-amber-300"
+                                : r.status === "APPROVED"
+                                ? "bg-emerald-50 border-emerald-200"
+                                : "bg-stone-50 border-stone-200"
+                            }`}
+                          >
+                            <div className="flex items-center justify-between flex-wrap gap-1">
+                              <span className="font-bold text-[#24251C]">
+                                📚 Subject Permission • {r.subject_code}
+                              </span>
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-black uppercase ${
+                                  isPending
+                                    ? "bg-amber-200 text-amber-900 border border-amber-300 animate-pulse"
+                                    : r.status === "APPROVED"
+                                    ? "bg-emerald-200 text-emerald-900"
+                                    : "bg-rose-200 text-rose-900"
+                                }`}
+                              >
+                                {r.status}
+                              </span>
+                            </div>
+
+                            <p className="text-xs text-[#24251C]">
+                              <span className="font-semibold">Reason:</span> {r.reason}
+                            </p>
+
+                            <p className="text-[10px] text-[#77735F] font-mono">
+                              Request ID: {r.request_id} • Submitted: {r.created_at}
+                            </p>
+
+                            {isPending && (
+                              <div className="flex items-center gap-2 pt-1">
+                                <button
+                                  type="button"
+                                  disabled={reviewingId === r.request_id}
+                                  onClick={() => void handleReviewRequest(r.request_id, "APPROVE")}
+                                  className="px-3 py-1 bg-emerald-700 hover:bg-emerald-800 text-white rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                                >
+                                  ✓ Approve & Assign
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={reviewingId === r.request_id}
+                                  onClick={() => void handleReviewRequest(r.request_id, "REJECT")}
+                                  className="px-3 py-1 bg-rose-700 hover:bg-rose-800 text-white rounded-lg text-xs font-bold transition-all cursor-pointer disabled:opacity-50"
+                                >
+                                  ✕ Reject
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
             <div className="flex justify-end pt-3 border-t border-[#E4DDCA]">
               <button

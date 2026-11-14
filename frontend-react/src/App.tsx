@@ -95,8 +95,18 @@ export function App() {
           <Route
             path="/faculty"
             element={
-              <AppShell title="Faculty & Departments">
-                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Faculty & Department Management">
+              <AppShell title="Admin Command Center">
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
+                  <FacultyView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <AppShell title="Admin Command Center">
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
                   <FacultyView />
                 </ProtectedRoute>
               </AppShell>

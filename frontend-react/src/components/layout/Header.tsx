@@ -417,6 +417,21 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
                   ))
                 )}
               </div>
+
+              {isAdmin && (
+                <div className="p-2.5 bg-[#EDE8D8]/50 border-t border-[#E4DDCA] text-center">
+                  <button
+                    onClick={() => {
+                      setShowNotifications(false);
+                      navigate("/faculty");
+                    }}
+                    className="text-xs font-bold text-[#6C5119] hover:underline cursor-pointer inline-flex items-center gap-1"
+                  >
+                    <span>Open Admin Command Center</span>
+                    <span>→</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>
@@ -523,6 +538,21 @@ export function Header({ title = "Dashboard", onMenuToggle }: HeaderProps) {
                   <span>Sign Out</span>
                 </button>
               </div>
+
+              {isAdmin && (
+                <div className="p-2.5 bg-[#EDE8D8]/50 border-t border-[#E4DDCA] text-center">
+                  <button
+                    onClick={() => {
+                      setShowNotifications(false);
+                      navigate("/faculty");
+                    }}
+                    className="text-xs font-bold text-[#6C5119] hover:underline cursor-pointer inline-flex items-center gap-1"
+                  >
+                    <span>Open Admin Command Center</span>
+                    <span>→</span>
+                  </button>
+                </div>
+              )}
             </div>
           )}
         </div>

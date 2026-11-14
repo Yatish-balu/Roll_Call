@@ -177,7 +177,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       groups.push({
         label: "Administration",
         items: [
-          { name: "Faculty & Depts", href: "/faculty", icon: ICONS.building, badge: "Admin" },
+          { name: "Admin Command Center", href: "/faculty", icon: ICONS.building, badge: "Hub" },
           { name: "Rooms", href: "/rooms", icon: ICONS.room, badge: "Admin" },
           { name: "Audit Logs", href: "/audit", icon: ICONS.audit, badge: "Admin" },
         ],
