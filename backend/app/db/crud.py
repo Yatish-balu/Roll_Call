@@ -21,6 +21,8 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 
 from app.db.connection import DEFAULT_DB_PATH, get_connection
+from app.security.ai_input import validate_usn, validate_room_id
+import re
 from app.security.audit_chain import (
     DEFAULT_CHAIN_ID,
     compute_row_hash,
@@ -184,6 +186,7 @@ def insert_student(
     branch: str,
 ) -> Dict[str, Any]:
     """Insert a new student."""
+    validate_usn(usn)
     clean_usn = usn.strip()
     clean_name = name.strip()
     clean_branch = branch.strip()
@@ -214,10 +217,12 @@ def insert_students_bulk(
         target = target_or_students  # type: ignore[assignment]
         actual_students = students or []
 
-    records = [
-        {"usn": s["usn"].strip(), "name": s["name"].strip(), "branch": s["branch"].strip()}
-        for s in actual_students
-    ]
+    records = []
+    for s in actual_students:
+        validate_usn(s["usn"])
+        records.append(
+            {"usn": s["usn"].strip(), "name": s["name"].strip(), "branch": s["branch"].strip()}
+        )
 
     if isinstance(target, Session):
         if not records:
@@ -391,6 +396,7 @@ def insert_room(
     name: str,
 ) -> Dict[str, Any]:
     """Insert a new room."""
+    validate_room_id(room_id)
     clean_id = room_id.strip()
     clean_name = name.strip()
 
@@ -420,8 +426,10 @@ def insert_rooms_bulk(
         target = target_or_rooms  # type: ignore[assignment]
         actual_rooms = rooms or []
 
-    records = [{"room_id": r["room_id"].strip(), "name": r["name"].strip()} for r in actual_rooms]
-
+    records = []
+    for r in actual_rooms:
+        validate_room_id(r["room_id"])
+        records.append({"room_id": r["room_id"].strip(), "name": r["name"].strip()})
     if isinstance(target, Session):
         if not records:
             return 0
@@ -462,6 +470,78 @@ def get_room(
     with _get_conn(target) as conn:
         cursor = conn.execute(query, (clean_id,))
         return _row_to_dict(cursor.fetchone())
+
+
+def get_existing_student_usns(
+    target: Union[sqlite3.Connection, Session],
+    usns: Sequence[str],
+) -> Set[str]:
+    """Return the USNs that exist, using one query for the whole roster.
+
+    Validating a 45-student save one USN at a time cost 45 remote round trips.
+    """
+    clean = {str(u).strip().upper() for u in usns if str(u).strip()}
+    if not clean:
+        return set()
+    if isinstance(target, Session):
+        rows = target.scalars(select(Student.usn).where(Student.usn.in_(clean))).all()
+        return {str(r).strip().upper() for r in rows}
+    placeholders = ",".join("?" for _ in clean)
+    with _get_conn(target) as conn:
+        rows = conn.execute(
+            f"SELECT usn FROM students WHERE usn IN ({placeholders})", tuple(clean)  # nosec B608 - placeholders only contains '?'
+        ).fetchall()
+        return {str(r[0]).strip().upper() for r in rows}
+
+
+def ensure_unallocated_room(target: Union[sqlite3.Connection, Session, str]) -> None:
+    """Ensure the fallback UNALLOCATED room exists in the rooms table."""
+    try:
+        if isinstance(target, Session):
+            existing = target.scalar(select(Room.room_id).where(Room.room_id == "UNALLOCATED"))
+            if not existing:
+                fallback = Room(
+                    room_id="UNALLOCATED",
+                    name="Unallocated Classroom",
+                    dept_id="GEN",
+                    room_type="Classroom",
+                    capacity=200,
+                )
+                target.add(fallback)
+                target.commit()
+        else:
+            with _get_conn(target) as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT room_id FROM rooms WHERE room_id = 'UNALLOCATED'")
+                if not cur.fetchone():
+                    cur.execute(
+                        "INSERT INTO rooms (room_id, name, dept_id, room_type, capacity) VALUES (?, ?, ?, ?, ?)",
+                        ("UNALLOCATED", "Unallocated Classroom", "GEN", "Classroom", 200),
+                    )
+                    conn.commit()
+    except Exception as exc:
+        logger.warning("Could not ensure UNALLOCATED room: %s", exc)
+
+
+def get_existing_room_ids(
+    target: Union[sqlite3.Connection, Session],
+    room_ids: Sequence[str],
+) -> Set[str]:
+    """Return the room IDs that exist, using one query for the whole roster."""
+    clean = {str(r).strip() for r in room_ids if str(r).strip()}
+    if not clean:
+        return set()
+    if "UNALLOCATED" in clean:
+        ensure_unallocated_room(target)
+    if isinstance(target, Session):
+        rows = target.scalars(select(Room.room_id).where(Room.room_id.in_(clean))).all()
+        return {str(r).strip() for r in rows}
+    placeholders = ",".join("?" for _ in clean)
+    with _get_conn(target) as conn:
+        rows = conn.execute(
+            f"SELECT room_id FROM rooms WHERE room_id IN ({placeholders})", tuple(clean)  # nosec B608 - placeholders only contains '?'
+        ).fetchall()
+        return {str(r[0]).strip() for r in rows}
 
 
 def get_all_rooms(
@@ -1007,6 +1087,10 @@ def insert_attendance(
     recorded_at: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Insert or optionally upsert an attendance record."""
+    validate_usn(usn)
+    validate_room_id(room_id)
+    if room_id.strip() == "UNALLOCATED":
+        ensure_unallocated_room(target)
     clean_status = normalize_attendance_status(status)
     clean_allocation_id = allocation_id.strip() if allocation_id else None
     clean_attendance_id = attendance_id.strip() if attendance_id else str(uuid4())
@@ -1215,20 +1299,23 @@ def insert_attendance_bulk(
         target = target_or_records  # type: ignore[assignment]
         actual_records = records or []
 
-    formatted_records = [
-        {
-            "attendance_id": str(uuid4()),
-            "session_id": r["session_id"].strip(),
-            "allocation_id": (r.get("allocation_id") or None),
-            "usn": r["usn"].strip(),
-            "room_id": r["room_id"].strip(),
-            "status": normalize_attendance_status(r["status"]),
-            "source": r["source"].strip(),
-            "confidence": float(r.get("confidence", 1.0)),
-            "recorded_at": r.get("recorded_at") or _utcnow_iso(),
-        }
-        for r in actual_records
-    ]
+    formatted_records = []
+    for r in actual_records:
+        validate_usn(r["usn"])
+        validate_room_id(r["room_id"])
+        formatted_records.append(
+            {
+                "attendance_id": str(uuid4()),
+                "session_id": r["session_id"].strip(),
+                "allocation_id": (r.get("allocation_id") or None),
+                "usn": r["usn"].strip(),
+                "room_id": r["room_id"].strip(),
+                "status": normalize_attendance_status(r["status"]),
+                "source": r["source"].strip(),
+                "confidence": float(r.get("confidence", 1.0)),
+                "recorded_at": r.get("recorded_at") or _utcnow_iso(),
+            }
+        )
 
     if not formatted_records:
         return 0
@@ -1550,15 +1637,6 @@ def replace_session_attendance(
             "recorded_at": _utcnow_iso(),
         })
 
-    def _match_clause(rec: Dict[str, Any]):
-        if rec["allocation_id"]:
-            return (Attendance.allocation_id == rec["allocation_id"], Attendance.usn == rec["usn"])
-        return (
-            Attendance.session_id == clean_id,
-            Attendance.usn == rec["usn"],
-            Attendance.allocation_id.is_(None),
-        )
-
     if isinstance(target, Session):
         # Transaction safety: execute within nested transaction if one exists, or rely on caller session
         # Use a SAVEPOINT if in an outer transaction so partial failure rolls back cleanly
@@ -1567,9 +1645,27 @@ def replace_session_attendance(
             # UPDATE-first so an existing row keeps its surrogate attendance_id;
             # pending_edits.attendance_id is ON DELETE CASCADE and must survive a
             # re-upload of the same session roster.
+            #
+            # One SELECT for the whole session instead of one per record: the
+            # previous per-row lookup turned a 45-student save into ~90 remote
+            # round trips (34 s against Supabase), which left the UI spinning.
+            existing_rows = target.execute(
+                select(Attendance).where(Attendance.session_id == clean_id)
+            ).scalars().all()
+            by_key: Dict[tuple, Attendance] = {}
+            for row in existing_rows:
+                if row.allocation_id:
+                    by_key[("alloc", str(row.allocation_id), row.usn)] = row
+                else:
+                    by_key[("plain", row.usn)] = row
+
             kept_ids: Set[str] = set()
             for rec in validated_records:
-                existing = target.execute(select(Attendance).where(*_match_clause(rec))).scalars().first()
+                if rec["allocation_id"]:
+                    key = ("alloc", str(rec["allocation_id"]), rec["usn"])
+                else:
+                    key = ("plain", rec["usn"])
+                existing = by_key.get(key)
                 if existing is not None:
                     existing.room_id = rec["room_id"]
                     existing.status = rec["status"]
@@ -1582,10 +1678,11 @@ def replace_session_attendance(
                     kept_ids.add(rec["attendance_id"])
 
             # Only rows no longer present in the payload are removed.
-            stale_stmt = select(Attendance.attendance_id).where(Attendance.session_id == clean_id)
-            if kept_ids:
-                stale_stmt = stale_stmt.where(Attendance.attendance_id.notin_(kept_ids))
-            stale_ids = [row[0] for row in target.execute(stale_stmt).all()]
+            stale_ids = [
+                row.attendance_id
+                for row in existing_rows
+                if row.attendance_id not in kept_ids
+            ]
             if stale_ids:
                 blocked = target.scalars(
                     select(PendingEdit.usn)
@@ -2130,6 +2227,49 @@ def assign_teacher_subject(
             )
             new_id = cursor.lastrowid
     return {"id": new_id, "user_id": clean_uid, "subject_code": clean_code, "dept_id": clean_dept, "semester": semester}
+
+
+def remove_teacher_subject(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    *,
+    user_id: str,
+    subject_code: str,
+) -> bool:
+    """Remove a subject assignment for a teacher from faculty_subjects."""
+    from sqlalchemy import delete as sql_delete
+    clean_uid = user_id.strip()
+    clean_code = subject_code.strip().upper()
+
+    if isinstance(target, Session):
+        stmt = sql_delete(FacultySubject).where(
+            FacultySubject.user_id == clean_uid,
+            FacultySubject.subject_code == clean_code,
+        )
+        res = target.execute(stmt)
+        try:
+            target.execute(
+                sql_delete(TeacherSubject).where(
+                    TeacherSubject.user_id == clean_uid,
+                    TeacherSubject.subject_code == clean_code,
+                )
+            )
+        except Exception:
+            pass
+        return bool(res.rowcount and res.rowcount > 0)
+
+    deleted = False
+    with _get_conn(target) as conn:
+        try:
+            c1 = conn.execute("DELETE FROM faculty_subjects WHERE user_id = ? AND UPPER(subject_code) = ?", (clean_uid, clean_code))
+            deleted = bool(c1.rowcount and c1.rowcount > 0)
+        except Exception:
+            pass
+        try:
+            c2 = conn.execute("DELETE FROM teacher_subjects WHERE user_id = ? AND UPPER(subject_code) = ?", (clean_uid, clean_code))
+            deleted = deleted or bool(c2.rowcount and c2.rowcount > 0)
+        except Exception:
+            pass
+    return deleted
 
 
 def get_teacher_subjects(

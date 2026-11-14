@@ -1,6 +1,6 @@
 "use client";
 
-import React from "react";
+import React, { useEffect } from "react";
 import { fetchDashboardData, type DashboardData } from "@/services/api/dashboard";
 import { TopStats } from "./components/TopStats";
 import { TodaysClasses } from "./components/TodaysClasses";
@@ -33,6 +33,30 @@ export function DashboardView() {
     { staleTime: DASHBOARD_STALE_TIME }
   );
 
+  useEffect(() => {
+    const reload = () => {
+      void refresh();
+    };
+    window.addEventListener("rollcall-attendance-updated", reload);
+    window.addEventListener("rollcall:attendance-changed", reload);
+    return () => {
+      window.removeEventListener("rollcall-attendance-updated", reload);
+      window.removeEventListener("rollcall:attendance-changed", reload);
+    };
+  }, [refresh]);
+
+  // The dashboard's "today" panels must only count sessions dated today. The
+  // sessions endpoint returns the whole register, so filter it here instead of
+  // labelling every recorded session as happening today.
+  const today = todayIso();
+  const allSessions = data?.sessions?.items ?? [];
+  const todaysSessions = allSessions.filter(
+    (item) => (item.date || "").slice(0, 10) === today
+  );
+  const todaysSessionPage = data?.sessions
+    ? { ...data.sessions, items: todaysSessions, total: todaysSessions.length }
+    : null;
+
   return (
     <div className="space-y-6 max-w-7xl mx-auto">
       {/* Non-intrusive alert when API errors occur */}
@@ -55,7 +79,7 @@ export function DashboardView() {
 
       {/* Row 1: Today's Attendance & Overall Attendance Stat Cards */}
       <TopStats
-        sessions={data?.sessions ?? null}
+        sessions={todaysSessionPage}
         overallReport={data?.overallAnalytics ?? null}
         todayReport={data?.todayAnalytics ?? null}
         isLoading={isLoading}
@@ -65,7 +89,7 @@ export function DashboardView() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-7 xl:col-span-8">
           <TodaysClasses
-            sessions={data?.sessions?.items ?? []}
+            sessions={todaysSessions}
             isLoading={isLoading}
           />
         </div>
@@ -78,7 +102,7 @@ export function DashboardView() {
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
         <div className="lg:col-span-7 xl:col-span-7">
           <RecentSessionsTable
-            sessions={data?.sessions?.items ?? []}
+            sessions={allSessions}
             isLoading={isLoading}
           />
         </div>
@@ -98,7 +122,7 @@ export function DashboardView() {
 
       {/* Row 5: Faculty Session Generation & Upload Activity Table (N8 - F5) */}
       <FacultyUploadActivityTable
-        sessions={data?.sessions?.items ?? []}
+        sessions={allSessions}
         teacherMappings={data?.teacherMappings ?? null}
         isLoading={isLoading}
       />

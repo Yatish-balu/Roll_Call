@@ -380,6 +380,20 @@ def login(request: Request, payload: LoginRequest):
             if user.role.upper() == "ADMIN":
                 configured_admin_key = os.getenv("ADMIN_KEY")
                 if not configured_admin_key or len(configured_admin_key.strip()) == 0:
+                    try:
+                        from dotenv import dotenv_values
+                        _here = Path(__file__).resolve()
+                        for _candidate in (_here.parents[3] / ".env", _here.parents[2] / ".env"):
+                            if _candidate.exists():
+                                _val = dotenv_values(_candidate).get("ADMIN_KEY")
+                                if _val and _val.strip():
+                                    configured_admin_key = _val.strip()
+                                    os.environ["ADMIN_KEY"] = configured_admin_key
+                                    break
+                    except Exception:
+                        pass
+
+                if not configured_admin_key or len(configured_admin_key.strip()) == 0:
                     logger.error("ADMIN login failed closed: ADMIN_KEY is not configured on the server.")
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
                     return generic_401

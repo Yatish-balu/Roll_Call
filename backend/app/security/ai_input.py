@@ -296,3 +296,55 @@ def screen_agent_input(text: str) -> None:
     if finding is not None:
         raise PromptInjectionError(finding.rule)
 
+
+# ---------------------------------------------------------------------------
+# Simple validators used by app/db/crud.py
+# ---------------------------------------------------------------------------
+
+_USN_SHAPE_RE = __import__("re").compile(r"^\d[A-Za-z]{2}\d{2}[A-Za-z]{2}\d{3}$")
+
+
+def validate_usn(usn: str) -> None:
+    """Validate a student USN. Raises ValueError if empty or missing.
+
+    Shape validation (pattern matching) is done at the API/schema layer, not
+    here, so that CRUD operations can proceed to the database for FK checks.
+    """
+    if not usn or not str(usn).strip():
+        raise ValueError("USN cannot be empty.")
+
+
+def validate_usn_shape(usn: str) -> None:
+    """Validate USN shape (e.g. 1MS21CS001). Raises ValueError if invalid."""
+    if not usn or not str(usn).strip():
+        raise ValueError("USN cannot be empty.")
+    clean = str(usn).strip().upper()
+    if not _USN_SHAPE_RE.match(clean):
+        raise ValueError(f"Invalid USN format: {usn}")
+
+
+def validate_room_id(room_id: str) -> None:
+    """Validate a room ID. Raises ValueError if invalid."""
+    if not room_id or not str(room_id).strip():
+        raise ValueError("Room ID cannot be empty.")
+    clean = str(room_id).strip()
+    if len(clean) > 50:
+        raise ValueError(f"Room ID too long: {room_id}")
+
+
+__all__ = [
+    "MAX_INSPECT_CHARS",
+    "MAX_AGENT_INPUT_CHARS",
+    "MAX_REPORT_CHARS",
+    "InjectionFinding",
+    "find_prompt_injection",
+    "contains_prompt_injection",
+    "safe_excerpt",
+    "PromptInjectionError",
+    "detect_injection",
+    "screen_agent_input",
+    "validate_usn",
+    "validate_room_id",
+]
+
+

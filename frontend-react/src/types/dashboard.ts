@@ -58,6 +58,7 @@ export interface VerifiedSummaryReport {
 
 export interface VerifiedAgentResponse {
   request_id: string;
+  session_id?: string;
   message: string;
   success: boolean;
   needs_confirmation: boolean;

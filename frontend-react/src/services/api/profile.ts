@@ -158,14 +158,14 @@ export async function loadFacultyProfile(userId: string): Promise<ProfileLoadRes
   const local = readLocalProfile(userId);
 
   if (serverProfile) {
-    const merged = { ...EMPTY_PROFILE, ...local, ...serverProfile };
+    const merged: FacultyProfile = { ...EMPTY_PROFILE, ...local, ...serverProfile };
     // Keep the device mirror in sync with the authoritative server copy.
     writeLocalProfile(userId, merged);
     return {
       authoritative,
       profile: merged,
       storage: "server",
-      notice,
+      notice: null, // Clear notice on successful server response
     };
   }
 
@@ -235,10 +235,10 @@ export async function saveFacultyProfile(
     }
     serverProfileSupported = false;
     writeLocalProfile(userId, profile);
+    const detail = err instanceof Error ? err.message : "Backend unreachable";
     return {
       storage: "device",
-      message:
-        "Profile saved on this device. The backend could not be reached, so the changes were not confirmed on the server.",
+      message: `Profile saved locally on this device (${detail}). Start your backend server to sync to database.`,
     };
   }
 }

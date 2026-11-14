@@ -102,12 +102,20 @@ export class ApiClient {
             : status === 403
             ? "FORBIDDEN"
             : "HTTP_ERROR");
-        const message =
-          data?.detail ||
-          data?.message ||
-          (status === 403
+        const rawDetail = data?.detail || data?.message;
+        let message: string;
+        if (typeof rawDetail === "object" && rawDetail !== null) {
+          const anyDetail = rawDetail as Record<string, unknown>;
+          message = (anyDetail.message as string) ||
+            ((anyDetail.error as Record<string, unknown>)?.message as string) ||
+            (Array.isArray(rawDetail) ? rawDetail.map((m: Record<string, unknown>) => (m.msg as string) || JSON.stringify(m)).join("; ") : JSON.stringify(rawDetail));
+        } else if (typeof rawDetail === "string" && rawDetail.trim()) {
+          message = rawDetail;
+        } else {
+          message = status === 403
             ? "Access Denied: You do not have permission to perform this action."
-            : error.message || "An unexpected error occurred.");
+            : error.message || "An unexpected error occurred.";
+        }
 
         return Promise.reject(new ApiError(status, code, message, data));
       }

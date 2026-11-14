@@ -66,7 +66,7 @@ def seed_database() -> None:
         Semester,
         Student,
         Subject,
-        TeacherSubject,
+        FacultySubject,
         Timetable,
         TimetableEntry,
         User,
@@ -99,8 +99,8 @@ def seed_database() -> None:
             ],
         )
         connection.execute(
-            TeacherSubject.__table__.insert(),
-            [{"user_id": "faculty_it", "subject_code": "NET-SEC"}],
+            FacultySubject.__table__.insert(),
+            [{"user_id": "faculty_it", "subject_code": "NET-SEC", "dept_id": "CSE"}],
         )
         connection.execute(
             College.__table__.insert(),

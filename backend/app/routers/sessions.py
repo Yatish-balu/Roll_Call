@@ -17,6 +17,7 @@ from app.auth import Role, get_current_user, require_roles
 from app.auth.session_scope import resolve_session_scope
 from app.db import crud
 from app.dependencies import get_db
+from app.policy import editable_until, is_editable
 from app.schemas.auth import AuthenticatedUser
 from app.services.session_initialization import (
     initialize_sessions_for_date,
@@ -32,6 +33,16 @@ from app.schemas.session import (
 logger = logging.getLogger("rollcall.routers.sessions")
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
+
+
+def _attach_lock_fields(
+    payload: Dict[str, Any], caller_role: str, now_iso: str
+) -> None:
+    """Attach ``editable``, ``editable_until_utc`` and ``locked`` to a session dict."""
+    created_at = payload.get("created_at")
+    payload["editable"] = is_editable(created_at, caller_role, now_iso)
+    payload["editable_until_utc"] = editable_until(created_at)
+    payload["locked"] = not payload["editable"]
 
 
 @router.get(
@@ -221,6 +232,9 @@ def get_session_by_id(
         )
     scope = resolve_session_scope(db, current_user)
     scope.assert_allowed(session)
+    now_iso = datetime.now(timezone.utc).isoformat()
+    caller_role = str(current_user.role.value if hasattr(current_user.role, "value") else current_user.role).upper()
+    _attach_lock_fields(session, caller_role, now_iso)
     return session
 
 
@@ -317,6 +331,8 @@ def create_session(
             actor_role=getattr(current_user.role, "value", str(current_user.role)),
         )
         db.commit()
+        caller_role = str(current_user.role.value if hasattr(current_user.role, "value") else current_user.role).upper()
+        _attach_lock_fields(created, caller_role, now_iso)
         return created
     except HTTPException:
         db.rollback()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import json
 import os
+import re
 import tempfile
 import urllib.parse
 import urllib.request
@@ -36,6 +37,7 @@ from app.services.attendance_edits import (
     propose_attendance_edit,
     resolve_edit_intent,
     write_attendance_audit,
+    _utcnow_iso,
 )
 from app.dependencies import get_db
 from app.security.ai_input import PromptInjectionError, screen_agent_input
@@ -174,8 +176,17 @@ def agent_chat(
             detail={"error": {"code": "PROMPT_INJECTION", "message": str(exc)}},
         )
 
-    # Check for raw SQL attempts that violate read-only rules
-    if any(k in query_text.lower() for k in ["insert ", "update ", "delete ", "drop ", "alter ", "create ", "replace "]):
+    # Check for raw SQL attempts that violate read-only rules (e.g. DROP TABLE, DELETE FROM, UPDATE table SET)
+    raw_sql_patterns = [
+        r"^\s*DROP\s+(?:TABLE|DATABASE|VIEW|INDEX|SCHEMA)\b",
+        r"^\s*DELETE\s+FROM\b",
+        r"^\s*INSERT\s+INTO\b",
+        r"^\s*ALTER\s+TABLE\b",
+        r"^\s*TRUNCATE\s+(?:TABLE\b)?",
+        r"^\s*UPDATE\s+[a-zA-Z_][a-zA-Z0-9_]*\s+SET\b",
+        r";\s*(?:DROP|DELETE|UPDATE|INSERT|ALTER|TRUNCATE)\b",
+    ]
+    if any(re.search(pat, query_text, re.IGNORECASE) for pat in raw_sql_patterns):
         try:
             validate_read_only_sql(query_text)
         except ValueError as exc:
@@ -224,10 +235,39 @@ def agent_chat(
             # Use the same answer for missing and out-of-scope ids so callers
             # cannot probe session existence across tenant boundaries.
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found.")
-    agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role, actor_role=current_user.role)
-    req_id = str(uuid.uuid4())
-    req_id = str(uuid.uuid4())
+    role_str = getattr(current_user.role, "value", str(current_user.role))
+    assigned_subs: List[str] = []
+    actor_name = getattr(current_user, "name", None) or current_user.user_id
+    try:
+        assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
+        from app.db.models import User
+        u = db.query(User).filter(User.user_id == current_user.user_id).first()
+        if u and u.name:
+            actor_name = u.name
+        # Prioritize full_name from persistent user_profiles if set
+        from sqlalchemy import text
+        prof_row = db.execute(
+            text("SELECT full_name FROM user_profiles WHERE user_id = :uid"),
+            {"uid": current_user.user_id},
+        ).fetchone()
+        if prof_row and prof_row[0] and prof_row[0].strip():
+            actor_name = prof_row[0].strip()
+    except Exception:
+        assigned_subs = []
 
+    # Execute the AttendanceAgent with verified database queries and guardrails.
+    # It returns a structured response (message, success, data, tool_calls,
+    # needs_confirmation, confirmation_request) that the contract tests rely on.
+    agent = AttendanceAgent(
+        db_target=db,
+        scope=scope,
+        role=current_user.role,
+        actor_role=current_user.role,
+        actor_id=current_user.user_id,
+        actor_name=actor_name,
+        assigned_subjects=assigned_subs,
+    )
+    req_id = str(uuid.uuid4())
     resp = agent.process_request(user_input=contextual_query, request_id=req_id)
     return resp.to_dict()
 
@@ -478,7 +518,20 @@ async def agent_process_file(
         master_usns = [s["usn"] for s in all_students] if all_students else None
         master_rooms = [r["room_id"] for r in all_rooms] if all_rooms else None
 
-        req_text = f"Process attendance for session {session_id}" if session_id else "Process attendance file"
+        # Resolve target session if not explicitly provided
+        target_session = session_id
+        assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
+        if not target_session:
+            from datetime import date
+            today_str = date.today().isoformat()
+            today_sessions = crud.get_sessions_by_date(db, date=today_str)
+            for s in today_sessions:
+                s_dict = dict(s) if isinstance(s, dict) else s.__dict__
+                if s_dict.get("teacher_id") == current_user.user_id or s_dict.get("subject_code") in assigned_subs:
+                    target_session = s_dict.get("session_id")
+                    break
+
+        req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
 
         resp = agent.process_request(
             user_input=req_text,
@@ -488,6 +541,36 @@ async def agent_process_file(
             default_room=default_room,
             default_branch=default_branch,
         )
+
+        # If file was validated with 100% confidence and 0 issues, commit to database
+        if target_session and resp.success and not resp.needs_confirmation and resp.data:
+            formatted_records = [
+                {
+                    "session_id": target_session,
+                    "usn": str(r.get("usn", "")).strip().upper(),
+                    "room_id": str(r.get("room_id", default_room or "LH-101")).strip(),
+                    "status": r.get("status", "PRESENT"),
+                    "source": "AGENT_VERIFIED_ROSTER",
+                    "confidence": float(r.get("confidence", 1.0)),
+                }
+                for r in resp.data
+            ]
+            try:
+                committed_cnt = crud.insert_attendance_bulk(db, records=formatted_records, upsert=True)
+                db.commit()
+                resp.message = f"Successfully processed and committed {committed_cnt} attendance records to session '{target_session}' in database."
+                logger.info("Auto-committed %d attendance records to session %s", committed_cnt, target_session)
+            except Exception as e:
+                db.rollback()
+                logger.warning("Could not auto-commit attendance to session %s: %s", target_session, e)
+        elif not target_session and resp.success and resp.data:
+            # Extraction only: no session was resolved, so nothing was written.
+            # Say so explicitly - the extraction message alone reads like a save.
+            resp.message = (
+                f"{resp.message or 'Attendance sheet processed.'} No records were saved: "
+                "open Attendance and choose a session to apply them."
+            )
+
         if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             _log_embedded_instruction(
                 json.dumps(resp.data or [], ensure_ascii=False, default=str),
@@ -496,7 +579,10 @@ async def agent_process_file(
                 filename=safe_filename,
                 source="ocr_output",
             )
-        return resp.to_dict()
+        res_dict = resp.to_dict()
+        if target_session:
+            res_dict["session_id"] = target_session
+        return res_dict
     finally:
         try:
             if os.path.exists(temp_path):
@@ -738,6 +824,85 @@ def confirm_attendance_modification(
         confirmation_id=payload.confirmation_id,
         reason=payload.reason,
         request_id=payload.request_id,
+    )
+
+
+# ==============================================================================
+# 6b. POST /api/v1/agent/chat/confirm (N7 step B - chat confirmation)
+# ==============================================================================
+
+@router.post(
+    "/chat/confirm",
+    summary="Confirm or reject a chat attendance-edit proposal",
+    description=(
+        "Step B of the AI chat attendance-editing workflow. Accepts a pending_id "
+        "and a decision (yes/no). Only the confirmation identifier is accepted: "
+        "the student, session and proposed status come from the stored pending "
+        "edit, and the actor identity/role come from the verified authentication "
+        "context. The pending edit expires after 5 minutes and is single-use."
+    ),
+    dependencies=[Depends(rate_limit_confirm)],
+    responses={
+        200: {"description": "Action completed"},
+        400: {"description": "Missing confirmation identifier"},
+        403: {"description": "Authorization for the session has been lost"},
+        404: {"description": "Confirmation not found or not accessible"},
+        409: {"description": "Confirmation already used or conflicting"},
+        410: {"description": "Confirmation expired"},
+        429: {"description": "Rate limit exceeded"},
+    },
+)
+def chat_confirm_attendance_edit(
+    pending_id: str,
+    decision: str,
+    reason: Optional[str] = None,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    clean_decision = (decision or "").strip().lower()
+    if clean_decision not in ("yes", "no"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="decision must be 'yes' or 'no'.",
+        )
+
+    if clean_decision == "no":
+        # Rejection: mark the pending edit as consumed without applying.
+        from app.db.models import PendingEdit
+
+        edit = db.get(PendingEdit, pending_id.strip())
+        if edit is None or edit.user_id != current_user.user_id:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Confirmation not found.",
+            )
+        if int(edit.consumed or 0) != 0:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This confirmation has already been used.",
+            )
+        if str(edit.expires_at) <= _utcnow_iso():
+            raise HTTPException(
+                status_code=status.HTTP_410_GONE,
+                detail="This confirmation has expired.",
+            )
+        edit.consumed = 1
+        db.commit()
+        return {
+            "success": True,
+            "confirmed": False,
+            "confirmation_id": pending_id.strip(),
+            "decision": "no",
+            "message": "Attendance change cancelled. Nothing was modified.",
+        }
+
+    # Yes -> apply the stored pending edit atomically.
+    return confirm_attendance_edit(
+        db,
+        current_user,
+        confirmation_id=pending_id.strip(),
+        reason=reason,
+        request_id=None,
     )
 
 

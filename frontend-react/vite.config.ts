@@ -29,6 +29,14 @@ export default defineConfig(({ mode }) => {
           target: apiTarget,
           changeOrigin: true,
         },
+        "/models": {
+          target: apiTarget,
+          changeOrigin: true,
+        },
+        "/v1": {
+          target: apiTarget,
+          changeOrigin: true,
+        },
       },
     },
   };

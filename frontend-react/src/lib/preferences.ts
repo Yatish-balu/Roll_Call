@@ -11,6 +11,11 @@ import { useCallback, useEffect, useState } from "react";
 
 const STORAGE_PREFIX = "rollcall.pref.";
 
+/** Emitted on window whenever a preference is saved, so every mounted
+ *  component bound with `usePreference` re-reads its value immediately
+ *  (e.g. collapsing the sidebar from the Settings page). */
+export const PREFERENCES_CHANGED_EVENT = "rollcall:preferences-changed";
+
 export type ThemePreference = "light" | "warm" | "dark" | "system";
 export type SidebarDensity = "comfortable" | "compact";
 
@@ -76,6 +81,12 @@ export function getPreferences(): AppPreferences {
 
 export function savePreferences(preferences: AppPreferences): void {
   writeAll(preferences);
+  notifyPreferencesChanged();
+}
+
+function notifyPreferencesChanged(): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(PREFERENCES_CHANGED_EVENT));
 }
 
 export function updatePreference<K extends keyof AppPreferences>(
@@ -105,7 +116,18 @@ export function usePreference<K extends keyof AppPreferences>(
   );
 
   useEffect(() => {
-    setValue(readAll()[key]);
+    const sync = () => setValue(readAll()[key]);
+    window.addEventListener(PREFERENCES_CHANGED_EVENT, sync);
+    // `storage` fires for changes made in another tab.
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === `${STORAGE_PREFIX}all`) sync();
+    };
+    window.addEventListener("storage", onStorage);
+    sync();
+    return () => {
+      window.removeEventListener(PREFERENCES_CHANGED_EVENT, sync);
+      window.removeEventListener("storage", onStorage);
+    };
   }, [key]);
 
   return [value, update];
