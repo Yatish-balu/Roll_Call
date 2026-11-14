@@ -98,6 +98,7 @@ try:
         test_users = [
             ("00000000-0000-0000-0000-000000000001", "admin@rollcall.edu", "ADMIN", "Test Admin"),
             ("faculty_cn", "faculty_cn@rollcall.edu", "FACULTY", "Prof. Computer Networks"),
+            ("faculty_ds", "faculty_ds@rollcall.edu", "FACULTY", "Prof. Data Science"),
             ("other_faculty", "other_faculty@rollcall.edu", "FACULTY", "Prof. Other"),
             ("faculty_b", "faculty_b@rollcall.edu", "FACULTY", "Prof. B"),
             ("teacher_jane", "teacher_jane@rollcall.edu", "FACULTY", "Prof. Jane"),

@@ -23,6 +23,13 @@ def _auth_headers(user_id: str, role: str = "FACULTY") -> dict:
 @pytest.mark.no_auth_override
 def test_chat_threads_crud_and_isolation(client):
     """Test creating, listing, syncing, and strict user isolation for chat threads."""
+    factory = get_sync_session_factory()
+    with factory() as db:
+        for uid, email in [("faculty_cn", "faculty_cn@rollcall.edu"), ("faculty_ds", "faculty_ds@rollcall.edu")]:
+            if not db.get(models.User, uid):
+                db.add(models.User(user_id=uid, email=email, role="FACULTY", is_active=1, created_at="2026-01-01T00:00:00Z"))
+        db.commit()
+
     headers_a = _auth_headers("faculty_cn", "FACULTY")
     headers_b = _auth_headers("faculty_ds", "FACULTY")
 
