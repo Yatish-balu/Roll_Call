@@ -20,6 +20,8 @@ import openpyxl
 import pandas as pd
 import pytest
 
+pytest.importorskip("streamlit")
+
 from app.agent import AttendanceAgent
 from app.security.ai_policy import TRUSTED_INTERNAL
 
