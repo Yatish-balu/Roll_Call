@@ -1077,3 +1077,40 @@ class SessionAllocation(Base):
 
     def __repr__(self) -> str:
         return f"<SessionAllocation(allocation_id={self.allocation_id!r}, date={self.allocation_date!r})>"
+
+
+class AcademicEvent(Base):
+    """Institutional calendar events (holidays, exams, CIE tests, milestones, workshops)."""
+
+    __tablename__ = "academic_events"
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    event_date: Mapped[str] = mapped_column(String, nullable=False)  # ISO YYYY-MM-DD
+    end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # ISO YYYY-MM-DD
+    event_type: Mapped[str] = mapped_column(
+        String, nullable=False, default="ACADEMIC"
+    )  # HOLIDAY | EXAM | CIE | ACADEMIC | MILESTONE | WORKSHOP
+    description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    target_dept: Mapped[Optional[str]] = mapped_column(String, nullable=True, default="ALL")
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+
+    __table_args__ = (
+        Index("idx_academic_events_date", "event_date"),
+        Index("idx_academic_events_type", "event_type"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "title": self.title,
+            "event_date": self.event_date,
+            "end_date": self.end_date,
+            "event_type": self.event_type,
+            "description": self.description,
+            "target_dept": self.target_dept,
+            "created_at": self.created_at,
+        }
+
+    def __repr__(self) -> str:
+        return f"<AcademicEvent(event_id={self.event_id!r}, title={self.title!r}, date={self.event_date!r})>"

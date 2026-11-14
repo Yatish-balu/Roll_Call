@@ -92,6 +92,10 @@ export async function createStudent(data: StudentCreateParams): Promise<Student>
   return apiClient.post<Student>("/api/v1/students", data);
 }
 
+export async function bulkCreateStudents(students: StudentCreateParams[]): Promise<{ count: number; message: string }> {
+  return apiClient.post<{ count: number; message: string }>("/api/v1/students/bulk", { students });
+}
+
 export async function fetchStudentAttendanceRecords(usn: string): Promise<RawAttendanceRecord[]> {
   return apiClient.get<RawAttendanceRecord[]>(`/api/v1/attendance/students/${encodeURIComponent(usn)}`);
 }

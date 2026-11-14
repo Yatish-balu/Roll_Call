@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   loadMonthCalendarData,
+  type AcademicEventItem,
   type CalendarDaySummary,
   type CalendarMonthData,
 } from "@/services/api/calendar";
@@ -229,47 +230,80 @@ export function CalendarView() {
   /* Render                                                              */
   /* ------------------------------------------------------------------ */
 
-  const dayPanel = (date: string, sessions: SessionItem[], allocations: SessionAllocation[]) => {
-    if (sessions.length === 0) {
-      return (
-        <p className="text-[11px] text-[#A8A28E] py-3 text-center">
-          No sessions on this date.
-        </p>
-      );
-    }
+  const dayPanel = (date: string, sessions: SessionItem[], allocations: SessionAllocation[], events?: AcademicEventItem[]) => {
     return (
-      <ul className="space-y-2">
-        {sessions.map((item) => {
-          const allocation = allocations.find((a) => a.session_id === item.session_id);
-          return (
-            <li
-              key={item.session_id}
-              className="p-2.5 rounded-xl bg-white border border-[#E4DDCA] space-y-1"
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[11px] font-bold text-[#6C5119]">
-                  {item.subject_code || item.subject || item.session_id}
-                </span>
-                <span className="text-[10px] font-semibold text-[#3F451F]">
-                  {allocation ? `${allocation.start_time} - ${allocation.end_time}` : "Time not scheduled"}
-                </span>
+      <div className="space-y-3">
+        {events && events.length > 0 && (
+          <div className="space-y-1.5">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-[#6C5119]">
+              Institutional Calendar Events ({events.length})
+            </span>
+            {events.map((ev) => (
+              <div
+                key={ev.event_id}
+                className={`p-2.5 rounded-xl border text-xs font-semibold ${
+                  ev.event_type === "HOLIDAY"
+                    ? "bg-rose-50 border-rose-200 text-rose-800"
+                    : ev.event_type === "CIE"
+                    ? "bg-amber-50 border-amber-200 text-amber-900"
+                    : ev.event_type === "EXAM"
+                    ? "bg-purple-50 border-purple-200 text-purple-900"
+                    : "bg-blue-50 border-blue-200 text-blue-900"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-1">
+                  <span>{ev.title}</span>
+                  <span className="text-[9px] font-bold px-1.5 py-0.5 rounded uppercase bg-white/70">
+                    {ev.event_type}
+                  </span>
+                </div>
+                {ev.description && (
+                  <p className="text-[10px] opacity-80 mt-1 font-normal">{ev.description}</p>
+                )}
               </div>
-              <p className="text-xs font-semibold text-[#24251C] truncate">{item.subject}</p>
-              <div className="flex items-center justify-between gap-2 text-[10px] text-[#77735F]">
-                <span className="truncate">
-                  {allocation?.room_id ? `Room ${allocation.room_id}` : "Room not allocated"}
-                </span>
-                <Link
-                  to={`/attendance?session=${encodeURIComponent(item.session_id)}`}
-                  className="font-bold text-[#3F451F] hover:underline"
+            ))}
+          </div>
+        )}
+
+        {sessions.length === 0 ? (
+          <p className="text-[11px] text-[#A8A28E] py-2 text-center">
+            {events && events.length > 0 ? "No teaching sessions scheduled on this event date." : "No sessions on this date."}
+          </p>
+        ) : (
+          <ul className="space-y-2">
+            {sessions.map((item) => {
+              const allocation = allocations.find((a) => a.session_id === item.session_id);
+              return (
+                <li
+                  key={item.session_id}
+                  className="p-2.5 rounded-xl bg-white border border-[#E4DDCA] space-y-1"
                 >
-                  Attendance
-                </Link>
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-mono text-[11px] font-bold text-[#6C5119]">
+                      {item.subject_code || item.subject || item.session_id}
+                    </span>
+                    <span className="text-[10px] font-semibold text-[#3F451F]">
+                      {allocation ? `${allocation.start_time} - ${allocation.end_time}` : "Time not scheduled"}
+                    </span>
+                  </div>
+                  <p className="text-xs font-semibold text-[#24251C] truncate">{item.subject}</p>
+                  <div className="flex items-center justify-between gap-2 text-[10px] text-[#77735F]">
+                    <span className="truncate">
+                      {allocation?.room_id ? `Room ${allocation.room_id}` : "Room not allocated"}
+                    </span>
+                    <Link
+                      to={`/attendance?session=${encodeURIComponent(item.session_id)}`}
+                      className="font-bold text-[#3F451F] hover:underline"
+                    >
+                      Attendance
+                    </Link>
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+      </div>
     );
   };
 
@@ -467,7 +501,25 @@ export function CalendarView() {
                             </span>
                           )}
                         </div>
-                        {hasSessions ? (
+                        {day.events && day.events.length > 0 ? (
+                          <div className="truncate my-0.5">
+                            <span
+                              className={`text-[8px] sm:text-[9px] font-bold px-1.5 py-0.5 rounded truncate block ${
+                                day.events[0].event_type === "HOLIDAY"
+                                  ? "bg-rose-100 text-rose-800 border border-rose-200"
+                                  : day.events[0].event_type === "CIE"
+                                  ? "bg-amber-100 text-amber-900 border border-amber-200"
+                                  : day.events[0].event_type === "EXAM"
+                                  ? "bg-purple-100 text-purple-900 border border-purple-200"
+                                  : "bg-blue-100 text-blue-800 border border-blue-200"
+                              }`}
+                              title={day.events[0].title}
+                            >
+                              {day.events[0].event_type === "HOLIDAY" ? "🚩 " : day.events[0].event_type === "CIE" ? "🎓 " : "📌 "}
+                              {day.events[0].title}
+                            </span>
+                          </div>
+                        ) : hasSessions ? (
                           <div className="truncate">
                             <span className={`text-[10px] sm:text-xs font-bold block ${bandText}`}>
                               {day.attendanceRate !== null
@@ -669,13 +721,13 @@ export function CalendarView() {
 
           <div className="flex-1">
             {viewMode === "month" ? (
-              selectedDay && selectedDay.sessionCount > 0 ? (
-                dayPanel(selectedDay.date, selectedDay.sessions, selectedDay.allocations)
+              selectedDay && (selectedDay.sessionCount > 0 || (selectedDay.events && selectedDay.events.length > 0)) ? (
+                dayPanel(selectedDay.date, selectedDay.sessions, selectedDay.allocations, selectedDay.events)
               ) : (
                 <div className="py-10 text-center text-[#77735F] bg-[#F2EDE0]/50 rounded-xl border border-dashed border-[#E4DDCA]">
-                  <p className="text-xs font-bold text-[#24251C]">No sessions conducted</p>
+                  <p className="text-xs font-bold text-[#24251C]">No sessions or events</p>
                   <p className="text-[11px] mt-0.5">
-                    The timetable has no classes on {formatIsoDate(selectedDate)}.
+                    No classes or institutional events scheduled on {formatIsoDate(selectedDate)}.
                   </p>
                 </div>
               )

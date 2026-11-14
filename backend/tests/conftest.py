@@ -109,6 +109,18 @@ try:
                     "INSERT INTO users (user_id, email, role, is_active, created_at, name) VALUES (?, ?, ?, 1, ?, ?)",
                     (u_id, email, role, _now, name),
                 )
+        _conn.execute(
+            """CREATE TABLE IF NOT EXISTS academic_events (
+                event_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                end_date TEXT,
+                event_type TEXT NOT NULL DEFAULT 'ACADEMIC',
+                description TEXT,
+                target_dept TEXT DEFAULT 'ALL',
+                created_at TEXT NOT NULL
+            )"""
+        )
         _conn.commit()
     finally:
         _conn.close()

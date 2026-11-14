@@ -4,6 +4,7 @@ import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   fetchStudents,
   createStudent,
+  bulkCreateStudents,
   fetchStudentAttendanceSummary,
   type Student,
   type StudentAttendanceSummary,
@@ -46,6 +47,15 @@ export function StudentsView() {
   const [newBranch, setNewBranch] = useState("CSE");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // AI / Bulk Upload Modal state (Admin only)
+  const [isAiModalOpen, setIsAiModalOpen] = useState(false);
+  const [aiRawInput, setAiRawInput] = useState("");
+  const [aiParsedList, setAiParsedList] = useState<Array<{ usn: string; name: string; branch: string }>>([]);
+  const [isAiSubmitting, setIsAiSubmitting] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [aiSuccessMessage, setAiSuccessMessage] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   // 300ms Search Debounce
   const debounceTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -209,29 +219,149 @@ export function StudentsView() {
     }
   };
 
+  const parseStudentText = (text: string) => {
+    const lines = text.split("\n");
+    const parsed: Array<{ usn: string; name: string; branch: string }> = [];
+    const usnRegex = /\b([0-9][A-Za-z]{2}[0-9]{2}[A-Za-z]{2}[0-9]{3})\b/;
+
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      if (line.toLowerCase().includes("usn") && line.toLowerCase().includes("name")) continue;
+
+      const usnMatch = line.match(usnRegex);
+      if (usnMatch) {
+        const usn = usnMatch[1].toUpperCase();
+        let remainder = line.replace(usnMatch[0], "").trim();
+        remainder = remainder.replace(/^[,|\t-]+/, "").replace(/[,|\t-]+$/, "").trim();
+
+        let branch = "CSE";
+        const branchMatch = remainder.match(/\b(CSE|ECE|ISE|MECH|AIML|AIDS|CIVIL|CV)\b/i);
+        if (branchMatch) {
+          branch = branchMatch[1].toUpperCase();
+          remainder = remainder.replace(branchMatch[0], "").trim();
+        }
+
+        const name = remainder.replace(/^[,|\t-]+/, "").replace(/[,|\t-]+$/, "").trim() || `Student ${usn}`;
+        parsed.push({ usn, name, branch });
+      } else {
+        const parts = line.split(/[,|\t]/).map((p) => p.trim());
+        if (parts.length >= 2 && parts[0].length >= 5) {
+          parsed.push({
+            usn: parts[0].toUpperCase(),
+            name: parts[1] || `Student ${parts[0]}`,
+            branch: (parts[2] || "CSE").toUpperCase(),
+          });
+        }
+      }
+    }
+    return parsed;
+  };
+
+  const handleAiTextChange = (val: string) => {
+    setAiRawInput(val);
+    const result = parseStudentText(val);
+    setAiParsedList(result);
+  };
+
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setAiError(null);
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content) {
+        setAiRawInput(content);
+        const result = parseStudentText(content);
+        setAiParsedList(result);
+      }
+    };
+    reader.onerror = () => {
+      setAiError("Failed to read the uploaded file.");
+    };
+    reader.readAsText(file);
+  };
+
+  const handleAiBulkSubmit = async () => {
+    if (!canManageStudents) {
+      setAiError("Only administrators are permitted to register students.");
+      return;
+    }
+    if (aiParsedList.length === 0) {
+      setAiError("No valid students found. Please enter or upload students with valid USNs.");
+      return;
+    }
+    setIsAiSubmitting(true);
+    setAiError(null);
+    setAiSuccessMessage(null);
+
+    try {
+      const res = await bulkCreateStudents(aiParsedList);
+      setAiSuccessMessage(`Successfully registered ${res.count || aiParsedList.length} students into the institutional directory!`);
+      void loadStudents();
+      setTimeout(() => {
+        setIsAiModalOpen(false);
+        setAiRawInput("");
+        setAiParsedList([]);
+        setAiSuccessMessage(null);
+      }, 1500);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Failed to import students.";
+      setAiError(msg);
+    } finally {
+      setIsAiSubmitting(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Header Bar */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-[#24251C] tracking-tight">
-            Student Directory & Attendance Ledger
-          </h1>
+          <div className="flex items-center gap-3">
+            <h1 className="text-2xl font-bold text-[#24251C] tracking-tight">
+              Student List
+            </h1>
+            <span
+              className={`text-[11px] font-bold px-2.5 py-0.5 rounded-full ${
+                canManageStudents
+                  ? "bg-[#3F451F]/10 text-[#3F451F] border border-[#3F451F]/20"
+                  : "bg-[#77735F]/10 text-[#77735F] border border-[#77735F]/20"
+              }`}
+            >
+              {canManageStudents ? "Admin Master Control" : "Teacher View (Read-Only Roster)"}
+            </span>
+          </div>
           <p className="text-sm text-[#77735F] mt-0.5">
-            Search verified institutional student roster, inspect individual attendance records, and audit standing.
+            Institutional directory of students, department rosters, and individual attendance ledgers.
           </p>
         </div>
 
         {canManageStudents && (
-          <button
-            onClick={() => setIsAddModalOpen(true)}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#3F451F] text-[#FBF8F0] text-sm font-semibold rounded-xl hover:bg-[#323719] transition-all shadow-sm cursor-pointer"
-          >
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
-            </svg>
-            Register Student
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setIsAddModalOpen(true)}
+              className="inline-flex items-center justify-center gap-2 px-3.5 py-2 bg-[#FBF8F0] border border-[#3F451F] text-[#3F451F] text-xs font-semibold rounded-xl hover:bg-[#EDE8D8] transition-all shadow-2xs cursor-pointer"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4" />
+              </svg>
+              Add Student (Manual)
+            </button>
+            <button
+              onClick={() => {
+                setAiError(null);
+                setAiSuccessMessage(null);
+                setIsAiModalOpen(true);
+              }}
+              className="inline-flex items-center justify-center gap-2 px-4 py-2 bg-[#3F451F] text-[#FBF8F0] text-xs font-semibold rounded-xl hover:bg-[#323719] transition-all shadow-sm cursor-pointer"
+            >
+              <span className="text-amber-300">✨</span>
+              Import / Add by AI
+            </button>
+          </div>
         )}
       </div>
 
@@ -675,6 +805,138 @@ export function StudentsView() {
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* AI / Bulk Import Student Modal (Admin only) */}
+      {isAiModalOpen && canManageStudents && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-200">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-xl w-full p-6 shadow-xl relative max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div className="flex items-center gap-2">
+                <span className="text-lg">✨</span>
+                <h3 className="text-lg font-bold text-[#24251C]">Import / Add Students by AI</h3>
+              </div>
+              <button
+                onClick={() => setIsAiModalOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] transition-colors cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-[#77735F] mt-2 mb-3">
+              Upload a student list file (CSV, Excel, Text) or paste USN, Name, and Branch records below. RollCall AI will extract and validate each student record.
+            </p>
+
+            {aiError && (
+              <div className="p-3 mb-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-semibold">
+                {aiError}
+              </div>
+            )}
+
+            {aiSuccessMessage && (
+              <div className="p-3 mb-3 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold">
+                ✓ {aiSuccessMessage}
+              </div>
+            )}
+
+            <div className="space-y-3 flex-1 overflow-y-auto pr-1">
+              {/* File upload drop button */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  onChange={handleFileUpload}
+                  accept=".csv,.txt,.xlsx,.xls,.png,.jpg,.jpeg,.pdf"
+                  className="hidden"
+                />
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  className="px-3 py-1.5 rounded-xl border border-dashed border-[#3F451F] text-[#3F451F] hover:bg-[#3F451F]/10 text-xs font-semibold flex items-center gap-2 transition-all cursor-pointer"
+                >
+                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
+                  </svg>
+                  Upload File (.csv, .txt, .pdf, .xlsx)
+                </button>
+                <span className="text-[11px] text-[#A8A28E]">or paste text directly below</span>
+              </div>
+
+              {/* Text Area */}
+              <div>
+                <textarea
+                  value={aiRawInput}
+                  onChange={(e) => handleAiTextChange(e.target.value)}
+                  placeholder={"Paste student rows, e.g.:\n1MS21CS001, Alice Smith, CSE\n1MS21CS002, Bob Jones, CSE\n1MS21EC010, Charlie Brown, ECE"}
+                  rows={4}
+                  className="w-full px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#3F451F]"
+                />
+              </div>
+
+              {/* Real-time Extracted Preview */}
+              <div>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="text-xs font-bold text-[#24251C]">
+                    Extracted Students ({aiParsedList.length})
+                  </span>
+                  {aiParsedList.length > 0 && (
+                    <span className="text-[10px] text-emerald-700 font-semibold bg-emerald-50 px-2 py-0.5 rounded-full border border-emerald-200">
+                      ✓ Validated USN Format
+                    </span>
+                  )}
+                </div>
+
+                {aiParsedList.length === 0 ? (
+                  <div className="py-6 text-center text-[#A8A28E] bg-white/60 rounded-xl border border-dashed border-[#E4DDCA] text-xs">
+                    No students extracted yet. Enter USNs above or upload a file.
+                  </div>
+                ) : (
+                  <div className="max-h-48 overflow-y-auto rounded-xl border border-[#E4DDCA] bg-white">
+                    <table className="w-full text-left text-xs">
+                      <thead className="bg-[#F2EDE0] text-[#77735F] text-[10px] uppercase font-bold sticky top-0">
+                        <tr>
+                          <th className="py-1.5 px-3">#</th>
+                          <th className="py-1.5 px-3">USN</th>
+                          <th className="py-1.5 px-3">Student Name</th>
+                          <th className="py-1.5 px-3">Branch</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#E4DDCA]">
+                        {aiParsedList.map((item, idx) => (
+                          <tr key={idx} className="hover:bg-[#FBF8F0]">
+                            <td className="py-1.5 px-3 text-[#A8A28E] font-mono text-[11px]">{idx + 1}</td>
+                            <td className="py-1.5 px-3 font-mono font-bold text-[#24251C]">{item.usn}</td>
+                            <td className="py-1.5 px-3 text-[#24251C]">{item.name}</td>
+                            <td className="py-1.5 px-3 font-semibold text-[#6C5119]">{item.branch}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="pt-3 mt-3 border-t border-[#E4DDCA] flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setIsAiModalOpen(false)}
+                className="px-4 py-2 rounded-xl bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] font-semibold text-xs transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={handleAiBulkSubmit}
+                disabled={isAiSubmitting || aiParsedList.length === 0}
+                className="px-4 py-2 rounded-xl bg-[#3F451F] hover:bg-[#343919] text-[#FBF8F0] font-bold text-xs shadow-2xs transition-colors disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+              >
+                {isAiSubmitting ? "Importing..." : `Import ${aiParsedList.length} Students`}
+              </button>
+            </div>
           </div>
         </div>
       )}
