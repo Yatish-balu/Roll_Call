@@ -16,8 +16,15 @@ Dummy names only. Passwords from .env. Safe to re-run (resets only demo data).
 from __future__ import annotations
 
 import os
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict
+
+# Ensure backend directory is in sys.path when executed as a direct script
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
 import bcrypt
 
