@@ -1345,4 +1345,144 @@ class AttendanceUnlockRequest(Base):
         )
 
 
+class Exam(Base):
+    """Institutional Examination sitting (CIE, Lab, SEE)."""
+
+    __tablename__ = "exams"
+
+    exam_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    exam_type: Mapped[str] = mapped_column(String(30), nullable=False, default="THEORY_CIE")
+    semester: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    department: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    date: Mapped[str] = mapped_column(String(20), nullable=False)
+    start_time: Mapped[str] = mapped_column(String(20), nullable=False)
+    end_time: Mapped[str] = mapped_column(String(20), nullable=False)
+    cutoff_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=45)
+    subject_code: Mapped[str] = mapped_column(String(30), nullable=False)
+    subject_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(50), nullable=False, default=_utcnow_iso)
+
+    __table_args__ = (
+        Index("ix_exams_date", "date"),
+        Index("ix_exams_type", "exam_type"),
+    )
+
+    rooms: Mapped[List["RoomAssignment"]] = relationship("RoomAssignment", back_populates="exam", cascade="all, delete-orphan")
+    seating: Mapped[List["ExamSeating"]] = relationship("ExamSeating", back_populates="exam", cascade="all, delete-orphan")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "exam_id": self.exam_id,
+            "name": self.name,
+            "exam_type": self.exam_type,
+            "semester": self.semester,
+            "department": self.department,
+            "date": self.date,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "cutoff_minutes": self.cutoff_minutes,
+            "subject_code": self.subject_code,
+            "subject_name": self.subject_name,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+        }
+
+
+class RoomAssignment(Base):
+    """Room allocation and invigilator assignment for an exam."""
+
+    __tablename__ = "room_assignments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exam_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("exams.exam_id", ondelete="CASCADE"), nullable=False
+    )
+    room_no: Mapped[str] = mapped_column(String(50), nullable=False)
+    block_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    invigilator_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+    )
+    external_examiner_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    external_examiner_college: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    coordinator_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="SCHEDULED")
+    submitted_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    submitted_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_room_assignments_exam_room", "exam_id", "room_no", unique=True),
+        Index("ix_room_assignments_invigilator", "invigilator_id"),
+    )
+
+    exam: Mapped["Exam"] = relationship("Exam", back_populates="rooms")
+    invigilator: Mapped[Optional["User"]] = relationship("User", foreign_keys=[invigilator_id])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "exam_id": self.exam_id,
+            "room_no": self.room_no,
+            "block_name": self.block_name,
+            "capacity": self.capacity,
+            "invigilator_id": self.invigilator_id,
+            "external_examiner_name": self.external_examiner_name,
+            "external_examiner_college": self.external_examiner_college,
+            "coordinator_id": self.coordinator_id,
+            "status": self.status,
+            "submitted_at": self.submitted_at,
+            "submitted_by": self.submitted_by,
+        }
+
+
+class ExamSeating(Base):
+    """Student seating allocation and attendance state on Form-B."""
+
+    __tablename__ = "exam_seating"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exam_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("exams.exam_id", ondelete="CASCADE"), nullable=False
+    )
+    room_no: Mapped[str] = mapped_column(String(50), nullable=False)
+    sl_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    usn: Mapped[str] = mapped_column(String(30), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    branch: Mapped[str] = mapped_column(String(30), nullable=False)
+    subject_code: Mapped[str] = mapped_column(String(30), nullable=False)
+    seat_no: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ABSENT")
+    marked_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    marked_source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    marked_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_exam_seating_exam_usn", "exam_id", "usn", unique=True),
+        Index("ix_exam_seating_exam_room", "exam_id", "room_no"),
+        Index("ix_exam_seating_branch", "branch"),
+    )
+
+    exam: Mapped["Exam"] = relationship("Exam", back_populates="seating")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "exam_id": self.exam_id,
+            "room_no": self.room_no,
+            "sl_no": self.sl_no,
+            "usn": self.usn,
+            "name": self.name,
+            "branch": self.branch,
+            "subject_code": self.subject_code,
+            "seat_no": self.seat_no,
+            "status": self.status,
+            "marked_by": self.marked_by,
+            "marked_source": self.marked_source,
+            "marked_at": self.marked_at,
+        }
+
+
+
 

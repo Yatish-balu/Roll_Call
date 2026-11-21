@@ -45,6 +45,7 @@ from app.routers import (
     calendar_router,
     agent_stream_router,
     defaulters_router,
+    exams_router,
 )
 
 
@@ -578,6 +579,7 @@ app.include_router(agent_stream_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(defaulters_router, prefix="/api/v1")
+app.include_router(exams_router, prefix="/api/v1/exams")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
 app.include_router(auth_router, prefix="/api")
@@ -596,6 +598,7 @@ app.include_router(agent_stream_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(calendar_router, prefix="/api")
 app.include_router(defaulters_router, prefix="/api")
+app.include_router(exams_router, prefix="/api/exams")
 
 
 

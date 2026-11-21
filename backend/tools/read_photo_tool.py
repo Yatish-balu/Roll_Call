@@ -49,6 +49,7 @@ STATUS_ALIASES: Dict[str, str] = {
     "yes": "PRESENT",
     "true": "PRESENT",
     "absent": "ABSENT",
+    "ab": "ABSENT",
     "a": "ABSENT",
     "0": "ABSENT",
     "no": "ABSENT",
