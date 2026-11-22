@@ -299,6 +299,19 @@ def register_default_tools(reg: ToolRegistry) -> None:
         )
     )
 
+    # Register Exam AI Tools
+    try:
+        from app.agent.tools.exam_tools import (
+            QUERY_EXAM_STATUS_TOOL,
+            QUERY_EXAM_ABSENTEES_TOOL,
+            QUERY_EXAM_BRANCH_SUMMARY_TOOL,
+        )
+        reg.register(QUERY_EXAM_STATUS_TOOL)
+        reg.register(QUERY_EXAM_ABSENTEES_TOOL)
+        reg.register(QUERY_EXAM_BRANCH_SUMMARY_TOOL)
+    except Exception as e:
+        logger.warning("Could not register exam agent tools: %s", e)
+
 
 # Automatically register default tools
 register_default_tools(tool_registry)

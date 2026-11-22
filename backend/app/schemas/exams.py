@@ -55,6 +55,14 @@ class RoomAssignmentOut(BaseModel):
     display_room_no: str
     is_masked: bool = False
     reveals_at: Optional[str] = None
+    exam_name: Optional[str] = None
+    subject_code: Optional[str] = None
+    subject_name: Optional[str] = None
+    date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    cutoff_minutes: Optional[int] = None
+    cutoff_at: Optional[str] = None
     block_name: Optional[str]
     capacity: Optional[int]
     invigilator_id: Optional[str]

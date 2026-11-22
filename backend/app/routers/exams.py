@@ -71,6 +71,82 @@ def _is_jit_masked(exam: Exam, current_user: AuthenticatedUser) -> tuple[bool, O
         return False, None
 
 
+def _get_cutoff_dt(exam: Exam) -> tuple[Optional[datetime], Optional[str]]:
+    """Compute Form-B submission cutoff timestamp."""
+    try:
+        date_parts = [int(p) for p in exam.date.split("-")]
+        time_clean = exam.start_time.split("Z")[0].split("+")[0].strip()
+        time_parts = [int(p) for p in time_clean.split(":")[:2]]
+        start_dt = datetime(
+            date_parts[0], date_parts[1], date_parts[2],
+            time_parts[0], time_parts[1],
+            tzinfo=timezone.utc,
+        )
+        cutoff_dt = start_dt + timedelta(minutes=exam.cutoff_minutes or 30)
+        return cutoff_dt, cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    except Exception as e:
+        logger.debug("Failed to calculate cutoff datetime: %s", e)
+        return None, None
+
+
+def _check_and_update_cutoff(exam: Exam, assignment: RoomAssignment, db: Optional[Session] = None) -> str:
+    """If submission cutoff window has passed and Form-B is not SUBMITTED, lock as LATE_LOCKED."""
+    if assignment.status in ("SUBMITTED", "LATE_LOCKED"):
+        return assignment.status
+
+    # If Admin has explicitly overridden/unlocked this room, do not auto-lock it again
+    if assignment.submitted_by and str(assignment.submitted_by).startswith("OVERRIDE:"):
+        return assignment.status
+
+    cutoff_dt, _ = _get_cutoff_dt(exam)
+    if cutoff_dt and datetime.now(timezone.utc) > cutoff_dt:
+        assignment.status = "LATE_LOCKED"
+        if db:
+            try:
+                db.commit()
+            except Exception:
+                pass
+        return "LATE_LOCKED"
+    return assignment.status
+
+
+def _build_room_assignment_out(
+    assignment: RoomAssignment,
+    exam: Exam,
+    current_user: AuthenticatedUser,
+) -> RoomAssignmentOut:
+    """Build standardized RoomAssignmentOut payload with full metadata and JIT masking."""
+    masked, reveals_at = _is_jit_masked(exam, current_user)
+    display_room = "CONFIDENTIAL (Reveals 15m before exam)" if masked else assignment.room_no
+    _, cutoff_at_str = _get_cutoff_dt(exam)
+
+    return RoomAssignmentOut(
+        id=assignment.id,
+        exam_id=assignment.exam_id,
+        room_no=assignment.room_no,
+        display_room_no=display_room,
+        is_masked=masked,
+        reveals_at=reveals_at,
+        exam_name=exam.name,
+        subject_code=exam.subject_code,
+        subject_name=exam.subject_name,
+        date=exam.date,
+        start_time=exam.start_time,
+        end_time=exam.end_time,
+        cutoff_minutes=exam.cutoff_minutes,
+        cutoff_at=cutoff_at_str,
+        block_name=assignment.block_name,
+        capacity=assignment.capacity,
+        invigilator_id=assignment.invigilator_id,
+        external_examiner_name=assignment.external_examiner_name,
+        external_examiner_college=assignment.external_examiner_college,
+        coordinator_id=assignment.coordinator_id,
+        status=assignment.status,
+        submitted_at=assignment.submitted_at,
+        submitted_by=assignment.submitted_by,
+    )
+
+
 # ============================================================================
 # 1. EXAM LIFECYCLE (ADMIN)
 # ============================================================================
@@ -146,26 +222,8 @@ def get_my_assigned_rooms(
     rows = list(db.scalars(stmt).all())
     out = []
     for r in rows:
-        masked, reveals_at = _is_jit_masked(r.exam, current_user)
-        display_room = "CONFIDENTIAL (Reveals 15m before exam)" if masked else r.room_no
-        item = RoomAssignmentOut(
-            id=r.id,
-            exam_id=r.exam_id,
-            room_no=r.room_no,
-            display_room_no=display_room,
-            is_masked=masked,
-            reveals_at=reveals_at,
-            block_name=r.block_name,
-            capacity=r.capacity,
-            invigilator_id=r.invigilator_id,
-            external_examiner_name=r.external_examiner_name,
-            external_examiner_college=r.external_examiner_college,
-            coordinator_id=r.coordinator_id,
-            status=r.status,
-            submitted_at=r.submitted_at,
-            submitted_by=r.submitted_by,
-        )
-        out.append(item)
+        _check_and_update_cutoff(r.exam, r, db)
+        out.append(_build_room_assignment_out(r, r.exam, current_user))
     return out
 
 
@@ -179,6 +237,31 @@ def get_exam(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found.")
     return exam
+
+
+@router.delete("/{exam_id}", summary="Delete an exam sitting and cascade seating records (Admin only)")
+def delete_exam(
+    exam_id: str,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    exam = db.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found.")
+
+    db.query(ExamSeating).filter(ExamSeating.exam_id == exam_id).delete()
+    db.query(RoomAssignment).filter(RoomAssignment.exam_id == exam_id).delete()
+    db.delete(exam)
+    db.commit()
+
+    log_security_event(
+        "exam_deleted",
+        severity="warning",
+        outcome="success",
+        actor_id=current_user.user_id,
+        details={"exam_id": exam_id},
+    )
+    return {"message": f"Exam '{exam_id}' and all associated records deleted successfully."}
 
 
 # ============================================================================
@@ -335,24 +418,7 @@ def assign_room_invigilator(
 
     db.commit()
     db.refresh(assignment)
-
-    return RoomAssignmentOut(
-        id=assignment.id,
-        exam_id=assignment.exam_id,
-        room_no=assignment.room_no,
-        display_room_no=assignment.room_no,
-        is_masked=False,
-        reveals_at=None,
-        block_name=assignment.block_name,
-        capacity=assignment.capacity,
-        invigilator_id=assignment.invigilator_id,
-        external_examiner_name=assignment.external_examiner_name,
-        external_examiner_college=assignment.external_examiner_college,
-        coordinator_id=assignment.coordinator_id,
-        status=assignment.status,
-        submitted_at=assignment.submitted_at,
-        submitted_by=assignment.submitted_by,
-    )
+    return _build_room_assignment_out(assignment, assignment.exam, current_user)
 
 
 @router.get("/{exam_id}/rooms", response_model=List[RoomAssignmentOut], summary="List all room assignments for an exam")
@@ -368,26 +434,35 @@ def list_exam_rooms(
     assignments = db.query(RoomAssignment).filter(RoomAssignment.exam_id == exam_id).order_by(RoomAssignment.room_no.asc()).all()
     out = []
     for a in assignments:
-        masked, reveals_at = _is_jit_masked(exam, current_user)
-        display_name = "CONFIDENTIAL" if masked and a.invigilator_id != current_user.user_id else a.room_no
-        out.append(RoomAssignmentOut(
-            id=a.id,
-            exam_id=a.exam_id,
-            room_no=a.room_no,
-            display_room_no=display_name,
-            is_masked=masked,
-            reveals_at=reveals_at,
-            block_name=a.block_name,
-            capacity=a.capacity,
-            invigilator_id=a.invigilator_id,
-            external_examiner_name=a.external_examiner_name,
-            external_examiner_college=a.external_examiner_college,
-            coordinator_id=a.coordinator_id,
-            status=a.status,
-            submitted_at=a.submitted_at,
-            submitted_by=a.submitted_by,
-        ))
+        _check_and_update_cutoff(exam, a, db)
+        out.append(_build_room_assignment_out(a, exam, current_user))
     return out
+
+
+@router.get("/{exam_id}/rooms/{room_no}", response_model=RoomAssignmentOut, summary="Get details for a specific room assignment")
+def get_room_assignment(
+    exam_id: str,
+    room_no: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    exam = db.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found.")
+
+    assignment = (
+        db.query(RoomAssignment)
+        .filter(RoomAssignment.exam_id == exam_id, RoomAssignment.room_no == room_no.strip().upper())
+        .first()
+    )
+    if not assignment:
+        raise HTTPException(status_code=404, detail="Room assignment not found.")
+
+    if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
+        raise HTTPException(status_code=403, detail="Access denied: You are not assigned to this exam room.")
+
+    _check_and_update_cutoff(exam, assignment, db)
+    return _build_room_assignment_out(assignment, exam, current_user)
 
 
 # ============================================================================
@@ -442,11 +517,12 @@ def mark_room_attendance(
     if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied: You are not assigned to this exam room.")
 
-    # Check lock
-    if assignment.status in ("SUBMITTED", "LATE_LOCKED") and current_user.role != Role.ADMIN.value:
+    # Check cutoff timer and lock
+    current_status = _check_and_update_cutoff(assignment.exam, assignment, db)
+    if current_status in ("SUBMITTED", "LATE_LOCKED") and current_user.role != Role.ADMIN.value:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Room Form-B is already {assignment.status} and cannot be modified by invigilator.",
+            detail=f"Room Form-B is already {current_status} and cannot be modified by invigilator. Contact Admin for override.",
         )
 
     now_iso = _utcnow_iso()
@@ -496,8 +572,12 @@ async def scan_form_b_photo(
     if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied.")
 
-    if assignment.status in ("SUBMITTED", "LATE_LOCKED") and current_user.role != Role.ADMIN.value:
-        raise HTTPException(status_code=403, detail="Form-B is already sealed.")
+    current_status = _check_and_update_cutoff(assignment.exam, assignment, db)
+    if current_status in ("SUBMITTED", "LATE_LOCKED") and current_user.role != Role.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Room Form-B is {current_status} and cannot be modified by invigilator. Contact Admin for override.",
+        )
 
     contents = await file.read()
     if len(contents) > 10 * 1024 * 1024:
@@ -562,8 +642,15 @@ def submit_form_b(
     if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
         raise HTTPException(status_code=403, detail="Access denied.")
 
+    current_status = _check_and_update_cutoff(assignment.exam, assignment, db)
+    if current_status == "LATE_LOCKED" and current_user.role != Role.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Form-B submission cutoff time expired. Room is LATE_LOCKED. Contact Admin for override.",
+        )
+
     if assignment.status == "SUBMITTED":
-        return {"message": "Form-B is already submitted.", "submitted_at": assignment.submitted_at}
+        return {"message": "Form-B is already submitted.", "submitted_at": assignment.submitted_at, "status": "SUBMITTED"}
 
     now_iso = _utcnow_iso()
     assignment.status = "SUBMITTED"
@@ -607,6 +694,7 @@ def admin_override_room(
     assignment.status = payload.new_status
     if payload.new_status == "OPEN":
         assignment.submitted_at = None
+        assignment.submitted_by = f"OVERRIDE:{current_user.user_id}"
 
     log_security_event(
         "admin_override_event",

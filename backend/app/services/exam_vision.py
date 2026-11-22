@@ -48,11 +48,20 @@ FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash")
 
 
 def scan_form_b_image(image_bytes: bytes) -> List[Dict[str, Any]]:
-    """Scan Form-B photo using Google Gemini Vision AI."""
+    """Scan Form-B photo using image normalization and Google Gemini Vision AI."""
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         logger.warning("GEMINI_API_KEY not configured. Cannot run vision scan.")
         return []
+
+    # 1. Preprocess and normalize image (orientation, contrast, bounded scaling)
+    processed_bytes = image_bytes
+    try:
+        from app.services.image_pipeline import validate_and_preprocess_image
+        processed_bytes, _meta = validate_and_preprocess_image(image_bytes, max_dimension=1600, jpeg_quality=85)
+    except Exception as e:
+        logger.debug("Image preprocessing bypassed, using original bytes: %s", e)
+        processed_bytes = image_bytes
 
     try:
         import google.generativeai as genai

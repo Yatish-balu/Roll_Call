@@ -8,4 +8,5 @@ export * from "./faculty";
 export * from "./agent";
 export * from "./reports";
 export * from "./dashboard";
+export * from "./exams";
 

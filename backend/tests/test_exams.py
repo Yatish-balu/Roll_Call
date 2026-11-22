@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from datetime import datetime, timedelta, timezone
 import pytest
 from fastapi.testclient import TestClient
 
@@ -177,16 +178,21 @@ def test_attendance_marking_and_submit_lock(client: TestClient):
     other_fac_hdr = _auth_headers("faculty_ds", "FACULTY")
     exam_id = "TEST-LOCK-2026"
 
-    # Create exam
+    # Active exam currently running within cutoff window
+    now_dt = datetime.now(timezone.utc)
+    today_str = now_dt.strftime("%Y-%m-%d")
+    start_str = (now_dt - timedelta(minutes=5)).strftime("%H:%M:%S")
+    end_str = (now_dt + timedelta(minutes=90)).strftime("%H:%M:%S")
+
     client.post(
         "/api/v1/exams",
         json={
             "exam_id": exam_id,
             "name": "Locking Workflow Exam",
             "exam_type": "THEORY_CIE",
-            "date": "2026-11-22",
-            "start_time": "08:00:00",
-            "end_time": "10:00:00",
+            "date": today_str,
+            "start_time": start_str,
+            "end_time": end_str,
             "cutoff_minutes": 180,
             "subject_code": "21CS54",
         },
@@ -490,4 +496,247 @@ def test_admin_override_validation(client: TestClient):
         headers=admin_hdr,
     )
     assert bad_override.status_code == 422
+
+
+@pytest.mark.no_auth_override
+def test_late_locked_cutoff_enforcement(client: TestClient):
+    admin_hdr = _auth_headers("admin_root", "ADMIN")
+    faculty_hdr = _auth_headers("faculty_cn", "FACULTY")
+    exam_id = "TEST-LATE-LOCK"
+
+    # Past exam (yesterday)
+    client.post(
+        "/api/v1/exams",
+        json={
+            "exam_id": exam_id,
+            "name": "Past Cutoff Exam",
+            "exam_type": "THEORY_CIE",
+            "date": "2026-11-20",
+            "start_time": "09:00:00",
+            "end_time": "10:30:00",
+            "cutoff_minutes": 30,
+            "subject_code": "22CY74",
+        },
+        headers=admin_hdr,
+    )
+
+    client.post(
+        f"/api/v1/exams/{exam_id}/seating/upload",
+        files={"file": ("seating.csv", io.BytesIO(b"sl_no,usn,name,branch,room_no\n1,1DS23CY010,Late Student,CY,ROOM-LATE\n"), "text/csv")},
+        headers=admin_hdr,
+    )
+
+    client.post(
+        f"/api/v1/exams/{exam_id}/rooms/ROOM-LATE/assign",
+        json={"room_no": "ROOM-LATE", "invigilator_id": "faculty_cn"},
+        headers=admin_hdr,
+    )
+
+    # 1. Faculty checks room detail -> status is auto-marked LATE_LOCKED
+    detail_res = client.get(f"/api/v1/exams/{exam_id}/rooms/ROOM-LATE", headers=faculty_hdr)
+    assert detail_res.status_code == 200
+    assert detail_res.json()["status"] == "LATE_LOCKED"
+    assert detail_res.json()["cutoff_at"] is not None
+
+    # 2. Invigilator tries to mark attendance -> 403 Forbidden
+    mark_res = client.patch(
+        f"/api/v1/exams/{exam_id}/rooms/ROOM-LATE/mark",
+        json={"marks": [{"usn": "1DS23CY010", "status": "PRESENT"}]},
+        headers=faculty_hdr,
+    )
+    assert mark_res.status_code == 403
+    assert "LATE_LOCKED" in mark_res.json()["detail"]
+
+    # 3. Invigilator tries to submit -> 403 Forbidden
+    submit_res = client.post(f"/api/v1/exams/{exam_id}/rooms/ROOM-LATE/submit", headers=faculty_hdr)
+    assert submit_res.status_code == 403
+    assert "LATE_LOCKED" in submit_res.json()["detail"]
+
+    # 4. Admin override allows reopening
+    override_res = client.post(
+        f"/api/v1/exams/{exam_id}/rooms/ROOM-LATE/admin-override",
+        json={"reason": "Approved late submission due to network outage in block", "new_status": "OPEN"},
+        headers=admin_hdr,
+    )
+    assert override_res.status_code == 200
+    assert override_res.json()["room_status"] == "OPEN"
+
+    # 5. Invigilator can now submit
+    submit_ok = client.post(f"/api/v1/exams/{exam_id}/rooms/ROOM-LATE/submit", headers=faculty_hdr)
+    assert submit_ok.status_code == 200
+    assert submit_ok.json()["status"] == "SUBMITTED"
+
+    # 6. Double submit returns already submitted
+    submit_again = client.post(f"/api/v1/exams/{exam_id}/rooms/ROOM-LATE/submit", headers=faculty_hdr)
+    assert submit_again.status_code == 200
+    assert "already submitted" in submit_again.json()["message"]
+
+
+@pytest.mark.no_auth_override
+def test_room_detail_and_delete_exam_cascade(client: TestClient):
+    admin_hdr = _auth_headers("admin_root", "ADMIN")
+    faculty_hdr = _auth_headers("faculty_cn", "FACULTY")
+    exam_id = "TEST-CASCADE-DEL"
+
+    client.post(
+        "/api/v1/exams",
+        json={
+            "exam_id": exam_id,
+            "name": "Cascade Delete Exam",
+            "exam_type": "THEORY_CIE",
+            "date": "2026-11-27",
+            "start_time": "10:00:00",
+            "end_time": "11:30:00",
+            "cutoff_minutes": 30,
+            "subject_code": "22CY75",
+        },
+        headers=admin_hdr,
+    )
+
+    client.post(
+        f"/api/v1/exams/{exam_id}/seating/upload",
+        files={"file": ("seating.csv", io.BytesIO(b"sl_no,usn,name,branch,room_no\n1,1DS23CY020,Cascade Stud,CY,ROOM-CAS\n"), "text/csv")},
+        headers=admin_hdr,
+    )
+
+    client.post(
+        f"/api/v1/exams/{exam_id}/rooms/ROOM-CAS/assign",
+        json={"room_no": "ROOM-CAS", "invigilator_id": "faculty_cn"},
+        headers=admin_hdr,
+    )
+
+    # 1. Invigilator reads room detail
+    detail_res = client.get(f"/api/v1/exams/{exam_id}/rooms/ROOM-CAS", headers=faculty_hdr)
+    assert detail_res.status_code == 200
+    data = detail_res.json()
+    assert data["exam_id"] == exam_id
+    assert data["exam_name"] == "Cascade Delete Exam"
+    assert data["subject_code"] == "22CY75"
+
+    # 2. Faculty cannot delete exam -> 403
+    fac_del = client.delete(f"/api/v1/exams/{exam_id}", headers=faculty_hdr)
+    assert fac_del.status_code == 403
+
+    # 3. Admin deletes exam -> 200
+    adm_del = client.delete(f"/api/v1/exams/{exam_id}", headers=admin_hdr)
+    assert adm_del.status_code == 200
+
+    # 4. Verifying exam is deleted
+    assert client.get(f"/api/v1/exams/{exam_id}", headers=admin_hdr).status_code == 404
+    assert client.get(f"/api/v1/exams/{exam_id}/rooms/ROOM-CAS", headers=admin_hdr).status_code == 404
+
+
+@pytest.mark.no_auth_override
+def test_csv_upload_validation_errors(client: TestClient):
+    admin_hdr = _auth_headers("admin_root", "ADMIN")
+    exam_id = "TEST-CSV-VAL"
+
+    client.post(
+        "/api/v1/exams",
+        json={
+            "exam_id": exam_id,
+            "name": "CSV Validation Exam",
+            "exam_type": "THEORY_CIE",
+            "date": "2026-11-28",
+            "start_time": "10:00:00",
+            "end_time": "11:30:00",
+            "cutoff_minutes": 30,
+            "subject_code": "22CY76",
+        },
+        headers=admin_hdr,
+    )
+
+    # 1. Missing usn column -> 422
+    bad_csv = b"name,room_no\nStudent,ROOM-1\n"
+    res1 = client.post(
+        f"/api/v1/exams/{exam_id}/seating/upload",
+        files={"file": ("test.csv", io.BytesIO(bad_csv), "text/csv")},
+        headers=admin_hdr,
+    )
+    assert res1.status_code == 422
+    assert "usn" in res1.json()["detail"].lower()
+
+    # 2. Missing room_no column -> 422
+    bad_csv2 = b"usn,name\n1DS23CY001,Student\n"
+    res2 = client.post(
+        f"/api/v1/exams/{exam_id}/seating/upload",
+        files={"file": ("test.csv", io.BytesIO(bad_csv2), "text/csv")},
+        headers=admin_hdr,
+    )
+    assert res2.status_code == 422
+    assert "room" in res2.json()["detail"].lower()
+
+    # 3. Invalid exam_id -> 404
+    res3 = client.post(
+        "/api/v1/exams/NON-EXISTENT-EXAM/seating/upload",
+        files={"file": ("test.csv", io.BytesIO(b"usn,name,room_no\n1DS23CY001,Student,R1\n"), "text/csv")},
+        headers=admin_hdr,
+    )
+    assert res3.status_code == 404
+
+
+@pytest.mark.no_auth_override
+def test_exam_agent_tools_execution(client: TestClient):
+    from app.agent.registry import tool_registry
+
+    admin_hdr = _auth_headers("admin_root", "ADMIN")
+    exam_id = "TEST-AGENT-EXAM"
+
+    # 1. Create exam with 2 students in CDS 105
+    client.post(
+        "/api/v1/exams",
+        json={
+            "exam_id": exam_id,
+            "name": "AI Agent Inspection Exam",
+            "exam_type": "THEORY_CIE",
+            "date": "2026-11-22",
+            "start_time": "10:00:00",
+            "end_time": "11:30:00",
+            "cutoff_minutes": 30,
+            "subject_code": "22CY77",
+        },
+        headers=admin_hdr,
+    )
+
+    client.post(
+        f"/api/v1/exams/{exam_id}/seating/upload",
+        files={"file": ("seating.csv", io.BytesIO(b"sl_no,usn,name,branch,room_no\n1,1DS23CY111,Present Person,CY,ROOM-AG\n2,1DS23CY112,Absent Person,CY,ROOM-AG\n"), "text/csv")},
+        headers=admin_hdr,
+    )
+
+    client.patch(
+        f"/api/v1/exams/{exam_id}/rooms/ROOM-AG/mark",
+        json={"marks": [{"usn": "1DS23CY111", "status": "PRESENT"}]},
+        headers=admin_hdr,
+    )
+
+    # 2. Test query_exam_status tool
+    status_tool = tool_registry.get("query_exam_status")
+    assert status_tool is not None
+    status_out = status_tool.handler(exam_id=exam_id)
+    assert status_out["status"] == "success"
+    assert status_out["count"] >= 1
+    found_ex = next(e for e in status_out["exams"] if e["exam_id"] == exam_id)
+    assert found_ex["total_students"] == 2
+    assert found_ex["present_count"] == 1
+    assert found_ex["absent_count"] == 1
+
+    # 3. Test query_exam_absentees tool
+    abs_tool = tool_registry.get("query_exam_absentees")
+    assert abs_tool is not None
+    abs_out = abs_tool.handler(exam_id=exam_id)
+    assert abs_out["status"] == "success"
+    assert abs_out["total_absentees"] == 1
+    assert abs_out["absentees"][0]["usn"] == "1DS23CY112"
+
+    # 4. Test query_exam_branch_summary tool
+    br_tool = tool_registry.get("query_exam_branch_summary")
+    assert br_tool is not None
+    br_out = br_tool.handler(exam_id=exam_id)
+    assert br_out["status"] == "success"
+    cy_br = next(b for b in br_out["branches"] if b["branch"] == "CY")
+    assert cy_br["total"] == 2
+    assert cy_br["present"] == 1
+    assert cy_br["absent"] == 1
+    assert cy_br["percentage"] == 50.0
 
