@@ -48,16 +48,19 @@ export async function recordStudentAttendance(
   }
 ): Promise<AttendanceRecord> {
   const upsert = data.upsert !== false;
+  const payload: Record<string, unknown> = {
+    session_id: sessionId,
+    usn: data.usn,
+    status: data.status,
+    source: data.source || "manual",
+    confidence: data.confidence ?? 1.0,
+  };
+  if (data.room_id) {
+    payload.room_id = data.room_id;
+  }
   return apiClient.post<AttendanceRecord>(
     `/api/v1/attendance/sessions/${encodeURIComponent(sessionId)}/record?upsert=${upsert}`,
-    {
-      session_id: sessionId,
-      usn: data.usn,
-      status: data.status,
-      room_id: data.room_id || "LH-101",
-      source: data.source || "manual",
-      confidence: data.confidence || 1.0,
-    }
+    payload
   );
 }
 
@@ -110,7 +113,7 @@ export async function reconcileAttendance(
 
   // No reason/override field is sent: the backend records the actor, role and
   // the previous -> new status itself (N5). The frontend never authors audit
-  // entries.
+  // entries or fabricated identity fields.
   await apiClient.post(
     `/api/v1/attendance/sessions/${encodeURIComponent(sessionId)}/reconcile`,
     {
@@ -118,7 +121,6 @@ export async function reconcileAttendance(
         {
           usn,
           resolved_status: resolvedStatus,
-          reconciled_by: "faculty",
           confidence: 1.0,
         },
       ],
