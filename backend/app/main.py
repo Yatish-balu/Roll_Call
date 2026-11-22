@@ -23,7 +23,7 @@ if _ENV_FILE.exists():
     load_dotenv(dotenv_path=_ENV_FILE)
 else:
     load_dotenv()
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -47,6 +47,7 @@ from app.routers import (
     defaulters_router,
     exams_router,
 )
+from app.auth import rate_limit_models
 
 
 load_dotenv()
@@ -527,10 +528,10 @@ def health_check():
     }
 
 
-@app.get("/models", tags=["General"])
-@app.get("/v1/models", tags=["General"])
-@app.get("/api/v1/models", tags=["General"])
-@app.get("/api/models", tags=["General"])
+@app.get("/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
+@app.get("/v1/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
+@app.get("/api/v1/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
+@app.get("/api/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
 def list_models():
     """Return list of models supported by the RollCall AI backend in OpenAI-compatible format."""
     return {
