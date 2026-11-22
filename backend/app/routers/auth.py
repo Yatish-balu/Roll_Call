@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import create_access_token
 from app.auth.roles import normalize_role
+from app.config import ACCESS_TOKEN_TTL_MINUTES
 from app.db import crud
 from app.db.connection import get_sync_session_factory
 from app.db.models import AuthRefreshToken, AuthSession, LoginAttempt, TeacherSubject, User
@@ -509,10 +510,10 @@ def login(request: Request, payload: LoginRequest):
             )
             db.add(refresh_record)
 
-            # 8. Issue signed JWT token with 15-minute expiry before committing the session
+            # 8. Issue signed JWT token with configured TTL before committing the session
             # so a token creation error rolls back cleanly without leaving an orphaned session.
             try:
-                exp_dt = now_dt + timedelta(minutes=15)
+                exp_dt = now_dt + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
                 exp_iso = _format_utc_iso(exp_dt)
                 token_claims = {
                     "sub": user.user_id,
@@ -521,7 +522,7 @@ def login(request: Request, payload: LoginRequest):
                     "iat": int(now_dt.timestamp()),
                     "exp": int(exp_dt.timestamp()),
                 }
-                token = create_access_token(token_claims, expires_delta=timedelta(minutes=15))
+                token = create_access_token(token_claims, expires_delta=timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES))
             except Exception as e:
                 logger.error("Failed to create JWT token on login: %s", e)
                 db.rollback()
@@ -766,8 +767,8 @@ def refresh(request: Request):
         # Fetch assigned subject codes
         subject_codes = crud.get_teacher_subjects(db, user_id=user.user_id)
 
-        # Issue replacement 15-minute access JWT
-        exp_dt = now_dt + timedelta(minutes=15)
+        # Issue replacement access JWT with configured TTL
+        exp_dt = now_dt + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
         exp_iso = _format_utc_iso(exp_dt)
         token_claims = {
             "sub": user.user_id,
@@ -776,7 +777,7 @@ def refresh(request: Request):
             "iat": int(now_dt.timestamp()),
             "exp": int(exp_dt.timestamp()),
         }
-        new_access_token = create_access_token(token_claims, expires_delta=timedelta(minutes=15))
+        new_access_token = create_access_token(token_claims, expires_delta=timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES))
 
         # Preserve remember_me cookie lifetime up to original 7-day absolute deadline
         if session_family.remember_me == 1:

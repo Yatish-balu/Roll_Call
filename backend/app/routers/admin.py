@@ -1607,8 +1607,10 @@ class AssignProctorRequest(BaseModel):
 def _ensure_proctor_column(db: Session) -> None:
     """Safely add proctor_id column to students table if it doesn't exist."""
     try:
-        cols = db.execute(text("PRAGMA table_info(students)")).fetchall()
-        col_names = [c[1] for c in cols]
+        from sqlalchemy import inspect
+        bind = db.get_bind()
+        inspector = inspect(bind)
+        col_names = {c["name"] for c in inspector.get_columns("students")}
         if "proctor_id" not in col_names:
             db.execute(
                 text(
@@ -1702,8 +1704,10 @@ class StudentProfileEditRequest(BaseModel):
 def _ensure_student_extra_columns(db: Session) -> None:
     """Add phone, personal_email, parent_phone columns to students if they don't exist."""
     try:
-        cols = db.execute(text("PRAGMA table_info(students)")).fetchall()
-        col_names = {c[1] for c in cols}
+        from sqlalchemy import inspect
+        bind = db.get_bind()
+        inspector = inspect(bind)
+        col_names = {c["name"] for c in inspector.get_columns("students")}
         for col_def in [
             ("phone", "TEXT"),
             ("personal_email", "TEXT"),
