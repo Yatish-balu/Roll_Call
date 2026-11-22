@@ -150,6 +150,17 @@ export class ApiClient {
     return res.data;
   }
 
+  /**
+   * Download a binary response (PDF export, attachment) through the same
+   * interceptor chain as every other call: the in-memory access token is
+   * attached and a 401 triggers the single-flight refresh/retry. Raw `fetch`
+   * cannot do that, which is why downloads must not read any token storage.
+   */
+  public async getBlob(url: string, config?: AxiosRequestConfig): Promise<Blob> {
+    const res = await this.axiosInstance.get<Blob>(url, { ...config, responseType: "blob" });
+    return res.data;
+  }
+
   public async post<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
     let finalConfig = config;
 

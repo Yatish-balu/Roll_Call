@@ -5,6 +5,8 @@ from __future__ import annotations
 import csv
 import io
 import logging
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +31,13 @@ from app.schemas.exams import (
     RoomSummaryItem,
 )
 from app.security.events import log_security_event
+from app.security.uploads import (
+    check_declared_content_type,
+    check_extension_consistency,
+    check_image_dimensions,
+    detect_image_type,
+    get_malware_scanner,
+)
 from app.services.exam_pdf import (
     generate_exam_absentees_statement_pdf,
     generate_printable_form_b_pdf,
@@ -42,6 +51,10 @@ router = APIRouter(tags=["Exam Hall & Form-B Control"])
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _is_production() -> bool:
+    return os.getenv("APP_ENV", "development").strip().lower() == "production"
 
 
 def _is_jit_masked(exam: Exam, current_user: AuthenticatedUser) -> tuple[bool, Optional[str]]:
@@ -502,7 +515,7 @@ def mark_room_attendance(
     exam_id: str,
     room_no: str,
     payload: BulkMarkPayload,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ):
     assignment = (
@@ -549,6 +562,22 @@ def mark_room_attendance(
     if assignment.status == "SCHEDULED":
         assignment.status = "OPEN"
 
+    # Every mutation of exam attendance is audited (mark / scan / submit), so a
+    # modified Form-B can always be traced back to an actor.
+    log_security_event(
+        "exam_attendance_marked",
+        severity="info",
+        outcome="success",
+        actor_id=current_user.user_id,
+        details={
+            "exam_id": exam_id,
+            "room_no": room_no.strip().upper(),
+            "updated_count": updated_count,
+            "marked_source": payload.marked_source,
+            "room_status": assignment.status,
+        },
+    )
+
     db.commit()
     return {"message": f"Updated attendance for {updated_count} students.", "room_status": assignment.status}
 
@@ -558,7 +587,7 @@ async def scan_form_b_photo(
     exam_id: str,
     room_no: str,
     file: UploadFile = File(...),
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ):
     assignment = (
@@ -580,8 +609,77 @@ async def scan_form_b_photo(
         )
 
     contents = await file.read()
+    if not contents:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is empty (0 bytes).",
+        )
     if len(contents) > 10 * 1024 * 1024:
-        raise HTTPException(status_code=422, detail="Image size exceeds 10MB limit.")
+        raise HTTPException(
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+            detail="Image size exceeds 10MB limit.",
+        )
+
+    # The photo must really be an image: validate magic bytes, extension and
+    # declared MIME type before anything is passed to the vision model.
+    header = contents[:32]
+    detected = detect_image_type(header)
+    if detected is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded file is not a supported image (PNG or JPEG).",
+        )
+
+    consistency = check_extension_consistency(file.filename or "", header)
+    if not consistency.ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=consistency.detail)
+
+    declared = check_declared_content_type(file.content_type, consistency.content_type)
+    if not declared.ok:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=declared.detail)
+
+    # Dimension / pixel-count and malware checks need a file on disk.
+    suffix = detected[0]
+    fd, temp_path = tempfile.mkstemp(suffix=suffix)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(contents)
+
+        dimensions = check_image_dimensions(temp_path)
+        if not dimensions.ok:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=dimensions.detail)
+
+        scanner = get_malware_scanner()
+        if not scanner.available and _is_production():
+            log_security_event(
+                "upload_rejected",
+                severity="critical",
+                outcome="failure",
+                actor_id=current_user.user_id,
+                details={"reason": "malware_scanner_unavailable", "filename": file.filename},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Uploads are temporarily unavailable because malware scanning is not configured.",
+            )
+        clean, scan_detail = scanner.scan(temp_path)
+        if not clean:
+            log_security_event(
+                "upload_rejected",
+                severity="warning",
+                outcome="failure",
+                actor_id=current_user.user_id,
+                details={"reason": "malware_scan_failed", "filename": file.filename},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"The uploaded file was rejected by the malware scan: {scan_detail}",
+            )
+    finally:
+        try:
+            os.unlink(temp_path)
+        except OSError:
+            pass
 
     extracted_rows = scan_form_b_image(contents)
     if not extracted_rows:
@@ -615,6 +713,19 @@ async def scan_form_b_photo(
     if assignment.status == "SCHEDULED":
         assignment.status = "OPEN"
 
+    log_security_event(
+        "exam_form_b_scanned",
+        severity="info",
+        outcome="success",
+        actor_id=current_user.user_id,
+        details={
+            "exam_id": exam_id,
+            "room_no": room_no.strip().upper(),
+            "matched_count": matched_count,
+            "room_status": assignment.status,
+        },
+    )
+
     db.commit()
 
     return {
@@ -628,7 +739,7 @@ async def scan_form_b_photo(
 def submit_form_b(
     exam_id: str,
     room_no: str,
-    current_user: AuthenticatedUser = Depends(get_current_user),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ):
     assignment = (

@@ -71,9 +71,9 @@ def scan_form_b_image(image_bytes: bytes) -> List[Dict[str, Any]]:
         return []
 
     # Encode image
-    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    b64 = base64.b64encode(processed_bytes).decode("utf-8")
     mime = "image/jpeg"
-    if image_bytes.startswith(b"\x89PNG"):
+    if processed_bytes.startswith(b"\x89PNG"):
         mime = "image/png"
 
     models_to_try = [DEFAULT_MODEL] + list(FALLBACK_MODELS)

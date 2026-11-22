@@ -10,6 +10,14 @@ from fastapi.testclient import TestClient
 from app.auth.jwt import create_access_token
 from app.main import app
 
+# A genuinely valid 1x1 PNG: the scan-photo endpoint now rejects malformed
+# image payloads before they reach the vision model.
+VALID_PNG = (
+    b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x02"
+    b"\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\xff\xff?\x00\x05\xfe"
+    b"\x02\xfe\r\xefF\xb8\x00\x00\x00\x00IEND\xaeB`\x82"
+)
+
 
 @pytest.fixture
 def client():
@@ -385,8 +393,16 @@ def test_scan_form_b_ai_mocked(client: TestClient, monkeypatch):
     import app.routers.exams as exams_module
     monkeypatch.setattr(exams_module, "scan_form_b_image", lambda image_bytes: mock_scan_results)
 
+    # A non-image payload is rejected before it reaches the vision model.
+    bad_scan = client.post(
+        f"/api/v1/exams/{exam_id}/rooms/CDS-105/scan-photo",
+        files={"file": ("form_b.png", io.BytesIO(b"this is not an image"), "image/png")},
+        headers=faculty_hdr,
+    )
+    assert bad_scan.status_code == 400, bad_scan.text
+
     # Invigilator uploads photo of Form-B
-    fake_img = b"\x89PNG\r\n\x1a\n" + b"\x00" * 100
+    fake_img = VALID_PNG
     scan_res = client.post(
         f"/api/v1/exams/{exam_id}/rooms/CDS-105/scan-photo",
         files={"file": ("form_b.png", io.BytesIO(fake_img), "image/png")},

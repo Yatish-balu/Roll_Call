@@ -271,16 +271,16 @@ jobs:
           from alembic.config import Config
           from alembic.script import ScriptDirectory
 
-          EXPECTED_HEAD = "0021_attendance_unlock_requests"
-
           config = Config("alembic.ini")
-          # ``command.heads()`` only prints and returns None, so read the heads
-          # from the script directory instead.
+          # Never hardcode the head revision: a new migration must not require
+          # editing this workflow (and a stale constant silently turns the gate
+          # red). The invariant is "exactly one head", not "this head".
           heads = ScriptDirectory.from_config(config).get_heads()
-          if heads != [EXPECTED_HEAD]:
+          if len(heads) != 1:
               raise SystemExit(
-                  f"Expected exactly one Alembic head ({EXPECTED_HEAD}), found: {heads}"
+                  f"Expected exactly one Alembic head, found {len(heads)}: {heads}"
               )
+          print(f"Alembic head: {heads[0]}")
 
           with tempfile.TemporaryDirectory() as tmp:
               db_path = os.path.join(tmp, "ci_migration_check.db").replace("\\", "/")

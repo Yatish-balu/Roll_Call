@@ -264,21 +264,11 @@ export const examsApi = {
 
   async downloadSignSheetPdf(examId: string, roomNo: string): Promise<Blob> {
     const url = `/api/v1/exams/${encodeURIComponent(examId)}/rooms/${encodeURIComponent(roomNo)}/sign-sheet-pdf`;
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-      },
-    });
-    return response.blob();
+    return apiClient.getBlob(url);
   },
 
   async downloadAbsenteesPdf(examId: string): Promise<Blob> {
     const url = `/api/v1/exams/${encodeURIComponent(examId)}/absentees-pdf`;
-    const response = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${localStorage.getItem("token") || ""}`,
-      },
-    });
-    return response.blob();
+    return apiClient.getBlob(url);
   },
 };
