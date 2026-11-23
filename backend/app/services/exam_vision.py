@@ -43,8 +43,8 @@ Example:
 ]
 """
 
-DEFAULT_MODEL = "gemini-3.5-flash-lite"
-FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-3.5-flash", "gemini-2.5-flash")
+DEFAULT_MODEL = "gemini-2.5-flash"
+FALLBACK_MODELS = ("gemini-flash-latest", "gemini-2.5-flash-lite", "gemini-3.5-flash-lite")
 
 
 def scan_form_b_image(image_bytes: bytes) -> List[Dict[str, Any]]:

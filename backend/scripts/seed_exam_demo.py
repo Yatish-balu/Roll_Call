@@ -56,11 +56,11 @@ def seed_exam_demo_data():
 
         # 2. Rooms
         # Ensure teachers exist
-        t1 = db.get(User, "teacher_cn")
+        t1 = db.get(User, "test_faculty") or db.get(User, "teacher_cn")
         t1_id = t1.user_id if t1 else None
 
         rooms_data = [
-            ("CDS 105", "CY Building", 35, t1_id, "SUBMITTED", "2026-11-02T10:28:15Z"),
+            ("CDS 105", "CY Building", 35, t1_id, "OPEN", None),
             ("CDS 106", "CY Building", 35, t1_id, "OPEN", None),
             ("LH 201", "Main Heritage Block", 30, t1_id, "LATE_LOCKED", None),
             ("LH 202", "Main Heritage Block", 30, t1_id, "SCHEDULED", None),

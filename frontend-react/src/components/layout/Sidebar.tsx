@@ -153,6 +153,14 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       ],
     };
 
+    const examsGroup: NavGroup = {
+      label: "Exams & Form-B",
+      items: [
+        { name: "My Invigilation", href: "/invigilation", icon: ICONS.attendance, badge: "Form-B" },
+        ...(isAdmin ? [{ name: "Exam Cell Control", href: "/exams", icon: ICONS.reports, badge: "Admin" }] : []),
+      ],
+    };
+
     const intelligence: NavGroup = {
       label: "Intelligence & Analytics",
       items: [
@@ -171,7 +179,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       ],
     };
 
-    const groups: NavGroup[] = [core, intelligence, account];
+    const groups: NavGroup[] = [core, examsGroup, intelligence, account];
 
     if (isAdmin) {
       groups.push({
