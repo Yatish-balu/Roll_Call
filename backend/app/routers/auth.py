@@ -319,6 +319,20 @@ def login(request: Request, payload: LoginRequest):
     with SessionLocal() as db:
         with _login_user_lock(clean_uid):
             user = db.get(User, clean_uid)
+            if user is None:
+                # Support login by case-insensitive user_id or email
+                user = (
+                    db.query(User)
+                    .filter(
+                        or_(
+                            func.lower(User.user_id) == clean_uid.lower(),
+                            func.lower(User.email) == clean_uid.lower(),
+                        )
+                    )
+                    .first()
+                )
+            if user is not None:
+                clean_uid = user.user_id
             record_uid = user.user_id if user is not None else None
 
             # 1. Quota check (rolling 10-minute window, per user and per IP).

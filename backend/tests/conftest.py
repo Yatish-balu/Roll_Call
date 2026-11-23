@@ -97,8 +97,14 @@ try:
 
         test_users = [
             ("00000000-0000-0000-0000-000000000001", "admin@rollcall.edu", "ADMIN", "Test Admin"),
+            ("admin_root", "admin@rollcall.internal", "ADMIN", "System Administrator"),
             ("faculty_cn", "faculty_cn@rollcall.edu", "FACULTY", "Prof. Computer Networks"),
             ("faculty_ds", "faculty_ds@rollcall.edu", "FACULTY", "Prof. Data Science"),
+            ("faculty_ml", "faculty.ml@rollcall.internal", "FACULTY", "Dr. Machine Learning"),
+            ("faculty_ai", "1ds24cy035@dsce.edu.in", "FACULTY", "Faculty AI"),
+            ("teacher_cn", "cn@rollcall.edu", "FACULTY", "Prof. CN"),
+            ("teacher_ml", "ml@rollcall.edu", "FACULTY", "Prof. ML"),
+            ("teacher_db", "db@rollcall.edu", "FACULTY", "Prof. DB"),
             ("other_faculty", "other_faculty@rollcall.edu", "FACULTY", "Prof. Other"),
             ("faculty_b", "faculty_b@rollcall.edu", "FACULTY", "Prof. B"),
             ("teacher_jane", "teacher_jane@rollcall.edu", "FACULTY", "Prof. Jane"),

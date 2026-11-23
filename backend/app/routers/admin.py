@@ -1487,21 +1487,26 @@ def create_teacher(
         if db_user is not None:
             db_user.name = payload.name.strip()
 
-        # Create default user_profiles entry
-        db.execute(
-            text("""
-                INSERT OR IGNORE INTO user_profiles
-                    (user_id, full_name, branch, designation, updated_at)
-                VALUES (:uid, :fname, :branch, :desig, :ts)
-            """),
-            {
-                "uid": clean_uid,
-                "fname": payload.name.strip(),
-                "branch": payload.branch or "",
-                "desig": payload.designation or "Faculty",
-                "ts": now_iso,
-            },
-        )
+        # Create default user_profiles entry if not already present
+        existing_profile = db.execute(
+            text("SELECT 1 FROM user_profiles WHERE user_id = :uid"),
+            {"uid": clean_uid},
+        ).fetchone()
+        if not existing_profile:
+            db.execute(
+                text("""
+                    INSERT INTO user_profiles
+                        (user_id, full_name, branch, designation, updated_at)
+                    VALUES (:uid, :fname, :branch, :desig, :ts)
+                """),
+                {
+                    "uid": clean_uid,
+                    "fname": payload.name.strip(),
+                    "branch": payload.branch or "",
+                    "desig": payload.designation or "Faculty",
+                    "ts": now_iso,
+                },
+            )
 
         crud.create_audit_entry(
             db,
