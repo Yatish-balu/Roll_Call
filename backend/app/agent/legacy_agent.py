@@ -1068,13 +1068,13 @@ class AttendanceAgent:
         records: List[Dict[str, Any]] = []
         low_confidence_rows: List[Dict[str, Any]] = []
 
-        # Check if caller query or file indicates an Academic Calendar of Events
-        if self._is_calendar_of_events_document(file_path, user_input):
-            return self._handle_calendar_events_file(file_path=file_path, request_id=request_id, user_input=user_input)
-
         # Check if caller query or file indicates an Exam Attendance Form-B document
         if self._is_exam_form_b_document(file_path, user_input):
             return self._handle_exam_form_b_file(file_path=file_path, request_id=request_id, user_input=user_input)
+
+        # Check if caller query or file indicates an Academic Calendar of Events
+        if self._is_calendar_of_events_document(file_path, user_input):
+            return self._handle_calendar_events_file(file_path=file_path, request_id=request_id, user_input=user_input)
 
         # Check if caller query indicates a timetable rather than a student roster
         if self._is_timetable_document(file_path, user_input) and suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".pdf"):
@@ -1363,9 +1363,15 @@ class AttendanceAgent:
     def _is_timetable_document(self, file_path: Path, user_input: str = "") -> bool:
         """Check if an uploaded file is a class timetable rather than an attendance roster."""
         text_lower = (user_input or "").lower()
+        fname = file_path.name.lower()
+
+        # Fast exclusion: if this is an exam form, calendar, or student roster, skip timetable check
+        if any(w in fname for w in ["form-b", "form_b", "formb", "cie", "calendar", "coe", "roster", "student"]):
+            return False
+
         if any(w in text_lower for w in ["timetable", "time table", "schedule", "routine", "periods", "classes"]):
             return True
-        if any(w in file_path.name.lower() for w in ["timetable", "schedule", "routine", "time_table"]):
+        if any(w in fname for w in ["timetable", "schedule", "routine", "time_table"]):
             return True
 
         suffix = file_path.suffix.lower()
@@ -1377,6 +1383,8 @@ class AttendanceAgent:
                 if api_key and not api_key.startswith("your_"):
                     client = genai.Client(api_key=api_key)
                     img = Image.open(str(file_path))
+                    # Downscale for quick check
+                    img.thumbnail((800, 800))
                     for m in ("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"):
                         try:
                             res = client.models.generate_content(
@@ -1401,6 +1409,12 @@ class AttendanceAgent:
                 bgr = cv2.imread(str(file_path))
                 if bgr is not None:
                     h, w = bgr.shape[:2]
+                    # Downscale for fast CPU OCR
+                    max_dim = 1000
+                    if max(h, w) > max_dim:
+                        scale = max_dim / float(max(h, w))
+                        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                        h, w = bgr.shape[:2]
                     top_crop = bgr[: int(h * 0.35), :]
                     try:
                         from tools.read_photo_tool import _get_easyocr_reader
@@ -1515,13 +1529,19 @@ class AttendanceAgent:
     def _is_calendar_of_events_document(self, file_path: Path, user_input: str = "") -> bool:
         """Check if an uploaded file is an institutional Calendar of Events / Academic Schedule."""
         text_lower = (user_input or "").lower()
+        fname = file_path.name.lower()
+
+        # Fast exclusion: if this is an exam form, timetable, or student roster, skip calendar check
+        if any(w in fname for w in ["form-b", "form_b", "formb", "cie", "timetable", "time_table", "roster", "student"]):
+            return False
+
         if any(w in text_lower for w in [
             "calendar", "calender", "events", "holiday", "academic calendar", "calendar of events", "schedule of events",
             "cie schedule", "exam schedule", "milestones", "upload to calendar", "add to calendar", "sync to calendar",
             "upload it to calender", "upload to calender", "upload it to calendar"
         ]):
             return True
-        if any(w in file_path.name.lower() for w in ["calendar", "calender", "event", "coe", "academic_cal"]):
+        if any(w in fname for w in ["calendar", "calender", "event", "coe", "academic_cal"]):
             return True
 
         suffix = file_path.suffix.lower()
@@ -1533,6 +1553,8 @@ class AttendanceAgent:
                 if api_key and not api_key.startswith("your_"):
                     client = genai.Client(api_key=api_key)
                     img = Image.open(str(file_path))
+                    # Downscale for quick check
+                    img.thumbnail((800, 800))
                     for m in ("gemini-3.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"):
                         try:
                             res = client.models.generate_content(
@@ -1557,6 +1579,12 @@ class AttendanceAgent:
                 bgr = cv2.imread(str(file_path))
                 if bgr is not None:
                     h, w = bgr.shape[:2]
+                    # Downscale for fast CPU OCR
+                    max_dim = 1000
+                    if max(h, w) > max_dim:
+                        scale = max_dim / float(max(h, w))
+                        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                        h, w = bgr.shape[:2]
                     top_crop = bgr[: int(h * 0.45), :]
                     try:
                         from tools.read_photo_tool import _get_easyocr_reader
@@ -1871,11 +1899,41 @@ class AttendanceAgent:
 
         suffix = file_path.suffix.lower()
         if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+            # Fast Vision AI classifier check using gemini-3.5-flash-lite
+            api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+            if api_key and not api_key.startswith("your_"):
+                try:
+                    from google import genai
+                    from PIL import Image
+                    client = genai.Client(api_key=api_key)
+                    with Image.open(str(file_path)) as pil_raw:
+                        img = pil_raw.copy()
+                    img.thumbnail((400, 400))
+                    res = client.models.generate_content(
+                        model="gemini-3.5-flash-lite",
+                        contents=[
+                            "Look at this document photo. Is this an Examination Form-B attendance sheet (with columns for exam dates, subject codes, and student signatures)? Answer ONLY 'YES' or 'NO'.",
+                            img,
+                        ],
+                    )
+                    ans = (res.text or "").strip().upper()
+                    if "YES" in ans:
+                        return True
+                    elif "NO" in ans:
+                        return False
+                except Exception:
+                    pass
+
             try:
                 import cv2
                 bgr = cv2.imread(str(file_path))
                 if bgr is not None:
                     h, w = bgr.shape[:2]
+                    max_dim = 1000
+                    if max(h, w) > max_dim:
+                        scale = max_dim / float(max(h, w))
+                        bgr = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                        h, w = bgr.shape[:2]
                     top_crop = bgr[: int(h * 0.40), :]
                     try:
                         from tools.read_photo_tool import _get_easyocr_reader
@@ -1925,41 +1983,71 @@ class AttendanceAgent:
         extracted_students: List[Dict[str, str]] = []
 
         if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
+            # High-precision Gemini Vision scan
             try:
-                import cv2
-                bgr = cv2.imread(str(file_path))
-                if bgr is not None:
-                    h, w = bgr.shape[:2]
-                    top_crop = bgr[: int(h * 0.40), :]
-                    from tools.read_photo_tool import _get_easyocr_reader
-                    reader_ocr = _get_easyocr_reader()
-                    top_text = " ".join(reader_ocr.readtext(top_crop, detail=0)).upper()
+                with open(str(file_path), "rb") as fh:
+                    raw_bytes = fh.read()
+                from app.services.exam_vision import scan_form_b_image
+                vision_res = scan_form_b_image(raw_bytes, target_room_no=room_no)
+                if vision_res and len(vision_res) > 0:
+                    for row in vision_res:
+                        extracted_students.append({
+                            "usn": row["usn"],
+                            "name": row.get("name", ""),
+                            "status": row.get("status", "PRESENT"),
+                            "confidence": row.get("confidence", 0.95),
+                            "room_no": room_no,
+                        })
+                    if hasattr(vision_res, "detected_columns") and vision_res.detected_columns:
+                        detected_columns = vision_res.detected_columns
+            except Exception as v_err:
+                logger.debug("Vision scan in _handle_exam_form_b_file failed: %s", v_err)
 
-                    # Extract room if present
-                    rm = re.search(r"ROOM\s*NO\.?\s*([A-Za-z0-9\s|-]+)", top_text)
-                    if rm:
-                        raw_rm = rm.group(1).strip()
-                        raw_rm = re.sub(r"[\s|]+", "-", raw_rm).strip("-")
-                        if "CDS" in raw_rm:
-                            room_no = "CDS-105"
-                        elif "LH" in raw_rm:
-                            room_no = raw_rm
+            if not extracted_students:
+                try:
+                    import cv2
+                    bgr = cv2.imread(str(file_path))
+                    if bgr is not None:
+                        h, w = bgr.shape[:2]
+                        # Downscale for ultra-fast, accurate single-pass CPU OCR
+                        max_dim = 1200
+                        if max(h, w) > max_dim:
+                            scale = max_dim / float(max(h, w))
+                            bgr_scaled = cv2.resize(bgr, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+                        else:
+                            bgr_scaled = bgr
 
-                    # Extract semester if present
-                    sem_m = re.search(r"SEMESTER\s*[-:]?\s*([0-9]+)", top_text)
-                    if sem_m:
-                        semester = int(sem_m.group(1))
+                        from tools.read_photo_tool import _get_easyocr_reader
+                        reader_ocr = _get_easyocr_reader()
+                    
+                        # Single-pass OCR over scaled image
+                        full_text_items = reader_ocr.readtext(bgr_scaled, detail=0)
+                        full_text = " ".join(full_text_items).upper()
 
-                    # Extract USNs across full image
-                    full_text_items = reader_ocr.readtext(bgr, detail=0)
-                    for item in full_text_items:
-                        usn_match = re.search(r"\b(1DS[0-9]{2}[A-Za-z]{2}[0-9]{3})\b", item, re.IGNORECASE)
-                        if usn_match:
-                            u = usn_match.group(1).upper()
-                            if not any(s["usn"] == u for s in extracted_students):
-                                extracted_students.append({"usn": u, "room_no": room_no})
-            except Exception as exc:
-                logger.debug("EasyOCR parsing of Form-B image failed: %s", exc)
+                        # Extract room if present
+                        rm = re.search(r"ROOM\s*NO\.?\s*([A-Za-z0-9\s|-]+)", full_text)
+                        if rm:
+                            raw_rm = rm.group(1).strip()
+                            raw_rm = re.sub(r"[\s|]+", "-", raw_rm).strip("-")
+                            if "CDS" in raw_rm:
+                                room_no = "CDS-105"
+                            elif "LH" in raw_rm:
+                                room_no = raw_rm
+
+                        # Extract semester if present
+                        sem_m = re.search(r"SEMESTER\s*[-:]?\s*([0-9]+)", full_text)
+                        if sem_m:
+                            semester = int(sem_m.group(1))
+
+                        # Extract USNs across full image text items
+                        for item in full_text_items:
+                            usn_match = re.search(r"\b(1DS[0-9]{2}[A-Za-z]{2}[0-9]{3})\b", item, re.IGNORECASE)
+                            if usn_match:
+                                u = usn_match.group(1).upper()
+                                if not any(s["usn"] == u for s in extracted_students):
+                                    extracted_students.append({"usn": u, "room_no": room_no})
+                except Exception as exc:
+                    logger.debug("Fast OCR parsing of Form-B image failed: %s", exc)
 
         # Query database for scheduled exams
         matching_exams: List[Dict[str, Any]] = []

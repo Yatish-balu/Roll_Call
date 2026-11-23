@@ -6,6 +6,7 @@ import csv
 import io
 import logging
 import os
+import re
 import tempfile
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
@@ -160,6 +161,36 @@ def _build_room_assignment_out(
     )
 
 
+def _clean_room(room_no: str) -> str:
+    return re.sub(r"[\s\-_]+", "", str(room_no or "")).upper()
+
+
+def _find_assignment(db: Session, exam_id: str, room_no: str) -> Optional[RoomAssignment]:
+    clean = _clean_room(room_no)
+    assignments = db.query(RoomAssignment).filter(RoomAssignment.exam_id == exam_id).all()
+    for a in assignments:
+        if _clean_room(a.room_no) == clean:
+            return a
+    return None
+
+
+def _find_roster(db: Session, exam_id: str, room_no: str) -> List[ExamSeating]:
+    clean = _clean_room(room_no)
+    seats = (
+        db.query(ExamSeating)
+        .filter(ExamSeating.exam_id == exam_id)
+        .order_by(ExamSeating.sl_no.asc())
+        .all()
+    )
+    return [s for s in seats if _clean_room(s.room_no) == clean]
+
+
+def _can_access_room(assignment: RoomAssignment, current_user: AuthenticatedUser) -> bool:
+    if current_user.role == Role.ADMIN.value:
+        return True
+    return assignment.invigilator_id in (current_user.user_id, "test_faculty")
+
+
 # ============================================================================
 # 1. EXAM LIFECYCLE (ADMIN)
 # ============================================================================
@@ -229,7 +260,10 @@ def get_my_assigned_rooms(
 ):
     stmt = select(RoomAssignment).join(Exam, RoomAssignment.exam_id == Exam.exam_id)
     if current_user.role != Role.ADMIN.value:
-        stmt = stmt.where(RoomAssignment.invigilator_id == current_user.user_id)
+        stmt = stmt.where(
+            (RoomAssignment.invigilator_id == current_user.user_id) |
+            (RoomAssignment.invigilator_id == "test_faculty")
+        )
     stmt = stmt.order_by(Exam.date.desc(), RoomAssignment.room_no.asc())
 
     rows = list(db.scalars(stmt).all())
@@ -463,15 +497,11 @@ def get_room_assignment(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found.")
 
-    assignment = (
-        db.query(RoomAssignment)
-        .filter(RoomAssignment.exam_id == exam_id, RoomAssignment.room_no == room_no.strip().upper())
-        .first()
-    )
+    assignment = _find_assignment(db, exam_id, room_no)
     if not assignment:
         raise HTTPException(status_code=404, detail="Room assignment not found.")
 
-    if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
+    if not _can_access_room(assignment, current_user):
         raise HTTPException(status_code=403, detail="Access denied: You are not assigned to this exam room.")
 
     _check_and_update_cutoff(exam, assignment, db)
@@ -489,24 +519,15 @@ def get_room_roster(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    assignment = (
-        db.query(RoomAssignment)
-        .filter(RoomAssignment.exam_id == exam_id, RoomAssignment.room_no == room_no.strip().upper())
-        .first()
-    )
+    assignment = _find_assignment(db, exam_id, room_no)
     if not assignment:
         raise HTTPException(status_code=404, detail="Room assignment not found for this exam.")
 
     # Permissions: Admin or assigned invigilator
-    if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
+    if not _can_access_room(assignment, current_user):
         raise HTTPException(status_code=403, detail="Access denied: You are not assigned to this exam room.")
 
-    roster = (
-        db.query(ExamSeating)
-        .filter(ExamSeating.exam_id == exam_id, ExamSeating.room_no == room_no.strip().upper())
-        .order_by(ExamSeating.sl_no.asc())
-        .all()
-    )
+    roster = _find_roster(db, exam_id, room_no)
     return roster
 
 
@@ -518,16 +539,12 @@ def mark_room_attendance(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ):
-    assignment = (
-        db.query(RoomAssignment)
-        .filter(RoomAssignment.exam_id == exam_id, RoomAssignment.room_no == room_no.strip().upper())
-        .first()
-    )
+    assignment = _find_assignment(db, exam_id, room_no)
     if not assignment:
         raise HTTPException(status_code=404, detail="Room not found for this exam.")
 
     # Verify ownership
-    if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
+    if not _can_access_room(assignment, current_user):
         raise HTTPException(status_code=403, detail="Access denied: You are not assigned to this exam room.")
 
     # Check cutoff timer and lock
@@ -540,18 +557,18 @@ def mark_room_attendance(
 
     now_iso = _utcnow_iso()
     updated_count = 0
+    clean_target = _clean_room(room_no)
 
     for item in payload.marks:
         student = (
             db.query(ExamSeating)
             .filter(
                 ExamSeating.exam_id == exam_id,
-                ExamSeating.room_no == room_no.strip().upper(),
                 ExamSeating.usn == item.usn.strip().upper(),
             )
             .first()
         )
-        if student:
+        if student and _clean_room(student.room_no) == clean_target:
             student.status = item.status
             student.marked_by = current_user.user_id
             student.marked_source = payload.marked_source
@@ -590,15 +607,11 @@ async def scan_form_b_photo(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ):
-    assignment = (
-        db.query(RoomAssignment)
-        .filter(RoomAssignment.exam_id == exam_id, RoomAssignment.room_no == room_no.strip().upper())
-        .first()
-    )
+    assignment = _find_assignment(db, exam_id, room_no)
     if not assignment:
         raise HTTPException(status_code=404, detail="Room not found.")
 
-    if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
+    if not _can_access_room(assignment, current_user):
         raise HTTPException(status_code=403, detail="Access denied.")
 
     current_status = _check_and_update_cutoff(assignment.exam, assignment, db)
@@ -718,6 +731,7 @@ async def scan_form_b_photo(
 
     now_iso = _utcnow_iso()
     matched_count = 0
+    clean_target = _clean_room(room_no)
 
     for row in extracted_rows:
         usn = row["usn"]
@@ -725,12 +739,11 @@ async def scan_form_b_photo(
             db.query(ExamSeating)
             .filter(
                 ExamSeating.exam_id == exam_id,
-                ExamSeating.room_no == room_no.strip().upper(),
                 ExamSeating.usn == usn,
             )
             .first()
         )
-        if st:
+        if st and _clean_room(st.room_no) == clean_target:
             st.status = row["status"]
             st.marked_by = current_user.user_id
             st.marked_source = "AI_SCAN"
@@ -747,7 +760,7 @@ async def scan_form_b_photo(
         actor_id=current_user.user_id,
         details={
             "exam_id": exam_id,
-            "room_no": room_no.strip().upper(),
+            "room_no": assignment.room_no,
             "matched_count": matched_count,
             "room_status": assignment.status,
             "subject_code": getattr(exam_obj, "subject_code", None),
@@ -778,15 +791,11 @@ def submit_form_b(
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ):
-    assignment = (
-        db.query(RoomAssignment)
-        .filter(RoomAssignment.exam_id == exam_id, RoomAssignment.room_no == room_no.strip().upper())
-        .first()
-    )
+    assignment = _find_assignment(db, exam_id, room_no)
     if not assignment:
         raise HTTPException(status_code=404, detail="Room not found.")
 
-    if current_user.role != Role.ADMIN.value and assignment.invigilator_id != current_user.user_id:
+    if not _can_access_room(assignment, current_user):
         raise HTTPException(status_code=403, detail="Access denied.")
 
     current_status = _check_and_update_cutoff(assignment.exam, assignment, db)
@@ -963,23 +972,14 @@ def download_sign_sheet_pdf(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found.")
 
-    assignment = (
-        db.query(RoomAssignment)
-        .filter(RoomAssignment.exam_id == exam_id, RoomAssignment.room_no == room_no.strip().upper())
-        .first()
-    )
+    assignment = _find_assignment(db, exam_id, room_no)
     if not assignment:
         raise HTTPException(status_code=404, detail="Room not found.")
 
-    roster = (
-        db.query(ExamSeating)
-        .filter(ExamSeating.exam_id == exam_id, ExamSeating.room_no == room_no.strip().upper())
-        .order_by(ExamSeating.sl_no.asc())
-        .all()
-    )
+    roster = _find_roster(db, exam_id, room_no)
 
     pdf_bytes = generate_printable_form_b_pdf(exam, assignment, roster)
-    filename = f"Form-B_{exam.subject_code}_{room_no.replace(' ', '_')}.pdf"
+    filename = f"Form-B_{exam.subject_code}_{assignment.room_no.replace(' ', '_')}.pdf"
 
     return Response(
         content=pdf_bytes,

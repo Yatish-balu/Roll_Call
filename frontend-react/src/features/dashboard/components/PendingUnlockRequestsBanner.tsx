@@ -13,7 +13,7 @@ interface PendingUnlockRequestsBannerProps {
 export function PendingUnlockRequestsBanner({ isAdmin }: PendingUnlockRequestsBannerProps) {
   const navigate = useNavigate();
   const [requests, setRequests] = useState<AttendanceUnlockRequest[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
+  const [_isLoading, setIsLoading] = useState(false);
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 

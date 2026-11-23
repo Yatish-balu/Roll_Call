@@ -140,6 +140,14 @@ def apply_security_headers(scope: Mapping[str, object], message: Message) -> Non
         os.getenv("X_FRAME_OPTIONS", "").strip().upper() or "DENY",
     )
     headers.setdefault("Content-Security-Policy", content_security_policy_for(path))
+
+    # Personalized/authenticated API responses must never be kept by a shared
+    # browser or proxy cache. ``no-cache`` (used by a few streaming endpoints)
+    # still permits storage and revalidation; ``no-store`` forbids storage.
+    if path == "/api" or path.startswith("/api/"):
+        headers["Cache-Control"] = "no-store"
+        headers["Pragma"] = "no-cache"
+
     headers.setdefault("Cross-Origin-Opener-Policy", "same-origin")
     headers.setdefault("Cross-Origin-Resource-Policy", "same-origin")
     headers.setdefault("X-Permitted-Cross-Domain-Policies", "none")

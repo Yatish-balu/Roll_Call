@@ -61,6 +61,13 @@ def test_security_headers_on_api_response(client):
     assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
 
 
+def test_authenticated_api_responses_are_not_cacheable(client):
+    """No shared/proxy cache may retain personalized API responses."""
+    response = client.get("/api/v1/auth/me")
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["pragma"] == "no-cache"
+
+
 def test_hsts_only_over_tls(client):
     assert "strict-transport-security" not in client.get("/health").headers
 

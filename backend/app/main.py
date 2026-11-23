@@ -5,6 +5,14 @@ from __future__ import annotations
 import logging
 import os
 import sys
+
+# On Windows, use SelectorEventLoop to prevent Proactor IOCP WinError 64 socket disconnects
+if sys.platform == "win32":
+    import asyncio
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import List, Optional
@@ -592,24 +600,32 @@ app.include_router(calendar_router, prefix="/api/v1")
 app.include_router(defaulters_router, prefix="/api/v1")
 app.include_router(exams_router, prefix="/api/v1/exams")
 
-# Unversioned /api/ Routers (matching RollCall Playbook API Contract)
-app.include_router(auth_router, prefix="/api")
-app.include_router(me_router, prefix="/api")
-app.include_router(meta_router, prefix="/api")
-app.include_router(admin_router, prefix="/api")
-app.include_router(students_router, prefix="/api")
-app.include_router(rooms_router, prefix="/api")
-app.include_router(sessions_router, prefix="/api")
-app.include_router(timetable_router, prefix="/api")
-app.include_router(attendance_router, prefix="/api")
-app.include_router(analytics_router, prefix="/api")
-app.include_router(reports_router, prefix="/api")
-app.include_router(agent_router, prefix="/api")
-app.include_router(agent_stream_router, prefix="/api")
-app.include_router(profile_router, prefix="/api")
-app.include_router(calendar_router, prefix="/api")
-app.include_router(defaulters_router, prefix="/api")
-app.include_router(exams_router, prefix="/api/exams")
+# Unversioned /api/ Routers - compatibility surface required by the RollCall
+# Playbook contract and the original Streamlit client. It is deliberately kept
+# enabled by default; set ENABLE_LEGACY_API_PREFIX=0 once every caller uses
+# /api/v1. Both prefixes share the same router instances and the same auth,
+# CSRF, rate-limit and security-header enforcement - there is no second,
+# weaker API surface.
+if os.getenv("ENABLE_LEGACY_API_PREFIX", "true").strip().lower() not in {
+    "0", "false", "no", "off",
+}:
+    app.include_router(auth_router, prefix="/api")
+    app.include_router(me_router, prefix="/api")
+    app.include_router(meta_router, prefix="/api")
+    app.include_router(admin_router, prefix="/api")
+    app.include_router(students_router, prefix="/api")
+    app.include_router(rooms_router, prefix="/api")
+    app.include_router(sessions_router, prefix="/api")
+    app.include_router(timetable_router, prefix="/api")
+    app.include_router(attendance_router, prefix="/api")
+    app.include_router(analytics_router, prefix="/api")
+    app.include_router(reports_router, prefix="/api")
+    app.include_router(agent_router, prefix="/api")
+    app.include_router(agent_stream_router, prefix="/api")
+    app.include_router(profile_router, prefix="/api")
+    app.include_router(calendar_router, prefix="/api")
+    app.include_router(defaulters_router, prefix="/api")
+    app.include_router(exams_router, prefix="/api/exams")
 
 
 

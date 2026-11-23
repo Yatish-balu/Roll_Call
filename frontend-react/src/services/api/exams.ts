@@ -133,6 +133,21 @@ export interface FormBScanResult {
     has_signature?: boolean;
     raw_status_text?: string;
   }>;
+  tally?: {
+    students_present?: number | string;
+    students_absent?: number | string;
+    invigilator_initials?: string;
+  };
+  detected_columns?: Array<{
+    column_index?: number;
+    date?: string;
+    subject_code?: string;
+    slot?: string;
+  }>;
+  target_column_matched?: {
+    column_index?: number;
+    subject_code?: string;
+  };
 }
 
 export const examsApi = {

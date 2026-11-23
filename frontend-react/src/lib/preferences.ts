@@ -16,7 +16,7 @@ const STORAGE_PREFIX = "rollcall.pref.";
  *  (e.g. collapsing the sidebar from the Settings page). */
 export const PREFERENCES_CHANGED_EVENT = "rollcall:preferences-changed";
 
-export type ThemePreference = "light" | "warm" | "dark";
+export type ThemePreference = "warm" | "dark";
 export type SidebarDensity = "comfortable" | "compact";
 
 export interface AppPreferences {

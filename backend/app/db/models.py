@@ -8,13 +8,17 @@ from typing import List, Optional
 from uuid import uuid4
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
+    Column,
+    DateTime,
     ForeignKey,
     ForeignKeyConstraint,
     Index,
     Integer,
     String,
     Float,
+    Table,
     Text,
     UniqueConstraint,
     event,
@@ -1482,6 +1486,23 @@ class ExamSeating(Base):
             "marked_source": self.marked_source,
             "marked_at": self.marked_at,
         }
+
+
+# -- Password-reset one-time codes -------------------------------------------
+# Core table (no ORM class needed): declared here so Base.metadata - and the
+# migration/model drift regression test - sees the table created by migration
+# 0023_otp_codes.
+otp_codes = Table(
+    "otp_codes",
+    Base.metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", String, nullable=False),
+    Column("code", String(6), nullable=False),
+    Column("expires_at", DateTime, nullable=False),
+    Column("used", Boolean, nullable=False, default=False),
+    UniqueConstraint("user_id", name="uq_otp_user"),
+    Index("ix_otp_expires", "expires_at"),
+)
 
 
 

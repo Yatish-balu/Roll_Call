@@ -102,11 +102,18 @@ def get_email_provider() -> EmailProvider:
         port = int(os.getenv("SMTP_PORT", "587"))
     except ValueError:
         port = 587
+    raw_password = (os.getenv("SMTP_PASSWORD") or "").strip()
+    # Strip spaces from app passwords (e.g. Gmail 16-character keys formatted as 'xxxx xxxx xxxx xxxx')
+    clean_password = raw_password.replace(" ", "") if raw_password else None
+
+    tls_env = os.getenv("SMTP_STARTTLS") or os.getenv("SMTP_USE_TLS", "1")
+    use_tls = str(tls_env).strip().lower() not in ("0", "false", "no", "off")
+
     return SmtpEmailProvider(
         host=host,
         port=port,
         username=os.getenv("SMTP_USERNAME") or None,
-        password=os.getenv("SMTP_PASSWORD") or None,
-        sender=os.getenv("SMTP_SENDER", "no-reply@rollcall.internal"),
-        use_tls=os.getenv("SMTP_STARTTLS", "1") not in ("0", "false", "False"),
+        password=clean_password,
+        sender=os.getenv("SMTP_SENDER") or os.getenv("SMTP_USERNAME") or "no-reply@rollcall.internal",
+        use_tls=use_tls,
     )

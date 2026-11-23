@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { apiClient } from "@/services/api/client";
 import {
@@ -86,13 +87,24 @@ interface ChatMessage {
   confirmation?: ConfirmationRequest | null;
   confirmationCard?: ConfirmationCardData | null;
   qualityRejection?: PhotoQualityRejectionData | null;
+  imageUrl?: string;
+  fileName?: string;
+  fileSize?: number;
   error?: boolean;
+  examFormBData?: {
+    roomNo?: string;
+    semester?: number;
+    department?: string;
+    examId?: string;
+    examName?: string;
+  } | null;
 }
 
 const QUICK_PROMPTS = [
   "Summarize today's overall attendance",
   "List students with attendance below 75%",
   "Which sessions have pending unreviewed attendance?",
+  "Check my exam invigilation duties",
   "Show attendance statistics for Computer Science (CSE)",
 ];
 
@@ -110,12 +122,21 @@ interface ContextAction {
   label: string;
   prompt: string;
   variant?: "primary" | "danger" | "default";
+  href?: string;
 }
 
 function getContextualActions(m: ChatMessage): ContextAction[] {
   const text = m.text || "";
   const lower = text.toLowerCase();
   const actions: ContextAction[] = [];
+
+  // Form-B Exam Attendance Sheet
+  if (lower.includes("form-b") || lower.includes("exam attendance")) {
+    return [
+      { label: "📝 Open Exam Hall Module", prompt: "", variant: "primary", href: "/exams" },
+      { label: "📋 My Invigilation Rooms", prompt: "", href: "/invigilation" },
+    ];
+  }
 
   // 1. Proposal or Confirmation
   if (
@@ -290,9 +311,9 @@ function ExpiryBadge({ expiresAt }: { expiresAt?: string }) {
   );
 }
 
-export const CHAT_STORAGE_KEY = "rollcall_recent_chat_messages_v1";
+const CHAT_STORAGE_KEY = "rollcall_recent_chat_messages_v1";
 
-export function getUserChatStorageKey(userId?: string | null, threadId?: string | null): string {
+function getUserChatStorageKey(userId?: string | null, threadId?: string | null): string {
   return userId ? `rollcall_chat_${userId}_${threadId || "current"}` : "rollcall_chat_guest";
 }
 
@@ -323,17 +344,91 @@ function defaultWelcomeMessage(): ChatMessage {
   };
 }
 
+function getLocalChatThreads(userId?: string | null): UserChatThreadSummary[] {
+  if (typeof window === "undefined" || !userId) return [];
+  const results: UserChatThreadSummary[] = [];
+  const seenThreads = new Set<string>();
+  try {
+    for (let i = 0; i < window.localStorage.length; i++) {
+      const key = window.localStorage.key(i);
+      if (key && key.startsWith(`rollcall_chat_${userId}_`)) {
+        let threadId = key.replace(`rollcall_chat_${userId}_`, "");
+        if (threadId === "current") {
+          const activeId = window.localStorage.getItem(`rollcall_active_thread_${userId}`);
+          threadId = activeId || "thread_active";
+        }
+        if (seenThreads.has(threadId)) continue;
+        seenThreads.add(threadId);
+
+        const raw = window.localStorage.getItem(key);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            const firstUserMsg = parsed.find((m: ChatMessage) => m.sender === "user" && m.text);
+            const lastMsg = parsed[parsed.length - 1];
+            results.push({
+              thread_id: threadId,
+              user_id: userId,
+              title: firstUserMsg ? firstUserMsg.text.slice(0, 45) : "Saved Conversation",
+              created_at: parsed[0]?.timestamp || "",
+              updated_at: lastMsg?.timestamp || "",
+              is_pinned: false,
+              is_archived: false,
+              message_count: parsed.length,
+              last_message: lastMsg?.text?.slice(0, 60),
+            });
+          }
+        }
+      }
+    }
+  } catch {
+    // ignore
+  }
+  return results;
+}
+
 export function AssistantView() {
+  const navigate = useNavigate();
   const { session } = useAuth();
   const userId = session?.userId;
 
-  const [messages, setMessages] = useState<ChatMessage[]>([defaultWelcomeMessage()]);
+  const prevUserIdRef = useRef<string | undefined>(userId);
+  const [messages, setMessages] = useState<ChatMessage[]>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const storedKey = userId ? `rollcall_chat_${userId}_current` : CHAT_STORAGE_KEY;
+        const stored =
+          window.localStorage.getItem(storedKey) ||
+          window.localStorage.getItem(CHAT_STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            return parsed;
+          }
+        }
+      } catch {
+        // fallback
+      }
+    }
+    return [defaultWelcomeMessage()];
+  });
   const [threads, setThreads] = useState<UserChatThreadSummary[]>([]);
-  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  const [currentThreadId, setCurrentThreadId] = useState<string>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        const storedActive = window.localStorage.getItem(`rollcall_active_thread_${userId || "user"}`);
+        if (storedActive) return storedActive;
+      } catch {
+        // fallback
+      }
+    }
+    return `thread_${Date.now()}`;
+  });
   const [currentThreadTitle, setCurrentThreadTitle] = useState<string>("New Conversation");
   const [isRecentDrawerOpen, setIsRecentDrawerOpen] = useState(false);
   const [recentSearchQuery, setRecentSearchQuery] = useState("");
   const [isLoadingThreads, setIsLoadingThreads] = useState(false);
+  const [lastAttemptedFile, setLastAttemptedFile] = useState<File | null>(null);
 
   const [sessions, setSessions] = useState<Array<{ session_id: string; subject?: string; date?: string }>>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
@@ -345,11 +440,17 @@ export function AssistantView() {
 
   // Synchronize threads on user identity change (strict per-account isolation)
   useEffect(() => {
-    // Account switch protection: immediately clear in-memory chat
-    setMessages([defaultWelcomeMessage()]);
-    setCurrentThreadId(null);
-    setCurrentThreadTitle("New Conversation");
-    setThreads([]);
+    // Only reset chat if the user explicitly switched accounts (e.g. from user A to user B)
+    const isUserSwitch = prevUserIdRef.current !== undefined && prevUserIdRef.current !== userId;
+    prevUserIdRef.current = userId;
+
+    if (isUserSwitch) {
+      setMessages([defaultWelcomeMessage()]);
+      const freshId = `thread_${Date.now()}`;
+      setCurrentThreadId(freshId);
+      setCurrentThreadTitle("New Conversation");
+      setThreads([]);
+    }
 
     if (!userId) return;
 
@@ -359,38 +460,70 @@ export function AssistantView() {
     fetchUserChatThreads()
       .then(async (userThreads) => {
         if (!isMounted) return;
-        setThreads(userThreads);
-        if (userThreads && userThreads.length > 0) {
-          const latest = userThreads[0];
-          setCurrentThreadId(latest.thread_id);
-          setCurrentThreadTitle(latest.title);
+        const localList = getLocalChatThreads(userId);
+        const map = new Map<string, UserChatThreadSummary>();
+        (userThreads || []).forEach((t) => map.set(t.thread_id, t));
+        localList.forEach((t) => {
+          if (!map.has(t.thread_id)) map.set(t.thread_id, t);
+        });
+        const combined = Array.from(map.values());
+        setThreads(combined);
+
+        if (combined.length > 0) {
+          const storedActive = window.localStorage.getItem(`rollcall_active_thread_${userId}`);
+          const target = (storedActive && combined.find((t) => t.thread_id === storedActive)) || combined[0];
+          setCurrentThreadId(target.thread_id);
+          setCurrentThreadTitle(target.title);
+
           try {
-            const detail = await fetchChatThread(latest.thread_id);
+            const detail = await fetchChatThread(target.thread_id);
             if (isMounted && detail && detail.messages && detail.messages.length > 0) {
               setMessages(detail.messages.map(parseStoredBackendMessage));
               return;
             }
           } catch {
-            const localRaw = window.localStorage.getItem(getUserChatStorageKey(userId, latest.thread_id));
-            if (localRaw) {
-              try {
-                const parsed = JSON.parse(localRaw);
-                if (Array.isArray(parsed) && parsed.length > 0) {
-                  setMessages(parsed);
-                  return;
-                }
-              } catch {
-                // Ignore parse errors on cached messages
+            // fallback to local cached thread below
+          }
+
+          const localRaw =
+            window.localStorage.getItem(getUserChatStorageKey(userId, target.thread_id)) ||
+            window.localStorage.getItem(getUserChatStorageKey(userId, "current"));
+          if (localRaw) {
+            try {
+              const parsed = JSON.parse(localRaw);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                setMessages(parsed);
+                return;
               }
+            } catch {
+              // Ignore parse errors on cached messages
             }
           }
         } else {
-          setCurrentThreadId(`thread_${Date.now()}`);
+          // If no remote threads exist, check if we have local active conversation
+          const localActive =
+            window.localStorage.getItem(getUserChatStorageKey(userId, "current")) ||
+            window.localStorage.getItem(CHAT_STORAGE_KEY);
+          if (localActive) {
+            try {
+              const parsed = JSON.parse(localActive);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                setMessages(parsed);
+              }
+            } catch {
+              // ignore
+            }
+          }
+          setCurrentThreadId((prev) => prev || `thread_${Date.now()}`);
         }
       })
       .catch(() => {
         if (!isMounted) return;
-        const localRaw = window.localStorage.getItem(getUserChatStorageKey(userId, "current"));
+        const localList = getLocalChatThreads(userId);
+        setThreads(localList);
+        const localRaw =
+          window.localStorage.getItem(getUserChatStorageKey(userId, "current")) ||
+          window.localStorage.getItem(CHAT_STORAGE_KEY);
         if (localRaw) {
           try {
             const parsed = JSON.parse(localRaw);
@@ -401,7 +534,7 @@ export function AssistantView() {
             // Ignore parse errors on cached fallback
           }
         }
-        setCurrentThreadId(`thread_${Date.now()}`);
+        setCurrentThreadId((prev) => prev || `thread_${Date.now()}`);
       })
       .finally(() => {
         if (isMounted) setIsLoadingThreads(false);
@@ -414,15 +547,21 @@ export function AssistantView() {
 
   // Persist messages whenever updated, scoped strictly to user and active thread
   useEffect(() => {
-    if (!userId || !currentThreadId) return;
-
     // 1. Scoped local storage
     if (typeof window !== "undefined") {
       try {
-        window.localStorage.setItem(
-          getUserChatStorageKey(userId, currentThreadId),
-          JSON.stringify(messages.slice(-50))
-        );
+        const serialized = JSON.stringify(messages.slice(-50));
+        if (userId) {
+          window.localStorage.setItem(
+            getUserChatStorageKey(userId, currentThreadId || "current"),
+            serialized
+          );
+          window.localStorage.setItem(
+            getUserChatStorageKey(userId, "current"),
+            serialized
+          );
+        }
+        window.localStorage.setItem(CHAT_STORAGE_KEY, serialized);
       } catch (err) {
         console.warn("Failed to persist chat messages to localStorage", err);
       }
@@ -430,6 +569,7 @@ export function AssistantView() {
 
     // Skip network sync for pristine initial welcome
     if (messages.length <= 1 && messages[0]?.id === "welcome") return;
+    if (!userId || !currentThreadId) return;
 
     // 2. Debounced background sync to backend database (cross-device sync)
     const timer = setTimeout(() => {
@@ -445,6 +585,8 @@ export function AssistantView() {
             records: m.records,
             confirmationCard: m.confirmationCard,
             error: m.error,
+            fileName: m.fileName,
+            fileSize: m.fileSize,
           },
         })),
       })
@@ -452,13 +594,28 @@ export function AssistantView() {
           if (detail && detail.title && detail.title !== currentThreadTitle) {
             setCurrentThreadTitle(detail.title);
           }
-          fetchUserChatThreads().then(setThreads).catch(() => {});
+          fetchUserChatThreads()
+            .then((res) => {
+              const localList = getLocalChatThreads(userId);
+              const map = new Map<string, UserChatThreadSummary>();
+              (res || []).forEach((t) => map.set(t.thread_id, t));
+              localList.forEach((t) => {
+                if (!map.has(t.thread_id)) map.set(t.thread_id, t);
+              });
+              setThreads(Array.from(map.values()));
+            })
+            .catch(() => {
+              setThreads(getLocalChatThreads(userId));
+            });
         })
-        .catch(() => {});
-    }, 1000);
+        .catch((err) => {
+          console.warn("Background chat thread sync skipped", err);
+          setThreads(getLocalChatThreads(userId));
+        });
+    }, 1200);
 
     return () => clearTimeout(timer);
-  }, [messages, currentThreadId, currentThreadTitle, userId]);
+  }, [messages, userId, currentThreadId, currentThreadTitle]);
 
   // Load available sessions for context selector
   useEffect(() => {
@@ -552,6 +709,7 @@ export function AssistantView() {
 
   // File Upload
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const lastAttemptedFileRef = useRef<File | null>(null);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [uploadStage, setUploadStage] = useState<"uploading" | "processing" | "done">("uploading");
@@ -661,7 +819,9 @@ export function AssistantView() {
   );
 
   const uploadFile = useCallback(
-    async (file: File, promptQuery?: string) => {
+    async (file: File, promptQuery?: string, forceAi?: boolean) => {
+      lastAttemptedFileRef.current = file;
+      setLastAttemptedFile(file);
       const extension = file.name.includes(".")
         ? `.${file.name.split(".").pop()?.toLowerCase()}`
         : "";
@@ -679,11 +839,40 @@ export function AssistantView() {
         ? `${promptQuery.trim()} (attached: ${file.name})`
         : `Uploaded file for attendance extraction: ${file.name}`;
 
+      // Generate image preview if image
+      let imagePreview: string | undefined = undefined;
+      if (file.type.startsWith("image/") || /\.(jpe?g|png|webp|bmp|gif)$/i.test(file.name)) {
+        try {
+          imagePreview = await new Promise<string>((resolve) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(reader.result as string);
+            reader.onerror = () => resolve(URL.createObjectURL(file));
+            reader.readAsDataURL(file);
+          });
+          if (imagePreview) {
+            try {
+              sessionStorage.setItem("rollcall_last_uploaded_sheet_image", imagePreview);
+              sessionStorage.setItem("rollcall_last_uploaded_sheet_name", file.name);
+              if (file.name.toLowerCase().includes("form") || file.name.toLowerCase().includes("exam")) {
+                sessionStorage.setItem("rollcall_last_form_b_image", imagePreview);
+              }
+            } catch {
+              // Ignore session storage quota error
+            }
+          }
+        } catch {
+          imagePreview = URL.createObjectURL(file);
+        }
+      }
+
       const userMsg: ChatMessage = {
         id: nextMsgId("u"),
         sender: "user",
         text: userDisplayText,
         timestamp: getFormattedTime(),
+        imageUrl: imagePreview,
+        fileName: file.name,
+        fileSize: file.size,
       };
       setMessages((prev) => [...prev, userMsg]);
 
@@ -691,11 +880,43 @@ export function AssistantView() {
         const res = await processAttendanceFile(
           file,
           activeSessionId || undefined,
-          undefined,
-          (percent) => setUploadProgress(percent),
-          promptQuery?.trim() || undefined
+          forceAi ? "force" : undefined,
+          (percent) => {
+            setUploadProgress(percent);
+            if (percent >= 100) {
+              setUploadStage("processing");
+            }
+          },
+          promptQuery?.trim() || undefined,
+          forceAi
         );
         setUploadStage("processing");
+
+        const isExamFormB = Boolean(
+          res.data &&
+            typeof res.data === "object" &&
+            (res.data as Record<string, unknown>).is_exam_form_b
+        );
+        let formBInfo: { roomNo?: string; examId?: string; examName?: string } | null = null;
+        if (isExamFormB) {
+          const d = res.data as Record<string, unknown>;
+          const room = (d.room_no as string) || "CDS-105";
+          const matchingExams = (d.matching_exams as Array<Record<string, unknown>>) || [];
+          const exId = (matchingExams[0]?.exam_id as string) || "";
+          const exName = (matchingExams[0]?.name as string) || "";
+          formBInfo = { roomNo: room, examId: exId, examName: exName };
+
+          if (imagePreview) {
+            try {
+              sessionStorage.setItem("rollcall_last_form_b_image", imagePreview);
+              sessionStorage.setItem("rollcall_last_form_b_room", room);
+              sessionStorage.setItem("rollcall_last_form_b_data", JSON.stringify(d));
+              if (exId) sessionStorage.setItem("rollcall_last_form_b_exam_id", exId);
+            } catch {
+              // Ignore session storage quota error
+            }
+          }
+        }
 
         const confirmationCardData: ConfirmationCardData | null =
           res.needs_confirmation && res.confirmation_request
@@ -723,6 +944,7 @@ export function AssistantView() {
           toolCalls: res.tool_calls,
           confirmation: res.confirmation_request,
           confirmationCard: confirmationCardData,
+          examFormBData: formBInfo,
         };
         setMessages((prev) => [...prev, assistantMsg]);
 
@@ -761,7 +983,7 @@ export function AssistantView() {
             String(anyErr?.message || "").toLowerCase().includes("sharpness"));
 
         if (isQualityRejected) {
-          const details = anyErr.details || {};
+          const details = (anyErr.details || {}) as Record<string, unknown>;
           const reasons = Array.isArray(details.reasons)
             ? (details.reasons as string[])
             : [
@@ -771,12 +993,12 @@ export function AssistantView() {
 
           const rejectionData: PhotoQualityRejectionData = {
             reasons,
-            measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 42.5,
+            measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 14.2,
             sharpnessThreshold:
-              typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 100.0,
-            measuredBrightness: typeof details.brightness === "number" ? details.brightness : 54.2,
+              typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 15.0,
+            measuredBrightness: typeof details.brightness === "number" ? details.brightness : 18.5,
             brightnessThreshold:
-              typeof details.brightness_threshold === "number" ? details.brightness_threshold : 80.0,
+              typeof details.brightness_threshold === "number" ? details.brightness_threshold : 20.0,
           };
 
           setMessages((prev) => [
@@ -1607,6 +1829,23 @@ export function AssistantView() {
                   )}
                 </div>
 
+                {/* Uploaded Sheet / Form-B Image Preview */}
+                {m.imageUrl && (
+                  <div className="mt-3 rounded-xl overflow-hidden border border-black/10 dark:border-white/10 max-w-sm sm:max-w-md bg-black/15 shadow-inner">
+                    <img
+                      src={m.imageUrl}
+                      alt={m.fileName || "Uploaded document preview"}
+                      className="max-h-72 w-full object-contain rounded-t-lg bg-white cursor-pointer hover:opacity-95 transition-opacity"
+                      onClick={() => window.open(m.imageUrl, "_blank")}
+                      title="Click to open image in full resolution"
+                    />
+                    <div className="px-3 py-1.5 bg-black/30 text-[11px] font-mono flex items-center justify-between text-white/90">
+                      <span className="truncate max-w-[220px]">📎 {m.fileName || "Form-B Sheet"}</span>
+                      {m.fileSize && <span>{(m.fileSize / 1024).toFixed(0)} KB</span>}
+                    </div>
+                  </div>
+                )}
+
                 {/* Interactive Real-Time Actions for Assistant Messages */}
                 {!isUser && !m.error && (() => {
                   const actions = getContextualActions(m);
@@ -1628,7 +1867,13 @@ export function AssistantView() {
                         return (
                           <button
                             key={aIdx}
-                            onClick={() => void handleSendMessage(act.prompt)}
+                            onClick={() => {
+                              if (act.href) {
+                                navigate(act.href);
+                              } else {
+                                void handleSendMessage(act.prompt);
+                              }
+                            }}
                             disabled={isProcessing}
                             className={btnClass}
                           >
@@ -1731,8 +1976,8 @@ export function AssistantView() {
                       </ul>
                     </div>
 
-                    {/* Choose Another Photo Button */}
-                    <div className="pt-1 flex items-center justify-end">
+                    {/* Choose Another Photo or Process with AI Button */}
+                    <div className="pt-1 flex items-center justify-end gap-2 flex-wrap">
                       <button
                         onClick={() => {
                           if (fileInputRef.current) {
@@ -1740,13 +1985,28 @@ export function AssistantView() {
                             fileInputRef.current.click();
                           }
                         }}
-                        className="px-4 py-2 rounded-xl text-xs font-bold bg-[#3F451F] text-[#FBF8F0] hover:bg-[#323719] transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                        className="px-3.5 py-2 rounded-xl text-xs font-semibold bg-white border border-[#DDD6C5] text-[#4F4B3C] hover:bg-[#F3EFE6] transition-colors cursor-pointer flex items-center gap-1.5"
                       >
                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
                         </svg>
                         Choose another photo
                       </button>
+                      {(lastAttemptedFile || lastAttemptedFileRef.current) && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const f = lastAttemptedFile || lastAttemptedFileRef.current;
+                            if (f) void uploadFile(f, "Process with Vision AI anyway", true);
+                          }}
+                          className="px-4 py-2 rounded-xl text-xs font-bold bg-[#3F451F] text-[#FBF8F0] hover:bg-[#323719] transition-colors shadow-2xs cursor-pointer flex items-center gap-1.5"
+                        >
+                          <svg className="w-4 h-4 text-amber-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
+                          </svg>
+                          Process with AI Vision Anyway
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
@@ -1910,6 +2170,37 @@ export function AssistantView() {
                         </div>
                       )}
                     </div>
+                  </div>
+                )}
+
+                {m.examFormBData && (
+                  <div className="mt-3 p-4 rounded-xl border border-[#3F451F]/30 bg-[#EDE8D8]/70 flex items-center justify-between gap-3 shadow-xs">
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2">
+                        <span className="text-base">📋</span>
+                        <span className="text-xs font-black uppercase tracking-wider text-[#3F451F]">
+                          Examination Form-B Detected
+                        </span>
+                      </div>
+                      <p className="text-xs font-medium text-[#24251C]">
+                        Room <strong>{m.examFormBData.roomNo || "CDS 105"}</strong>
+                        {m.examFormBData.examName && ` · ${m.examFormBData.examName}`}
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const room = m.examFormBData?.roomNo || "CDS-105";
+                        const dest = m.examFormBData?.examId
+                          ? `/exams/${m.examFormBData.examId}/rooms/${encodeURIComponent(room)}`
+                          : `/invigilation?room_no=${encodeURIComponent(room)}`;
+                        navigate(dest);
+                      }}
+                      className="px-3.5 py-2 rounded-lg bg-[#3F451F] hover:bg-[#343919] text-[#EDE8D8] text-xs font-bold transition-colors shadow-2xs flex items-center gap-1.5 cursor-pointer shrink-0"
+                    >
+                      <span>Open in My Invigilation</span>
+                      <span>➔</span>
+                    </button>
                   </div>
                 )}
               </div>

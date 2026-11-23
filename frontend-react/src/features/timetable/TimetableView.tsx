@@ -22,6 +22,7 @@ import {
 } from "@/lib/schedule";
 import { ExtraClassModal } from "@/features/sessions/components/ExtraClassModal";
 import { DelegateClassModal } from "@/features/sessions/components/DelegateClassModal";
+import { examsApi, type RoomAssignmentItem } from "@/services/api/exams";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -34,9 +35,35 @@ export function TimetableView() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<string>("Monday");
-  const [viewType, setViewType] = useState<"day" | "grid">("day");
+  const [viewType, setViewType] = useState<"day" | "grid" | "invigilation">("day");
   const [viewScope, setViewScope] = useState<"my" | "dept">("my");
   const [isExtraModalOpen, setIsExtraModalOpen] = useState(false);
+  const [invigilationDuties, setInvigilationDuties] = useState<RoomAssignmentItem[]>([]);
+  const [isLoadingDuties, setIsLoadingDuties] = useState(false);
+  const [dutiesError, setDutiesError] = useState<string | null>(null);
+
+  const loadInvigilationDuties = useCallback(async () => {
+    setIsLoadingDuties(true);
+    setDutiesError(null);
+    try {
+      const myRooms = await examsApi.getMyAssignedRooms();
+      setInvigilationDuties(myRooms);
+    } catch (err: unknown) {
+      setDutiesError(err instanceof Error ? err.message : "Failed to load invigilation duties.");
+    } finally {
+      setIsLoadingDuties(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadInvigilationDuties();
+  }, [loadInvigilationDuties]);
+
+  useEffect(() => {
+    if (viewType === "invigilation") {
+      void loadInvigilationDuties();
+    }
+  }, [viewType, loadInvigilationDuties]);
   const [delegatingEntry, setDelegatingEntry] = useState<{
     sessionId: string;
     subjectCode: string;
@@ -320,23 +347,37 @@ export function TimetableView() {
             </button>
           </div>
 
-          {/* Day vs Grid */}
+          {/* Day vs Grid vs Invigilation */}
           <div className="inline-flex rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] p-1 shadow-2xs">
-            {(["day", "grid"] as const).map((mode) => (
+            {(["day", "grid", "invigilation"] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
                 onClick={() => setViewType(mode)}
-                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer flex items-center gap-1.5 ${
                   viewType === mode
                     ? "bg-[#3F451F] text-[#EDE8D8]"
                     : "text-[#77735F] hover:text-[#24251C]"
                 }`}
               >
-                {mode === "day" ? "Day View" : "Weekly Grid"}
+                {mode === "day"
+                  ? "Day View"
+                  : mode === "grid"
+                  ? "Weekly Grid"
+                  : `📋 Invigilation Duties${invigilationDuties.length > 0 ? ` (${invigilationDuties.length})` : ""}`}
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            onClick={() => setViewType("invigilation")}
+            className="px-3 py-2 rounded-xl border border-[#3F451F]/40 bg-[#EDE8D8] text-[#3F451F] text-xs font-bold hover:bg-[#E3DCB8] transition-colors cursor-pointer flex items-center gap-1.5 shadow-2xs"
+            title="Check upcoming exam hall invigilation assignments"
+          >
+            <span>📝</span>
+            <span>Check Invigilation Duties{invigilationDuties.length > 0 ? ` (${invigilationDuties.length})` : ""}</span>
+          </button>
 
           <button
             type="button"
@@ -398,7 +439,175 @@ export function TimetableView() {
         </div>
       )}
 
-      {isLoading ? (
+      {viewType === "invigilation" ? (
+        <div className="space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 bg-[#FBF8F0] p-4 rounded-2xl border border-[#E4DDCA]">
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="text-lg">📋</span>
+                <h2 className="text-base font-bold text-[#24251C]">
+                  My Assigned Exam Invigilation Duties
+                </h2>
+                <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-[#3F451F] text-[#EDE8D8]">
+                  {invigilationDuties.length} {invigilationDuties.length === 1 ? "Duty" : "Duties"}
+                </span>
+              </div>
+              <p className="text-xs text-[#77735F] mt-0.5">
+                Exam hall invigilation slots and Form-B attendance control. Click on any room to verify attendance and scan sheets.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => void loadInvigilationDuties()}
+                disabled={isLoadingDuties}
+                className="px-3 py-1.5 rounded-xl border border-[#E4DDCA] text-xs font-bold text-[#24251C] bg-white hover:bg-[#F2EDE0] transition-colors cursor-pointer flex items-center gap-1 shadow-2xs"
+              >
+                <span>🔄</span>
+                <span>{isLoadingDuties ? "Refreshing..." : "Refresh"}</span>
+              </button>
+              <Link
+                to="/exams"
+                className="px-3 py-1.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-colors shadow-2xs"
+              >
+                All Exams Module ➔
+              </Link>
+            </div>
+          </div>
+
+          {dutiesError && (
+            <div className="p-4 rounded-xl bg-rose-50 border border-rose-200 text-xs font-medium text-rose-800">
+              {dutiesError}
+            </div>
+          )}
+
+          {isLoadingDuties ? (
+            <div className="py-16 text-center text-xs text-[#77735F] bg-[#FBF8F0] rounded-2xl border border-[#E4DDCA]">
+              <div className="w-6 h-6 border-2 border-[#6C5119] border-t-transparent rounded-full animate-spin mx-auto mb-2" />
+              <span>Loading your invigilation assignments...</span>
+            </div>
+          ) : invigilationDuties.length === 0 ? (
+            <div className="py-16 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl space-y-2">
+              <span className="text-3xl">📝</span>
+              <p className="font-bold text-[#24251C] text-sm">No Invigilation Duties Assigned</p>
+              <p className="text-xs text-[#77735F] max-w-md mx-auto px-4">
+                You do not have any exam hall rooms assigned for invigilation at this time. Room assignments made by the Exam Coordinator will appear here.
+              </p>
+              <div className="pt-2">
+                <Link
+                  to="/exams"
+                  className="inline-flex items-center gap-1 text-xs font-bold text-[#6C5119] hover:underline"
+                >
+                  <span>Explore Scheduled Exams</span>
+                  <span>➔</span>
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {invigilationDuties.map((duty) => {
+                const statusColors = {
+                  SCHEDULED: "bg-amber-100 text-amber-900 border-amber-300",
+                  OPEN: "bg-emerald-100 text-emerald-900 border-emerald-300",
+                  SUBMITTED: "bg-blue-100 text-blue-900 border-blue-300",
+                  LATE_LOCKED: "bg-rose-100 text-rose-900 border-rose-300",
+                };
+                const statusPill =
+                  statusColors[duty.status as keyof typeof statusColors] ||
+                  "bg-gray-100 text-gray-800 border-gray-300";
+
+                return (
+                  <div
+                    key={`${duty.exam_id}-${duty.room_no}`}
+                    className="p-5 rounded-2xl border bg-[#FBF8F0] border-[#E4DDCA] hover:border-[#6C5119]/60 transition-all shadow-2xs flex flex-col justify-between space-y-4"
+                  >
+                    <div className="space-y-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
+                          {duty.subject_code || "EXAM"}
+                        </span>
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider border ${statusPill}`}
+                        >
+                          {duty.status}
+                        </span>
+                      </div>
+
+                      <div>
+                        <h3 className="text-base font-extrabold text-[#24251C]">
+                          Room {duty.display_room_no || duty.room_no}
+                          {duty.block_name && ` · ${duty.block_name}`}
+                        </h3>
+                        <p className="text-xs font-semibold text-[#77735F] mt-0.5 truncate" title={duty.exam_name || duty.exam_id}>
+                          {duty.exam_name || duty.exam_id}
+                        </p>
+                        {duty.subject_name && (
+                          <p className="text-[11px] text-[#77735F] truncate">
+                            {duty.subject_name}
+                          </p>
+                        )}
+                      </div>
+
+                      <div className="p-3 rounded-xl bg-white border border-[#E4DDCA] space-y-1.5 text-xs">
+                        <div className="flex items-center justify-between">
+                          <span className="text-[#77735F]">Date:</span>
+                          <span className="font-bold text-[#24251C]">{duty.date || "Scheduled"}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <span className="text-[#77735F]">Timing:</span>
+                          <span className="font-bold text-[#24251C]">
+                            {duty.start_time && duty.end_time
+                              ? `${duty.start_time} - ${duty.end_time}`
+                              : "Standard Slot"}
+                          </span>
+                        </div>
+                        {duty.capacity && (
+                          <div className="flex items-center justify-between">
+                            <span className="text-[#77735F]">Capacity:</span>
+                            <span className="font-medium text-[#24251C]">{duty.capacity} students</span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-[#E4DDCA]/60 flex items-center justify-between gap-2">
+                      <Link
+                        to={`/exams/${duty.exam_id}/rooms/${duty.room_no}`}
+                        className="flex-1 py-2 px-3 rounded-xl bg-[#3F451F] hover:bg-[#343919] text-[#EDE8D8] text-xs font-bold text-center transition-colors shadow-2xs flex items-center justify-center gap-1"
+                      >
+                        <span>Open Form-B</span>
+                        <span>➔</span>
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            const blob = await examsApi.downloadSignSheetPdf(duty.exam_id, duty.room_no);
+                            const url = window.URL.createObjectURL(blob);
+                            const a = document.createElement("a");
+                            a.href = url;
+                            a.download = `Form_B_${duty.exam_id}_${duty.room_no}.pdf`;
+                            document.body.appendChild(a);
+                            a.click();
+                            window.URL.revokeObjectURL(url);
+                            document.body.removeChild(a);
+                          } catch {
+                            alert("Failed to download PDF sign sheet.");
+                          }
+                        }}
+                        title="Download blank Form-B PDF"
+                        className="p-2 rounded-xl border border-[#E4DDCA] text-[#77735F] hover:text-[#24251C] bg-white hover:bg-[#F2EDE0] transition-colors"
+                      >
+                        📄
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : isLoading ? (
         <div className="py-16 text-center text-[#77735F]">
           <div className="w-6 h-6 border-2 border-[#6C5119] border-t-transparent rounded-full animate-spin mx-auto mb-2" />
           <span>Loading the weekly schedule…</span>

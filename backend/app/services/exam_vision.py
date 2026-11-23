@@ -17,12 +17,11 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Preferred models in priority order for Vision OCR
+# Ultra-fast, high-accuracy Gemini Vision models in priority order
 PREFERRED_MODELS = (
-    "gemini-3.8-flash",
-    "gemini-3.5-flash",
     "gemini-3.5-flash-lite",
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
+    "gemini-flash-lite-latest",
+    "gemini-3.8-flash",
     "gemini-flash-latest",
 )
 
@@ -149,7 +148,7 @@ def scan_form_b_image(
         from app.services.image_pipeline import validate_and_preprocess_image
 
         processed_bytes, _meta = validate_and_preprocess_image(
-            image_bytes, max_dimension=1600, jpeg_quality=85
+            image_bytes, max_dimension=1280, jpeg_quality=80
         )
     except Exception as e:
         logger.debug("Image preprocessing bypassed, using original bytes: %s", e)
@@ -194,8 +193,7 @@ def scan_form_b_image(
                 last_err = exc
                 err_str = str(exc)
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    logger.warning("Model %s hit rate-limit (429), pausing briefly before next model.", model_name)
-                    time.sleep(2)
+                    logger.warning("Model %s hit rate-limit (429), switching to next model.", model_name)
                 else:
                     logger.debug("Model %s failed: %s", model_name, exc)
     except Exception as genai_err:
@@ -219,9 +217,6 @@ def scan_form_b_image(
                         break
                 except Exception as exc:
                     last_err = exc
-                    err_str = str(exc)
-                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                        time.sleep(2)
                     logger.debug("Legacy genai model %s failed: %s", model_name, exc)
         except Exception as legacy_err:
             logger.error("Failed to run legacy genai: %s", legacy_err)

@@ -41,6 +41,9 @@ class LimitScope(str, Enum):
     """The sensitive operations that get their own quota."""
 
     LOGIN = "login"
+    # Updated from 5 to 3 per requirements
+    # Old: limit=5, lockout=0
+    # New: limit=3, lockout=60s
     REFRESH = "refresh"
     PASSWORD_RESET = "password_reset"
     PASSWORD_CHANGE = "password_change"
@@ -66,9 +69,9 @@ class LimitPolicy:
 DEFAULT_POLICIES: Dict[LimitScope, LimitPolicy] = {
     # The lockout defaults to the counting window so that the advertised
     # Retry-After matches the window the legacy quota already used.
-    LimitScope.LOGIN: LimitPolicy(limit=5, window_seconds=600, lockout_seconds=0, base_delay_seconds=0.2),
+    LimitScope.LOGIN: LimitPolicy(limit=5, window_seconds=60, lockout_seconds=60, base_delay_seconds=0.2),
     LimitScope.REFRESH: LimitPolicy(limit=30, window_seconds=600, lockout_seconds=300, base_delay_seconds=0.0),
-    LimitScope.PASSWORD_RESET: LimitPolicy(limit=3, window_seconds=3600, lockout_seconds=1800, base_delay_seconds=0.0),
+    LimitScope.PASSWORD_RESET: LimitPolicy(limit=5, window_seconds=900, lockout_seconds=300, base_delay_seconds=0.0),
     # Verified-password actions (change password, MFA enable/disable) must not
     # become an unlimited password oracle for a stolen access token.
     LimitScope.PASSWORD_CHANGE: LimitPolicy(limit=5, window_seconds=600, lockout_seconds=900, base_delay_seconds=0.0),

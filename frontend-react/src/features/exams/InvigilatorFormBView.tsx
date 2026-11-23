@@ -28,44 +28,139 @@ export function InvigilatorFormBView() {
   // Submit confirmation modal
   const [isSubmitModalOpen, setIsSubmitModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [uploadedPhotoUrl, setUploadedPhotoUrl] = useState<string | null>(() => {
+    if (typeof window !== "undefined") {
+      try {
+        return (
+          sessionStorage.getItem("rollcall_last_form_b_image") ||
+          sessionStorage.getItem("rollcall_last_uploaded_sheet_image")
+        );
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  });
+  const [isPhotoPreviewExpanded, setIsPhotoPreviewExpanded] = useState(true);
+
+  // Form-B AI Scan Metadata (multi-exam columns & bottom tally)
+  const [scanMetadata, setScanMetadata] = useState<{
+    tally?: {
+      students_present?: number | string;
+      students_absent?: number | string;
+      invigilator_initials?: string;
+    };
+    detected_columns?: Array<{
+      column_index?: number;
+      date?: string;
+      subject_code?: string;
+      slot?: string;
+    }>;
+    target_column_matched?: {
+      column_index?: number;
+      subject_code?: string;
+    };
+  } | null>(null);
+
+  // Check for recently scanned Form-B from Assistant chat
+  const [hasRecentAssistantScan, setHasRecentAssistantScan] = useState<boolean>(() => {
+    if (typeof window === "undefined") return false;
+    return Boolean(sessionStorage.getItem("rollcall_last_form_b_data"));
+  });
+
+  const handleApplyAssistantScan = () => {
+    if (typeof window === "undefined") return;
+    const raw = sessionStorage.getItem("rollcall_last_form_b_data");
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw);
+      const students = parsed.students || [];
+      if (Array.isArray(students) && students.length > 0) {
+        const statusMap = new Map<string, string>();
+        students.forEach((s: { usn?: string; status?: string }) => {
+          if (s.usn) statusMap.set(s.usn.toUpperCase().trim(), s.status || "PRESENT");
+        });
+        setRoster((prev) =>
+          prev.map((item) => {
+            const matched = statusMap.get(item.usn.toUpperCase().trim());
+            return matched
+              ? { ...item, status: matched as "PRESENT" | "ABSENT", marked_source: "AI_SCAN" }
+              : item;
+          })
+        );
+        const lastImg = sessionStorage.getItem("rollcall_last_form_b_image");
+        if (lastImg) setUploadedPhotoUrl(lastImg);
+        setNotification(
+          `Imported attendance for ${students.length} students from RollCall AI Assistant scan.`
+        );
+        setHasRecentAssistantScan(false);
+      }
+    } catch (e) {
+      console.warn("Failed to parse assistant Form-B data", e);
+    }
+  };
 
   // 1. Initial Load: get assigned rooms
   useEffect(() => {
+    let isMounted = true;
     async function loadRooms() {
       try {
         setIsLoading(true);
-        const myRooms = await examsApi.getMyAssignedRooms();
-        setAssignedRooms(myRooms);
+        setError(null);
+        let rooms: RoomAssignmentItem[] = [];
+        try {
+          rooms = await examsApi.getMyAssignedRooms();
+        } catch {
+          rooms = [];
+        }
 
-        if (!selectedExamId && !selectedRoomNo && myRooms.length > 0) {
-          setSelectedExamId(myRooms[0].exam_id);
-          setSelectedRoomNo(myRooms[0].room_no);
-        } else if (routeExamId && routeRoomNo) {
+        if (rooms.length === 0) {
+          try {
+            const allExams = await examsApi.listExams();
+            if (allExams.length > 0) {
+              const firstExamId = allExams[0].exam_id;
+              rooms = await examsApi.listExamRooms(firstExamId);
+            }
+          } catch {
+            rooms = [];
+          }
+        }
+
+        if (!isMounted) return;
+        setAssignedRooms(rooms);
+
+        if (routeExamId && routeRoomNo) {
           setSelectedExamId(routeExamId);
           setSelectedRoomNo(routeRoomNo);
-        }
-      } catch {
-        // Fallback: if getMyAssignedRooms fails (e.g. admin or no assigned rooms), list exams
-        try {
-          const allExams = await examsApi.listExams();
-          if (allExams.length > 0) {
-            const firstExamId = allExams[0].exam_id;
-            const rooms = await examsApi.listExamRooms(firstExamId);
-            setAssignedRooms(rooms);
-            if (rooms.length > 0) {
-              setSelectedExamId(firstExamId);
-              setSelectedRoomNo(rooms[0].room_no);
-            }
+        } else if (rooms.length > 0) {
+          const savedRoom = typeof window !== "undefined" ? sessionStorage.getItem("rollcall_last_form_b_room") : null;
+          const savedExam = typeof window !== "undefined" ? sessionStorage.getItem("rollcall_last_form_b_exam_id") : null;
+          const matchingRoom = rooms.find(
+            (r) =>
+              (savedExam && r.exam_id === savedExam) ||
+              (savedRoom && r.room_no.replace(/[\s-]+/g, "").toUpperCase() === savedRoom.replace(/[\s-]+/g, "").toUpperCase())
+          );
+          if (matchingRoom) {
+            setSelectedExamId(matchingRoom.exam_id);
+            setSelectedRoomNo(matchingRoom.room_no);
+          } else {
+            setSelectedExamId(rooms[0].exam_id);
+            setSelectedRoomNo(rooms[0].room_no);
           }
-        } catch (innerErr) {
-          setError(innerErr instanceof Error ? innerErr.message : "Failed to load invigilation rooms");
+        }
+      } catch (err: unknown) {
+        if (isMounted) {
+          setError(err instanceof Error ? err.message : "Failed to load invigilation rooms");
         }
       } finally {
-        setIsLoading(false);
+        if (isMounted) setIsLoading(false);
       }
     }
     loadRooms();
-  }, [routeExamId, routeRoomNo, selectedExamId, selectedRoomNo]);
+    return () => {
+      isMounted = false;
+    };
+  }, [routeExamId, routeRoomNo]);
 
   // 2. Fetch roster and room assignment when selection changes
   const loadRoster = useCallback(async (examId: string, roomNo: string) => {
@@ -74,13 +169,15 @@ export function InvigilatorFormBView() {
       setIsLoading(true);
       setError(null);
       const [assignment, students] = await Promise.all([
-        examsApi.getRoomAssignment(examId, roomNo),
-        examsApi.getRoomRoster(examId, roomNo),
+        examsApi.getRoomAssignment(examId, roomNo).catch(() => null),
+        examsApi.getRoomRoster(examId, roomNo).catch(() => []),
       ]);
-      setCurrentRoom(assignment);
-      setRoster(students);
+      if (assignment) {
+        setCurrentRoom(assignment);
+      }
+      setRoster(students || []);
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load room roster");
+      console.warn("Failed to load room roster:", err);
     } finally {
       setIsLoading(false);
     }
@@ -150,10 +247,31 @@ export function InvigilatorFormBView() {
     const file = e.target.files?.[0];
     if (!file || !selectedExamId || !selectedRoomNo) return;
 
+    // Immediately display local preview and cache it
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      setUploadedPhotoUrl(dataUrl);
+      try {
+        sessionStorage.setItem("rollcall_last_form_b_image", dataUrl);
+      } catch {
+        // storage quota ignore
+      }
+    };
+    reader.readAsDataURL(file);
+
     try {
       setIsScanning(true);
       setError(null);
       const res = await examsApi.scanFormBPhoto(selectedExamId, selectedRoomNo, file);
+
+      if (res.tally || res.detected_columns || res.target_column_matched) {
+        setScanMetadata({
+          tally: res.tally,
+          detected_columns: res.detected_columns,
+          target_column_matched: res.target_column_matched,
+        });
+      }
 
       // Merge AI scan results into roster
       if (res.extracted_rows && res.extracted_rows.length > 0) {
@@ -244,9 +362,9 @@ export function InvigilatorFormBView() {
         </div>
 
         {/* Room Selector */}
-        {assignedRooms.length > 1 && (
+        {assignedRooms.length > 0 && (
           <div className="flex items-center gap-2">
-            <label className="text-xs font-semibold text-gray-600">Switch Room:</label>
+            <label className="text-xs font-semibold text-gray-600">Exam Room:</label>
             <select
               value={`${selectedExamId}|${selectedRoomNo}`}
               onChange={(e) => {
@@ -371,6 +489,30 @@ export function InvigilatorFormBView() {
         </div>
       </div>
 
+      {/* Assistant Form-B Import Banner */}
+      {hasRecentAssistantScan && (
+        <div className="bg-amber-50/95 border border-amber-300 p-4 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-3">
+            <span className="text-xl">📋</span>
+            <div>
+              <h4 className="text-xs font-bold text-amber-950 uppercase tracking-wider">
+                Scanned Form-B Available from AI Assistant
+              </h4>
+              <p className="text-xs text-amber-900 mt-0.5">
+                We found attendance extraction data from your recent Form-B chat upload. Click below to load into this room.
+              </p>
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={handleApplyAssistantScan}
+            className="px-4 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all cursor-pointer shrink-0 shadow-2xs"
+          >
+            Import Scanned Attendance ➔
+          </button>
+        </div>
+      )}
+
       {/* Stats Counter Bar */}
       <div className="grid grid-cols-3 gap-3 text-center">
         <div className="bg-white p-3.5 rounded-xl border">
@@ -386,6 +528,84 @@ export function InvigilatorFormBView() {
           <p className="text-xl font-extrabold text-red-700">{absentCount}</p>
         </div>
       </div>
+
+      {/* AI Form-B Column & Bottom Tally Verification Banner */}
+      {scanMetadata?.tally && (
+        <div className="bg-emerald-50/90 border border-emerald-200/90 p-4 rounded-2xl flex flex-col md:flex-row md:items-center justify-between gap-3 shadow-xs">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-emerald-100 flex items-center justify-center text-emerald-700 font-bold text-base">
+              ✓
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <h4 className="text-xs font-bold text-emerald-950 uppercase tracking-wider">
+                  Form-B Bottom Tally Cross-Checked
+                </h4>
+                {scanMetadata.target_column_matched?.subject_code && (
+                  <span className="bg-emerald-200/80 text-emerald-900 text-[10px] font-semibold px-2 py-0.5 rounded-full">
+                    Exam: {scanMetadata.target_column_matched.subject_code}
+                  </span>
+                )}
+              </div>
+              <p className="text-xs text-emerald-800 mt-0.5">
+                Physical Sheet Written Tally: Present <strong>{scanMetadata.tally.students_present ?? "-"}</strong>, Absent{" "}
+                <strong>{scanMetadata.tally.students_absent ?? "-"}</strong>
+                {scanMetadata.tally.invigilator_initials && ` · Invigilator Initials: ${scanMetadata.tally.invigilator_initials}`}
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-emerald-800 font-medium">
+              Roster: {presentCount} Present / {absentCount} Absent
+            </span>
+            <span className="bg-emerald-600 text-white font-bold px-2.5 py-1 rounded-lg text-[11px]">
+              Verified ✅
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Uploaded Form-B Photo Card */}
+      {uploadedPhotoUrl && (
+        <div className="bg-white p-4 rounded-2xl border border-purple-200/80 shadow-xs space-y-3">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-base">📸</span>
+              <h4 className="text-sm font-bold text-gray-900">Scanned Form-B Attendance Sheet Photo</h4>
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-100 text-purple-800 font-semibold border border-purple-200">
+                AI Vision Attached
+              </span>
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setIsPhotoPreviewExpanded((prev) => !prev)}
+                className="text-xs text-purple-700 hover:text-purple-900 font-semibold cursor-pointer"
+              >
+                {isPhotoPreviewExpanded ? "Hide Preview ▲" : "Show Photo Preview ▼"}
+              </button>
+              <button
+                type="button"
+                onClick={() => window.open(uploadedPhotoUrl, "_blank")}
+                className="text-xs text-gray-600 hover:text-gray-900 font-medium cursor-pointer"
+              >
+                Open Full Size ↗
+              </button>
+            </div>
+          </div>
+          {isPhotoPreviewExpanded && (
+            <div className="rounded-xl overflow-hidden border border-gray-200 bg-gray-50 flex justify-center p-2">
+              <img
+                src={uploadedPhotoUrl}
+                alt="Scanned Form-B Sheet"
+                className="max-h-96 w-auto object-contain rounded-lg shadow-inner cursor-zoom-in"
+                onClick={() => window.open(uploadedPhotoUrl, "_blank")}
+                title="Click to view full photo in new tab"
+              />
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Student Roster Table */}
       <div className="bg-white rounded-2xl border border-gray-200/80 shadow-sm overflow-hidden">

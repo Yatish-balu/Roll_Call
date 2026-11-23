@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import create_access_token
+from app.auth.otp import store_otp, verify_otp
 from app.auth.roles import normalize_role
 from app.config import ACCESS_TOKEN_TTL_MINUTES
 from app.db import crud
@@ -42,6 +43,7 @@ from app.security.context import get_request_id
 from app.security.detection import detector
 from app.security.email import get_email_provider
 from app.security.events import log_security_event
+from app.auth.otp import store_otp, verify_otp, cleanup_expired_otps
 from app.security.mfa import (
     MFAConfigurationError,
     MFADecryptionError,
@@ -349,7 +351,6 @@ def login(request: Request, payload: LoginRequest):
             quota_retry_after = max(
                 user_decision.retry_after_seconds,
                 ip_decision.retry_after_seconds,
-                600,
             )
 
             def _reject_login() -> JSONResponse:
@@ -2000,6 +2001,333 @@ def revoke_all_other_sessions(
         db.commit()
 
         return {"message": "All other sessions have been revoked."}
+
+
+# -- Forgot Password: OTP-based reset ----------------------------------------
+#
+# Two-step flow that complements the link/token flow above:
+#   1. POST /password/forgot      -> emails a 6-digit OTP (10-minute TTL)
+#   2. POST /password/verify-otp  -> verifies the OTP and returns a single-use
+#                                    reset token for /password/reset/confirm,
+#                                    or - when new_password is supplied -
+#                                    completes the reset in the same call.
+
+_OTP_RESET_TTL_MINUTES = 10
+_OTP_RESET_TOKEN_TTL_MINUTES = 15
+
+FORGOT_PASSWORD_RESPONSE = {
+    "message": "If the account exists, a 6-digit OTP has been sent to its registered email address.",
+    "otp_expires_in_seconds": _OTP_RESET_TTL_MINUTES * 60,
+}
+
+
+def _lookup_user_by_identifier(db: Session, identifier: str) -> Optional[User]:
+    """Case-insensitive lookup of an account by user_id or email address."""
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    return (
+        db.query(User)
+        .filter(
+            or_(
+                func.lower(User.user_id) == ident.lower(),
+                func.lower(User.email) == ident.lower(),
+            )
+        )
+        .first()
+    )
+
+
+def _mask_email(email_str: str) -> str:
+    """Mask email for display (e.g., gb***3@gmail.com)."""
+    if not email_str or "@" not in email_str:
+        return email_str or ""
+    parts = email_str.split("@", 1)
+    local, domain = parts[0], parts[1]
+    if len(local) <= 2:
+        masked_local = local[0] + "***"
+    elif len(local) <= 4:
+        masked_local = local[:2] + "***"
+    else:
+        masked_local = local[:2] + "***" + local[-1]
+    return f"{masked_local}@{domain}"
+
+
+@router.post(
+    "/password/lookup-account",
+    summary="Look up registered email for a user identifier.",
+)
+def lookup_account_for_reset(
+    user_identifier: str = Body(..., embed=True),
+):
+    ident = (user_identifier or "").strip()
+    if not ident:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": {"code": "IDENTIFIER_REQUIRED", "message": "User identifier is required."}},
+        )
+    SessionLocal = get_sync_session_factory()
+    with SessionLocal() as db:
+        db_user = _lookup_user_by_identifier(db, ident)
+        if db_user is None or not db_user.is_active:
+            return {
+                "found": False,
+                "message": "No active account found for this identifier. Please verify your User ID or email.",
+            }
+
+        masked = _mask_email(db_user.email or "")
+        return {
+            "found": True,
+            "user_id": db_user.user_id,
+            "email_masked": masked,
+            "message": f"Account found for {db_user.user_id}. Registered email is {masked}."
+        }
+
+
+@router.post(
+    "/password/forgot",
+    summary="Email a one-time password (OTP) for a password reset.",
+    description=(
+        "Accepts a user_id or an email address. When the account exists, a 6-digit "
+        "OTP valid for 10 minutes is generated and emailed to the registered "
+        "address. The response is identical for unknown accounts, so the endpoint "
+        "cannot be used to enumerate users."
+    ),
+    responses={
+        200: {"description": "OTP generated (generic response)"},
+        429: {"description": "Too many reset requests"},
+    },
+)
+def forgot_password(
+    request: Request,
+    user_identifier: str = Body(..., embed=True),
+):
+    """Generate and email a password-reset OTP."""
+    client_ip = _client_ip(request)
+    response = dict(FORGOT_PASSWORD_RESPONSE)
+    ident = (user_identifier or "").strip()
+
+    SessionLocal = get_sync_session_factory()
+    with SessionLocal() as db:
+        decision = check_limit(
+            db, LimitScope.PASSWORD_RESET, f"forgot:{ident.lower()}", record_failure=False, commit=True
+        )
+        ip_decision = check_limit(
+            db, LimitScope.PASSWORD_RESET, f"ip:{client_ip}", record_failure=False, commit=True
+        )
+        if not decision.allowed or not ip_decision.allowed:
+            retry_after = max(decision.retry_after_seconds or 0, ip_decision.retry_after_seconds or 0, 60)
+            log_security_event(
+                "rate_limit_triggered",
+                severity="warning",
+                outcome="blocked",
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"scope": "password_reset_otp", "retry_after_seconds": retry_after},
+            )
+            return _too_many_requests(
+                retry_after, "Too many password reset requests. Please try again later."
+            )
+
+        db_user = _lookup_user_by_identifier(db, ident)
+        if db_user is None or not db_user.is_active:
+            log_security_event(
+                "password_reset_otp_requested",
+                severity="info",
+                outcome="failure",
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"reason": "unknown_or_inactive_account"},
+            )
+            return response
+
+        code = store_otp(db, db_user.user_id, minutes_valid=_OTP_RESET_TTL_MINUTES)
+
+        delivery = get_email_provider().send(
+            db_user.email,
+            "RollCall AI password reset code",
+            (
+                "A password reset was requested for your account.\n\n"
+                f"Your one-time code is: {code}\n\n"
+                f"It expires in {_OTP_RESET_TTL_MINUTES} minutes. "
+                "If you did not request this, you can ignore this message."
+            ),
+        )
+        if not delivery.configured:
+            logger.error(
+                "Password reset OTP requested for %s but no email provider is configured.",
+                db_user.user_id,
+            )
+        elif not delivery.delivered:
+            logger.error(
+                "Password reset OTP delivery failed for %s: %s",
+                db_user.user_id,
+                delivery.detail,
+            )
+
+        log_security_event(
+            "password_reset_otp_requested",
+            severity="info",
+            outcome="success",
+            actor_id=db_user.user_id,
+            ip_address=client_ip,
+            request_id=get_request_id(),
+            details={"delivered": delivery.delivered, "provider_configured": delivery.configured},
+        )
+
+        response["email_masked"] = _mask_email(db_user.email or "")
+        response["message"] = (
+            f"A 6-digit OTP has been sent to its registered email address ({response['email_masked']})."
+        )
+
+        # Development/test builds echo the code so the flow can be exercised
+        # without a mail server. Production never exposes it.
+        if not _is_production():
+            response["otp"] = code
+        return response
+
+
+@router.post(
+    "/password/verify-otp",
+    summary="Verify a password-reset OTP and set a new password.",
+    description=(
+        "Verifies the 6-digit OTP issued by /password/forgot. When new_password is "
+        "supplied the password is updated immediately and every existing session is "
+        "revoked. When it is omitted, a single-use reset token is returned for "
+        "/password/reset/confirm."
+    ),
+    responses={
+        400: {"description": "Invalid or expired OTP"},
+        422: {"description": "The new password does not meet the policy"},
+        429: {"description": "Too many verification attempts"},
+    },
+)
+def verify_password_reset_otp(
+    request: Request,
+    user_identifier: str = Body(..., embed=True),
+    otp_code: str = Body(..., embed=True),
+    new_password: Optional[str] = Body(None, embed=True),
+):
+    """Consume an OTP and either finish the reset or mint a reset token."""
+    client_ip = _client_ip(request)
+    ident = (user_identifier or "").strip()
+    invalid_otp = HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail={"error": {"code": "INVALID_OTP", "message": "The code is invalid or has expired."}},
+    )
+
+    SessionLocal = get_sync_session_factory()
+    with SessionLocal() as db:
+        # A 6-digit code has a small search space: cap guesses per account+IP.
+        decision = check_limit(
+            db, LimitScope.MFA_VERIFY, f"otp:{ident.lower()}", record_failure=True, commit=True
+        )
+        ip_decision = check_limit(
+            db, LimitScope.MFA_VERIFY, f"otp-ip:{client_ip}", record_failure=True, commit=True
+        )
+        if not decision.allowed or not ip_decision.allowed:
+            retry_after = max(decision.retry_after_seconds or 0, ip_decision.retry_after_seconds or 0, 60)
+            log_security_event(
+                "rate_limit_triggered",
+                severity="warning",
+                outcome="blocked",
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"scope": "password_reset_otp_verify", "retry_after_seconds": retry_after},
+            )
+            return _too_many_requests(
+                retry_after, "Too many verification attempts. Please try again later."
+            )
+
+        db_user = _lookup_user_by_identifier(db, ident)
+        if db_user is None or not db_user.is_active:
+            log_security_event(
+                "password_reset_otp_failed",
+                severity="info",
+                outcome="failure",
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"reason": "unknown_or_inactive_account"},
+            )
+            raise invalid_otp
+
+        if not verify_otp(db, db_user.user_id, otp_code):
+            log_security_event(
+                "password_reset_otp_failed",
+                severity="info",
+                outcome="failure",
+                actor_id=db_user.user_id,
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"reason": "invalid_or_expired_otp"},
+            )
+            raise invalid_otp
+
+        if new_password is None:
+            # Two-step flow: hand back a single-use token for /password/reset/confirm.
+            reset_token = secrets.token_urlsafe(32)
+            db_user.password_reset_token = hashlib.sha256(
+                reset_token.encode("utf-8")
+            ).hexdigest()
+            db_user.password_reset_token_expires = _format_utc_iso(
+                _get_utc_now() + timedelta(minutes=_OTP_RESET_TOKEN_TTL_MINUTES)
+            )
+            db.commit()
+            clear_limit(db, LimitScope.MFA_VERIFY, f"otp:{ident.lower()}")
+            log_security_event(
+                "password_reset_otp_verified",
+                severity="info",
+                outcome="success",
+                actor_id=db_user.user_id,
+                ip_address=client_ip,
+                request_id=get_request_id(),
+                details={"next_step": "reset_confirm"},
+            )
+            return {
+                "message": "OTP verified. Use the reset token to choose a new password.",
+                "reset_token": reset_token,
+            }
+
+        # One-step flow: verify + change the password in the same request.
+        _validate_password_strength(new_password)
+        hashed_pw = bcrypt.hashpw(new_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        now_iso = _format_utc_iso(_get_utc_now())
+
+        db_user.hashed_password = hashed_pw
+        db_user.password_reset_token = None
+        db_user.password_reset_token_expires = None
+        db.execute(
+            update(AuthSession)
+            .where(AuthSession.user_id == db_user.user_id)
+            .values(revoked_at=now_iso)
+        )
+        db.execute(
+            update(AuthRefreshToken)
+            .where(
+                AuthRefreshToken.session_id.in_(
+                    sa_select(AuthSession.session_id).where(
+                        AuthSession.user_id == db_user.user_id
+                    )
+                )
+            )
+            .values(revoked_at=now_iso)
+        )
+        db.commit()
+
+        clear_limit(db, LimitScope.MFA_VERIFY, f"otp:{ident.lower()}")
+        log_security_event(
+            "password_reset_otp_completed",
+            severity="info",
+            outcome="success",
+            actor_id=db_user.user_id,
+            ip_address=client_ip,
+            request_id=get_request_id(),
+            details={"sessions_revoked": True},
+        )
+        return {
+            "message": "Password updated. Please sign in with your new password.",
+            "password_reset": True,
+        }
 
 
 

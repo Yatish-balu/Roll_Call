@@ -42,28 +42,26 @@ def hash_password(password: str) -> str:
 
 def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
     """Retrieve seed account definitions from environment variables with safe defaults."""
-    env = os.getenv("APP_ENV", "development").lower()
-    is_prod = env == "production"
+    # Credentials are never hardcoded in source. Every seed password must be
+    # supplied explicitly (see .env.example), in development as well as in
+    # production, so a committed default can never become a real login.
+    passwords = {
+        "SEED_ADMIN_PASSWORD": os.getenv("SEED_ADMIN_PASSWORD"),
+        "SEED_FACULTY_1_PASSWORD": os.getenv("SEED_FACULTY_1_PASSWORD"),
+        "SEED_FACULTY_2_PASSWORD": os.getenv("SEED_FACULTY_2_PASSWORD"),
+        "SEED_FACULTY_3_PASSWORD": os.getenv("SEED_FACULTY_3_PASSWORD"),
+    }
+    missing = [name for name, value in passwords.items() if not value]
+    if missing:
+        raise ValueError(
+            "Seed passwords must be provided through environment variables: "
+            + ", ".join(missing)
+        )
 
-    admin_pw = os.getenv("SEED_ADMIN_PASSWORD")
-    f1_pw = os.getenv("SEED_FACULTY_1_PASSWORD")
-    f2_pw = os.getenv("SEED_FACULTY_2_PASSWORD")
-    f3_pw = os.getenv("SEED_FACULTY_3_PASSWORD")
-
-    if is_prod:
-        missing = []
-        if not admin_pw: missing.append("SEED_ADMIN_PASSWORD")
-        if not f1_pw: missing.append("SEED_FACULTY_1_PASSWORD")
-        if not f2_pw: missing.append("SEED_FACULTY_2_PASSWORD")
-        if not f3_pw: missing.append("SEED_FACULTY_3_PASSWORD")
-        if missing:
-            raise ValueError(f"Production security error: The following seed passwords must be set in environment: {missing}")
-    else:
-        # Development safe defaults
-        admin_pw = admin_pw or "AdminSecurePass_2026!"
-        f1_pw = f1_pw or "FacultyPass_DIST_2026!"
-        f2_pw = f2_pw or "FacultyPass_ML_2026!"
-        f3_pw = f3_pw or "FacultyPass_CN_2026!"
+    admin_pw = passwords["SEED_ADMIN_PASSWORD"]
+    f1_pw = passwords["SEED_FACULTY_1_PASSWORD"]
+    f2_pw = passwords["SEED_FACULTY_2_PASSWORD"]
+    f3_pw = passwords["SEED_FACULTY_3_PASSWORD"]
 
     return [
         {

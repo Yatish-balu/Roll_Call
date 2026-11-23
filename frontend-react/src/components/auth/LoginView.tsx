@@ -13,6 +13,7 @@ export function LoginView() {
   const [showAdminKeySecret, setShowAdminKeySecret] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [lockoutUntil, setLockoutUntil] = useState<number | null>(null);
 
   // Auto-expand admin elevation key input if an admin identifier is typed
   useEffect(() => {
@@ -48,6 +49,19 @@ export function LoginView() {
     }
   };
 
+  // Handle rate limit lockout countdown  useEffect(() => {
+    if (lockoutUntil && lockoutUntil > 0) {
+      const interval = setInterval(() => {
+        setLockoutUntil(lockoutUntil - 1000);
+        if (lockoutUntil <= 0) {
+          clearInterval(interval);
+          setLockoutUntil(null);
+        }
+      }, 1000);
+      return () => clearInterval(interval);
+    }
+  }, [lockoutUntil]);
+
   return (
     <div className="min-h-screen flex items-center justify-center p-4 bg-[#F2EDE0]">
       <div className="w-full max-w-md bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-lg p-6 sm:p-8 space-y-6">
@@ -73,6 +87,16 @@ export function LoginView() {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             <span>{errorMessage}</span>
+          </div>
+        )}
+
+        {/* Rate Limit Lockout Display */}
+        {lockoutUntil !== null && lockoutUntil > 0 && (
+          <div className="p-3 rounded-xl bg-red-50 border border-red-200 text-red-800 text-xs flex items-center space-x-2">
+            <svg className="w-4 h-4 text-red-500 shrink-0" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>Account locked. Try again in {Math.ceil(lockoutUntil / 1000)} seconds</span>
           </div>
         )}
 
@@ -167,6 +191,17 @@ export function LoginView() {
                 </button>
               </div>
             )}
+          </div>
+
+          {/* Forgot Password Link */}
+          <div className="pt-2">
+            <button
+              type="button"
+              onClick={() => navigate("/auth/forgot-password", { state: { identifier: userId.trim() } })}
+              className="text-xs text-[#6C5119] hover:underline font-medium cursor-pointer w-full text-center block"
+            >
+              Forgot Password?
+            </button>
           </div>
 
           {/* Submit Button */}

@@ -7,6 +7,6 @@ export interface HealthResponse {
 }
 
 export async function checkBackendHealth(): Promise<HealthResponse> {
-  return apiClient.get<HealthResponse>("/health");
+  return apiClient.get<HealthResponse>("/health", undefined, { skipCache: true });
 }
 

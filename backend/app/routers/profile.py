@@ -252,3 +252,62 @@ def update_profile(
         "photoUrl": payload.photoUrl or "",
     }
 
+
+@router.get(
+    "/admin/all-teachers",
+    summary="Admin: View all faculty profiles with subject assignments",
+    
+)
+def admin_all_teachers(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Admin can view all teacher profiles, their assigned subjects, and contact details."""
+    if current_user.role != "ADMIN":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    
+    # Get all users with FACULTY role
+    all_users = db.query(User).filter(User.role == "FACULTY").all()
+    
+    teachers_info = []
+    for user in all_users:
+        # Get profile data
+        stmt = text("""
+            SELECT full_name, mobile, email, branch, designation, experience_years,
+                   qualifications, specialization, expertise, mastered_subjects, photo_url
+            FROM user_profiles WHERE user_id = :uid
+        """)
+        row = db.execute(stmt, {"uid": user.user_id}).fetchone()
+        
+        # Get assigned subjects
+        assigned_subjects = db.query(FacultySubject.subject_code).filter(
+            FacultySubject.user_id == user.user_id
+        ).all()
+        subject_codes = [s[0] for s in assigned_subjects]
+        
+        # Get department info
+        dept_info = db.query(DepartmentStaff.dept_id).filter(
+            DepartmentStaff.user_id == user.user_id
+        ).first()
+        
+        teachers_info.append({
+            "user_id": user.user_id,
+            "name": user.name or "",
+            "email": user.email,
+            "role": user.role,
+            "full_name": row[0] if row else "",
+            "mobile": row[1] if row else "",
+            "email_db": row[2] if row else user.email,
+            "branch": row[3] if row else "",
+            "designation": row[4] if row else "",
+            "experience_years": row[5] if row else 0,
+            "qualifications": row[6] if row else "",
+            "specialization": row[7] if row else "",
+            "expertise": json.loads(row[8]) if row and row[8] else [],
+            "mastered_subjects": json.loads(row[9]) if row and row[9] else [],
+            "photo_url": row[10] if row else "",
+            "assigned_subjects": subject_codes,
+            "department": dept_info[0] if dept_info else "",
+        })
+    
+    return {"teachers": teachers_info}

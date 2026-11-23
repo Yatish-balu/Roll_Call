@@ -47,6 +47,11 @@ def auth_test_db(monkeypatch):
     monkeypatch.setenv("JWT_SECRET", TEST_JWT_SECRET)
     monkeypatch.setenv("ADMIN_KEY", TEST_ADMIN_KEY)
     monkeypatch.setenv("APP_ENV", "testing")
+    # Seed credentials are environment-provided; never rely on source defaults.
+    monkeypatch.setenv("SEED_ADMIN_PASSWORD", "SeedAdminPass_2026!")
+    monkeypatch.setenv("SEED_FACULTY_1_PASSWORD", "SeedFaculty1Pass_2026!")
+    monkeypatch.setenv("SEED_FACULTY_2_PASSWORD", "SeedFaculty2Pass_2026!")
+    monkeypatch.setenv("SEED_FACULTY_3_PASSWORD", "SeedFaculty3Pass_2026!")
     monkeypatch.setattr("app.db.connection.get_sync_session_factory", lambda eng=None: SessionLocal)
     monkeypatch.setattr("app.routers.auth.get_sync_session_factory", lambda: SessionLocal)
 
@@ -257,7 +262,7 @@ def test_admin_login_requires_valid_admin_key(client):
 
 
 def test_database_login_rate_limiting_triggers_429(client):
-    """Test 8: Five failed attempts in rolling 10 minutes allow, 6th returns HTTP 429 RATE_LIMITED."""
+    """Test 8: Five failed attempts per minute are allowed; the 6th returns HTTP 429 RATE_LIMITED."""
     target_user = "rate_limit_test_user"
 
     # Attempts 1 through 5: Fail with 401
@@ -277,7 +282,7 @@ def test_database_login_rate_limiting_triggers_429(client):
     data = res6.json()
     assert data["error"]["code"] == "RATE_LIMITED"
     assert "Too many failed login attempts" in data["error"]["message"]
-    assert res6.headers.get("Retry-After") == "600"
+    assert res6.headers.get("Retry-After") == "60"
 
 
 def test_deactivated_user_cannot_access_or_login(client, auth_test_db):

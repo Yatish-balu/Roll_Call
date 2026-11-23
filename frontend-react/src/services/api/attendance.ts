@@ -73,7 +73,7 @@ export async function updateSessionAttendance(
       session_id: sessionId,
       usn: r.usn,
       status: r.status,
-      room_id: r.room_id || "LH-101",
+      room_id: r.room_id || "UNALLOCATED",
       source: "manual",
       confidence: 1.0,
     })),

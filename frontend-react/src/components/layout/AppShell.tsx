@@ -1,4 +1,5 @@
-import React, { useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import { useLocation } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import { Sidebar } from "@/components/layout/Sidebar";
 import { Header } from "@/components/layout/Header";
@@ -11,7 +12,17 @@ interface AppShellProps {
 
 export function AppShell({ children, title = "Dashboard" }: AppShellProps) {
   const { isAuthenticated, isLoading } = useAuth();
+  const { pathname } = useLocation();
   const [isMobileSidebarOpen, setIsMobileSidebarOpen] = useState(false);
+  const mainRef = useRef<HTMLElement | null>(null);
+
+  // The shell now survives navigation, so reset the scroll position of the
+  // content area when the user opens a different page.
+  useEffect(() => {
+    if (mainRef.current) {
+      mainRef.current.scrollTop = 0;
+    }
+  }, [pathname]);
 
   if (isLoading) {
     return (
@@ -47,11 +58,10 @@ export function AppShell({ children, title = "Dashboard" }: AppShellProps) {
           onMenuToggle={() => setIsMobileSidebarOpen(true)}
         />
 
-        <main className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto">
+        <main ref={mainRef} className="flex-1 p-4 sm:p-6 lg:p-8 overflow-y-auto">
           {children}
         </main>
       </div>
     </div>
   );
 }
-

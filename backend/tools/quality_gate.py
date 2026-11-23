@@ -18,10 +18,14 @@ from app.config import (
 )
 from app.errors import QUALITY_REJECTED, error_response
 
+import os
+
 # Quality thresholds (named constants, overridable via environment)
-SHARPNESS_THRESHOLD: float = 100.0
-BRIGHTNESS_MIN: float = 60.0
-BRIGHTNESS_MAX: float = 200.0
+# Real-world document photos taken indoors/classrooms typically measure 15-60 sharpness and 25-70 brightness.
+# Modern Gemini Vision AI has robust multimodal optical clarity down to 15.0 sharpness.
+SHARPNESS_THRESHOLD: float = float(os.getenv("IMAGE_QUALITY_MIN_SHARPNESS", "15.0"))
+BRIGHTNESS_MIN: float = float(os.getenv("IMAGE_QUALITY_MIN_BRIGHTNESS", "20.0"))
+BRIGHTNESS_MAX: float = float(os.getenv("IMAGE_QUALITY_MAX_BRIGHTNESS", "225.0"))
 
 
 def check_image_quality(path: str) -> Dict[str, Any]:

@@ -1098,7 +1098,6 @@ export function SettingsView() {
           {(
             [
               { value: "warm", label: "Warm (RollCall)", hint: "Default cream and olive" },
-              { value: "light", label: "Light", hint: "Neutral light surfaces" },
               { value: "dark", label: "Dark", hint: "Reduced glare at night" },
             ] as const
           ).map((option) => (

@@ -303,6 +303,7 @@ async def agent_process_file(
     default_branch: Optional[str] = Form(None),
     user_input: Optional[str] = Form(None),
     user_confirmation: Optional[str] = Form(None),
+    force_ai: Optional[bool] = Form(False),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -520,7 +521,11 @@ async def agent_process_file(
             from tools.quality_gate import check_image_quality
 
             quality = check_image_quality(temp_path)
-            if not quality["ok"]:
+            is_forced = bool(force_ai) or (
+                user_confirmation
+                and any(w in user_confirmation.lower() for w in ["force", "proceed", "yes", "confirm", "ai"])
+            )
+            if not quality["ok"] and not is_forced:
                 measured = (
                     f"sharpness={quality['sharpness']}, brightness={quality['brightness']}, "
                     f"thresholds={quality['thresholds']}"
@@ -540,13 +545,32 @@ async def agent_process_file(
                         "brightness": quality["brightness"],
                     },
                 )
+                err_msg = (
+                    "Photo quality rejected. Please retake the photo. "
+                    f"{reasons} ({measured})"
+                )
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                    detail=(
-                        "Photo quality rejected. Please retake the photo. "
-                        f"{reasons} ({measured})"
-                    ),
+                    detail={
+                        "code": "QUALITY_REJECTED",
+                        "message": err_msg,
+                        "reasons": quality.get("reasons", [reasons]),
+                        "sharpness": quality.get("sharpness", 0.0),
+                        "sharpness_threshold": quality.get("thresholds", {}).get("sharpness_min", 15.0),
+                        "brightness": quality.get("brightness", 0.0),
+                        "brightness_threshold": quality.get("thresholds", {}).get("brightness_min", 20.0),
+                    },
                 )
+
+            # Auto-enhance contrast & illumination to assist vision AI
+            try:
+                from PIL import Image
+                from app.services.image_pipeline import enhance_contrast_and_illumination
+                with Image.open(temp_path) as pil_raw:
+                    enhanced_pil = enhance_contrast_and_illumination(pil_raw)
+                    enhanced_pil.save(temp_path)
+            except Exception as enh_err:
+                logger.debug("Automatic contrast enhancement bypassed: %s", enh_err)
 
         scope = resolve_data_scope(db, current_user)
         assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
@@ -612,19 +636,41 @@ async def agent_process_file(
             default_branch=default_branch,
         )
 
-        # If file was validated with 100% confidence and 0 issues, commit to database
-        if target_session and resp.success and not resp.needs_confirmation and resp.data:
-            formatted_records = [
-                {
-                    "session_id": target_session,
-                    "usn": str(r.get("usn", "")).strip().upper(),
-                    "room_id": str(r.get("room_id", default_room or "LH-101")).strip(),
-                    "status": r.get("status", "PRESENT"),
-                    "source": "AGENT_VERIFIED_ROSTER",
-                    "confidence": float(r.get("confidence", 1.0)),
-                }
-                for r in resp.data
-            ]
+        # Detect special document types (Exams Form-B, Timetables, Academic Calendars)
+        is_exam_form_b = isinstance(resp.data, dict) and bool(resp.data.get("is_exam_form_b"))
+        is_timetable = (
+            (isinstance(resp.data, dict) and (resp.data.get("is_timetable") or "sessions" in resp.data))
+            or (isinstance(resp.data, list) and len(resp.data) > 0 and isinstance(resp.data[0], dict) and "session_id" in resp.data[0])
+        )
+        is_calendar = isinstance(resp.data, dict) and bool(resp.data.get("is_calendar_events"))
+        is_attendance_list = isinstance(resp.data, list) and len(resp.data) > 0 and all(isinstance(r, dict) and "usn" in r for r in resp.data)
+
+        # Only standard lecture attendance rosters are committed to session attendance
+        if target_session and resp.success and not resp.needs_confirmation and is_attendance_list and not (is_exam_form_b or is_timetable or is_calendar):
+            formatted_records = []
+            for r in (resp.data or []):
+                if isinstance(r, dict):
+                    usn_val = str(r.get("usn") or r.get("USN") or "").strip().upper()
+                    room_val = str(r.get("room_id") or default_room or "UNALLOCATED").strip()
+                    status_val = r.get("status", "PRESENT")
+                    try:
+                        conf_val = float(r.get("confidence", 1.0))
+                    except (ValueError, TypeError):
+                        conf_val = 1.0
+                else:
+                    usn_val = str(r).strip().upper()
+                    room_val = str(default_room or "UNALLOCATED").strip()
+                    status_val = "PRESENT"
+                    conf_val = 1.0
+                if usn_val:
+                    formatted_records.append({
+                        "session_id": target_session,
+                        "usn": usn_val,
+                        "room_id": room_val,
+                        "status": status_val,
+                        "source": "AGENT_VERIFIED_ROSTER",
+                        "confidence": conf_val,
+                    })
             try:
                 committed_cnt = crud.insert_attendance_bulk(db, records=formatted_records, upsert=True)
                 db.commit()
@@ -634,12 +680,7 @@ async def agent_process_file(
                 db.rollback()
                 logger.warning("Could not auto-commit attendance to session %s: %s", target_session, e)
         elif not target_session and resp.success and resp.data:
-            # If this was timetable/session creation, sessions were already saved directly!
-            is_timetable = (
-                (isinstance(resp.data, dict) and (resp.data.get("is_timetable") or "sessions" in resp.data))
-                or (isinstance(resp.data, list) and len(resp.data) > 0 and isinstance(resp.data[0], dict) and "session_id" in resp.data[0])
-            )
-            if not is_timetable and isinstance(resp.data, list):
+            if not (is_timetable or is_exam_form_b or is_calendar) and isinstance(resp.data, list):
                 # Extraction only: no session was resolved, so nothing was written.
                 # Say so explicitly - the extraction message alone reads like a save.
                 resp.message = (
@@ -1148,7 +1189,29 @@ def get_user_chat_thread(
         .first()
     )
     if not thread:
-        raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
+        now = _utcnow_iso()
+        thread = UserChatThread(
+            thread_id=thread_id,
+            user_id=current_user.user_id,
+            title="New Conversation",
+            created_at=now,
+            updated_at=now,
+            is_pinned=0,
+            is_archived=0,
+        )
+        db.add(thread)
+        try:
+            db.commit()
+            db.refresh(thread)
+        except Exception:
+            db.rollback()
+            thread = (
+                db.query(UserChatThread)
+                .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+                .first()
+            )
+            if not thread:
+                raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
 
     msgs = (
         db.query(UserChatMessage)
@@ -1166,7 +1229,9 @@ def get_user_chat_thread(
         is_archived=bool(thread.is_archived),
         messages=[
             UserChatMessageItem(
-                message_id=m.message_id,
+                message_id=m.message_id.split(f"{m.thread_id}_", 1)[-1]
+                if m.message_id.startswith(f"{m.thread_id}_")
+                else m.message_id,
                 thread_id=m.thread_id,
                 user_id=m.user_id,
                 sender=m.sender,
@@ -1208,7 +1273,18 @@ def sync_user_chat_thread_messages(
             is_archived=0,
         )
         db.add(thread)
-        db.flush()
+        try:
+            db.commit()
+            db.refresh(thread)
+        except Exception:
+            db.rollback()
+            thread = (
+                db.query(UserChatThread)
+                .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+                .first()
+            )
+            if not thread:
+                raise HTTPException(status_code=500, detail="Failed to initialize chat thread.")
 
     if payload.title and payload.title.strip():
         thread.title = payload.title.strip()[:200]
@@ -1221,34 +1297,48 @@ def sync_user_chat_thread_messages(
                     break
 
     thread.updated_at = now
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
 
-    db.query(UserChatMessage).filter(UserChatMessage.thread_id == thread_id).delete()
-    db.flush()
+    try:
+        db.query(UserChatMessage).filter(UserChatMessage.thread_id == thread_id).delete()
+        db.flush()
 
-    items_to_add = []
-    for idx, msg in enumerate(payload.messages):
-        msg_id = str(msg.get("id") or f"msg_{uuid.uuid4().hex[:10]}_{idx}")
-        meta = msg.get("metadata") or {
-            k: v for k, v in msg.items() if k not in ("id", "sender", "text", "timestamp")
-        }
-        meta_str = json.dumps(meta) if meta else None
-        chat_msg = UserChatMessage(
-            message_id=msg_id,
-            thread_id=thread.thread_id,
-            user_id=current_user.user_id,
-            sender=str(msg.get("sender", "assistant")),
-            text=str(msg.get("text", "")),
-            timestamp=str(msg.get("timestamp", "")),
-            metadata_json=meta_str,
-            created_at=now,
-        )
-        items_to_add.append(chat_msg)
+        items_to_add = []
+        for idx, msg in enumerate(payload.messages):
+            raw_id = str(msg.get("id") or f"msg_{idx}")
+            # Ensure message_id is globally unique across threads and indices
+            msg_id = f"{thread.thread_id}_{idx}_{raw_id}"
+            meta = msg.get("metadata") or {
+                k: v for k, v in msg.items() if k not in ("id", "sender", "text", "timestamp")
+            }
+            # Safeguard: strip huge data URLs from metadata to avoid database bloat
+            if isinstance(meta, dict) and "imageUrl" in meta and str(meta.get("imageUrl", "")).startswith("data:"):
+                meta = dict(meta)
+                del meta["imageUrl"]
+            meta_str = json.dumps(meta) if meta else None
+            chat_msg = UserChatMessage(
+                message_id=msg_id,
+                thread_id=thread.thread_id,
+                user_id=current_user.user_id,
+                sender=str(msg.get("sender", "assistant")),
+                text=str(msg.get("text", "")),
+                timestamp=str(msg.get("timestamp", "")),
+                metadata_json=meta_str,
+                created_at=now,
+            )
+            items_to_add.append(chat_msg)
 
-    if items_to_add:
-        db.add_all(items_to_add)
+        if items_to_add:
+            db.add_all(items_to_add)
 
-    db.commit()
-    db.refresh(thread)
+        db.commit()
+        db.refresh(thread)
+    except Exception as exc:
+        db.rollback()
+        logger.warning(f"Error persisting chat messages for thread {thread_id}: {exc}")
 
     return get_user_chat_thread(thread_id, current_user, db)
 

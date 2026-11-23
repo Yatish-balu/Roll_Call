@@ -145,3 +145,70 @@ npm run lint
 - [ ] Full security scan script passing (`scripts/security-scan.ps1`).
 - [ ] Legacy Streamlit UI disabled in production.
 - [ ] Database backup and restore drill documented and validated.
+
+---
+
+## 8. Secret rotation runbook
+
+Triggered by the faculty audit findings V-03 (hardcoded development credentials
+and committed JWT secret). **Rotate first, then clean history** — deleting a
+value from the latest commit does not invalidate a copy that leaked earlier.
+
+### What to rotate and what it affects
+
+| Secret | Effect of rotation |
+| --- | --- |
+| `JWT_SECRET` / `JWT_SECRET_KEY` | Existing access tokens stop verifying. Refresh tokens live in the session DB, so users get a new access token on refresh. Deploy to **all** workers at once. |
+| `ADMIN_KEY` | Every ADMIN login must use the new key. |
+| `SEED_*_PASSWORD`, `SEED_PASSWORD_*` | Seed scripts skip existing users, so update their stored hashes with `scripts/rotate_password.py` as well. |
+| `MFA_ENCRYPTION_KEY` | **Do not rotate casually:** existing TOTP secrets cannot be decrypted. Plan re-enrollment for all MFA users or keep a legacy key for migration. |
+| `SMTP_PASSWORD`, `GEMINI_API_KEY`, other shared values | Rotate wherever the old value may have been used in shared/staging/production. |
+
+The old committed development fallback (`rollcall-dev-secret-key-change-in-
+production-32bytes-min`) is no longer in source: `DEV_FALLBACK_SECRET` is
+generated per process. Treat the old literal as burned and never reuse it.
+
+### Generate replacement values locally (do not paste them into chat or Git)
+
+```powershell
+# JWT / admin key / seed passwords: >= 32 characters for JWT, >= 12 for passwords
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+# MFA key (only if you have a re-enrollment plan)
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+### Order of operations
+
+1. Generate new values locally and store them in the project's secret manager
+   (or an untracked `.env` for local development). Update `.env.example` only
+   with **empty placeholders**.
+2. Rotate user passwords in the database, one account at a time:
+
+   ```powershell
+   $env:ROTATE_USER_ID = "faculty_cn"
+   $env:ROTATE_NEW_PASSWORD = "<new value from secret manager>"
+   python backend/scripts/rotate_password.py
+   Remove-Item Env:ROTATE_NEW_PASSWORD
+   ```
+
+   The script bcrypt-hashes the password, revokes all sessions/refresh tokens
+   for that account, clears its login/password-change counters, and never logs
+   the secret or hash.
+
+3. Deploy the new `JWT_SECRET`, `ADMIN_KEY` and any provider credentials to all
+   application workers and restart them together.
+4. Verify: `GET /health`, login with an exact rotated password,
+   `GET /api/v1/auth/me`, refresh-cookie rotation, an ADMIN login with the new
+   key, and `GET /api/v1/auth/mfa/status`.
+5. Scan the working tree and history; if a live secret was ever committed,
+   rotate it (steps 1-3) **before** rewriting history:
+
+   ```bash
+   gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
+   gitleaks detect --source . --config .gitleaks.toml --log-opts="--all" --redact
+   ```
+
+   Coordinate any `git filter-repo` / BFG history rewrite with every clone and
+   fork; teammates must re-clone afterwards.
+6. Record the rotation date, operator, affected variable names and verification
+   outcome in the change ticket. **Never record the values themselves.**

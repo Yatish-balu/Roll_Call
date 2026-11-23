@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+import secrets
 import uuid
 from typing import Any, Dict, List, Optional
 
@@ -56,8 +57,10 @@ def _base32_decode(secret: str) -> bytes:
     return base64.b32decode(secret.upper().strip())
 
 
-#: The development fallback secret. It must never be accepted in production.
-DEV_FALLBACK_SECRET = "rollcall-dev-secret-key-change-in-production-32bytes-min"
+#: Ephemeral development fallback secret. It is generated per process instead
+#: of being committed to source, and is never accepted in production. Set
+#: JWT_SECRET explicitly for any long-lived or multi-worker environment.
+DEV_FALLBACK_SECRET = secrets.token_urlsafe(48)
 
 
 def validate_jwt_secret_configuration(

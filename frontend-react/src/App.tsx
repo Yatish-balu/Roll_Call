@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import ForgotPasswordPage from "@/components/auth/ForgotPasswordPage"; import ResetPasswordPage from "@/components/auth/ResetPasswordPage"
 import { AuthProvider } from "@/context/AuthContext";
-import { AppShell } from "@/components/layout";
+import { AppLayout } from "@/components/layout";
 import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { ProtectedRoute } from "@/components/auth";
 import { DashboardView } from "@/features/dashboard";
@@ -19,205 +20,172 @@ import { DefaultersView } from "@/features/defaulters";
 import { CalendarView } from "@/features/calendar";
 import { ExamControlView, InvigilatorFormBView } from "@/features/exams";
 
+/**
+ * All pages share one layout route so the shell (sidebar, header, notification
+ * polling and scroll container) stays mounted while the user moves between
+ * tabs. Only the page body changes.
+ */
 export function App() {
   return (
     <AuthProvider>
       <ErrorBoundary>
         <BrowserRouter>
           <Routes>
-          <Route
-            path="/login"
-            element={
-              <AppShell title="Sign In">
-                <DashboardView />
-              </AppShell>
-            }
-          />
-          <Route
-            path="/"
-            element={
-              <AppShell title="Dashboard">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Dashboard">
-                  <DashboardView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/students"
-            element={
-              <AppShell title="Students">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Student Registry">
-                  <StudentsView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/attendance"
-            element={
-              <AppShell title="Attendance">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Rosters">
-                  <AttendanceView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/timetable"
-            element={
-              <AppShell title="Timetable">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Academic Timetable">
-                  <TimetableView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/calendar"
-            element={
-              <AppShell title="Attendance Calendar">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Calendar & Heatmap">
-                  <CalendarView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/exams"
-            element={
-              <AppShell title="Exam Cell">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Exam Cell & Form-B Control">
-                  <ExamControlView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/invigilation"
-            element={
-              <AppShell title="My Invigilation">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Invigilator Form-B Sheet">
-                  <InvigilatorFormBView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/exams/:examId/rooms/:roomNo"
-            element={
-              <AppShell title="Form-B Attendance">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Invigilator Form-B Sheet">
-                  <InvigilatorFormBView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/sessions"
-            element={
-              <AppShell title="Sessions">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Academic Sessions">
-                  <SessionsView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/faculty"
-            element={
-              <AppShell title="Admin Command Center">
-                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
-                  <FacultyView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/admin"
-            element={
-              <AppShell title="Admin Command Center">
-                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
-                  <FacultyView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/rooms"
-            element={
-              <AppShell title="Rooms & Facilities">
-                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Rooms & Facilities Management">
-                  <RoomsView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/defaulters"
-            element={
-              <AppShell title="Defaulter Registry">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Defaulters">
-                  <DefaultersView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/reports"
-            element={
-              <AppShell title="Reports & Analytics">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Reports & Analytics">
-                  <ReportsView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/assistant"
-            element={
-              <AppShell title="AI Assistant">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="AI Assistant">
-                  <AssistantView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/audit"
-            element={
-              <AppShell title="Audit Logs">
-                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="System Audit Logs">
-                  <AuditLogView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/settings"
-            element={
-              <AppShell title="Settings">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Settings & Preferences">
-                  <SettingsView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route
-            path="/profile"
-            element={
-              <AppShell title="My Profile">
-                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="My Profile">
-                  <MyProfileView />
-                </ProtectedRoute>
-              </AppShell>
-            }
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
-      </BrowserRouter>
-    </ErrorBoundary>
-  </AuthProvider>
+            <Route element={<AppLayout />}>
+              <Route path="/login" element={<DashboardView />} />
+              <Route
+                path="/"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Dashboard">
+                    <DashboardView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/students"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Student Registry">
+                    <StudentsView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/attendance"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Rosters">
+                    <AttendanceView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/timetable"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Academic Timetable">
+                    <TimetableView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/calendar"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Calendar & Heatmap">
+                    <CalendarView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/exams"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Exam Cell & Form-B Control">
+                    <ExamControlView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/invigilation"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Invigilator Form-B Sheet">
+                    <InvigilatorFormBView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/exams/:examId/rooms/:roomNo"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Invigilator Form-B Sheet">
+                    <InvigilatorFormBView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/sessions"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Academic Sessions">
+                    <SessionsView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/faculty"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
+                    <FacultyView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/admin"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
+                    <FacultyView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/rooms"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Rooms & Facilities Management">
+                    <RoomsView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/defaulters"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Attendance Defaulters">
+                    <DefaultersView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/reports"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Reports & Analytics">
+                    <ReportsView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/assistant"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="AI Assistant">
+                    <AssistantView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/audit"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="System Audit Logs">
+                    <AuditLogView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/settings"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="Settings & Preferences">
+                    <SettingsView />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="/profile"
+                element={
+                  <ProtectedRoute allowedRoles={["ADMIN", "FACULTY", "VIEWER"]} pageTitle="My Profile">
+                    <MyProfileView />
+                  </ProtectedRoute>
+                }
+              />
+            </Route>
+            <Route path="/auth/forgot-password" element={<ForgotPasswordPage />} />
+            <Route path="/auth/verify-otp" element={<ForgotPasswordPage initialStep="otp" />} />
+            <Route path="/auth/reset-password" element={<ResetPasswordPage />} />
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+      </ErrorBoundary>
+    </AuthProvider>
   );
 }
 

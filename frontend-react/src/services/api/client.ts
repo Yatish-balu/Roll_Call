@@ -37,10 +37,49 @@ export class ApiError extends Error {
 
 export type RefreshHandler = () => Promise<string | null>;
 
+/**
+ * Extra per-request options understood by this client.
+ *
+ * - `skipCache`: always hit the network (health probes, explicit refresh).
+ * - `cacheTtlMs`: override how long a GET response counts as fresh.
+ */
+export interface ApiRequestConfig extends AxiosRequestConfig {
+  skipCache?: boolean;
+  cacheTtlMs?: number;
+}
+
+interface CacheEntry {
+  data: unknown;
+  storedAt: number;
+}
+
+/** A GET response stays "fresh" for this long and is served without a request. */
+const DEFAULT_CACHE_TTL_MS = 60_000;
+/**
+ * After the fresh window the cached copy is still returned immediately while a
+ * background request refreshes it, so switching tabs never blocks on the
+ * network. Beyond this age the request waits for the server again.
+ */
+const MAX_STALE_MS = 15 * 60_000;
+
+function buildCacheKey(
+  url: string,
+  params?: Record<string, string | number | boolean | undefined | null>
+): string {
+  if (!params) return url;
+  const parts = Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${String(value)}`);
+  return parts.length ? `${url}?${parts.join("&")}` : url;
+}
+
 export class ApiClient {
   private readonly axiosInstance: AxiosInstance;
   private accessToken: string | null = null;
   private refreshHandler: RefreshHandler | null = null;
+  private readonly getCache = new Map<string, CacheEntry>();
+  private readonly getInFlight = new Map<string, Promise<unknown>>();
 
   constructor() {
     this.axiosInstance = axios.create({
@@ -101,10 +140,20 @@ export class ApiClient {
             ? "UNAUTHORIZED"
             : status === 403
             ? "FORBIDDEN"
+            : status === 429
+            ? "RATE_LIMITED"
             : "HTTP_ERROR");
         const rawDetail = data?.detail || data?.message;
         let message: string;
-        if (typeof rawDetail === "object" && rawDetail !== null) {
+        if (status === 429) {
+          const retryHeader = error.response?.headers?.["retry-after"];
+          const waitStr = retryHeader
+            ? ` Please wait ${retryHeader}s before retrying.`
+            : " Please wait a few seconds and try again.";
+          message = typeof rawDetail === "string" && rawDetail.trim()
+            ? `${rawDetail}.${waitStr}`
+            : `Rate limit reached.${waitStr}`;
+        } else if (typeof rawDetail === "object" && rawDetail !== null) {
           const anyDetail = rawDetail as Record<string, unknown>;
           message = (anyDetail.message as string) ||
             ((anyDetail.error as Record<string, unknown>)?.message as string) ||
@@ -127,6 +176,11 @@ export class ApiClient {
   }
 
   public setAccessToken(token: string | null): void {
+    if (this.accessToken !== token) {
+      // Never serve another account's cached responses after a login/logout.
+      this.getCache.clear();
+      this.getInFlight.clear();
+    }
     this.accessToken = token;
   }
 
@@ -141,13 +195,83 @@ export class ApiClient {
     return "http://127.0.0.1:8000";
   }
 
+  /**
+   * Cached GET with in-flight de-duplication and stale-while-revalidate.
+   *
+   * Views are mounted/unmounted whenever the user switches tabs, and each
+   * mount used to re-issue every request (dashboard alone fires four). Serving
+   * the previous response instantly keeps tab navigation snappy; mutations
+   * clear the cache so edits are never masked by stale data.
+   */
   public async get<T>(
     url: string,
     params?: Record<string, string | number | boolean | undefined | null>,
-    config?: AxiosRequestConfig
+    config?: ApiRequestConfig
   ): Promise<T> {
-    const res = await this.axiosInstance.get<T>(url, { ...config, params });
-    return res.data;
+    if (config?.skipCache) {
+      return this.requestGet<T>(url, params, config);
+    }
+
+    const key = buildCacheKey(url, params);
+    const ttl = config?.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
+    const cached = this.getCache.get(key);
+    const age = cached ? Date.now() - cached.storedAt : Number.POSITIVE_INFINITY;
+
+    if (cached && age <= ttl) {
+      return cached.data as T;
+    }
+
+    if (cached && age <= MAX_STALE_MS) {
+      // Return immediately and refresh in the background for the next mount.
+      void this.requestGet<T>(url, params, config).catch(() => {
+        // Keep the cached copy when revalidation fails.
+      });
+      return cached.data as T;
+    }
+
+    return this.requestGet<T>(url, params, config);
+  }
+
+  /** Fetch a GET, de-duplicating concurrent identical requests, and cache it. */
+  private requestGet<T>(
+    url: string,
+    params?: Record<string, string | number | boolean | undefined | null>,
+    config?: ApiRequestConfig
+  ): Promise<T> {
+    const key = buildCacheKey(url, params);
+    const pending = this.getInFlight.get(key);
+    if (pending) {
+      return pending as Promise<T>;
+    }
+
+    const request = this.axiosInstance
+      .get<T>(url, { ...config, params })
+      .then((res) => {
+        this.getCache.set(key, { data: res.data, storedAt: Date.now() });
+        return res.data;
+      })
+      .finally(() => {
+        this.getInFlight.delete(key);
+      });
+
+    this.getInFlight.set(key, request);
+    return request;
+  }
+
+  /**
+   * Drop cached GET responses. Call after a mutation or when the server state
+   * is known to have changed (e.g. a websocket/custom-event notification).
+   */
+  public invalidateCache(urlPrefix?: string): void {
+    if (!urlPrefix) {
+      this.getCache.clear();
+      return;
+    }
+    for (const key of this.getCache.keys()) {
+      if (key.startsWith(urlPrefix)) {
+        this.getCache.delete(key);
+      }
+    }
   }
 
   /**
@@ -177,24 +301,45 @@ export class ApiClient {
     }
 
     const res = await this.axiosInstance.post<T>(url, data, finalConfig);
+    this.invalidateCache();
     return res.data;
   }
 
   public async put<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
     const res = await this.axiosInstance.put<T>(url, data, config);
+    this.invalidateCache();
     return res.data;
   }
 
   public async patch<T>(url: string, data?: unknown, config?: AxiosRequestConfig): Promise<T> {
     const res = await this.axiosInstance.patch<T>(url, data, config);
+    this.invalidateCache();
     return res.data;
   }
 
   public async delete<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
     const res = await this.axiosInstance.delete<T>(url, config);
+    this.invalidateCache();
     return res.data;
   }
 }
 
 export const apiClient = new ApiClient();
+
+/**
+ * Server-side changes announced through cross-view events must not be masked by
+ * an older cached GET. Dropping the cache lets the listeners that already react
+ * to these events fetch the new state instead of replaying the previous one.
+ */
+if (typeof window !== "undefined") {
+  const SYNC_EVENTS = [
+    "rollcall:attendance-changed",
+    "rollcall:sessions-changed",
+    "rollcall-attendance-updated",
+    "rollcall-delegations-updated",
+    "rollcall-unlock-request-updated",
+  ];
+  const invalidate = () => apiClient.invalidateCache();
+  SYNC_EVENTS.forEach((eventName) => window.addEventListener(eventName, invalidate));
+}
 

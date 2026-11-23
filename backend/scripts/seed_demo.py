@@ -19,7 +19,7 @@ import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 # Ensure backend directory is in sys.path when executed as a direct script
 _BACKEND_DIR = Path(__file__).resolve().parents[1]
@@ -41,9 +41,17 @@ def _hash_password(plain: str) -> str:
     return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
 
-def _demo_password(user_id: str, default: str) -> str:
-    """Password from the environment, falling back to a documented demo value."""
-    return os.getenv(f"SEED_PASSWORD_{user_id.upper()}", default)
+def _demo_password(user_id: str, default: Optional[str] = None) -> str:
+    """Password from the environment; never fall back to a committed secret.
+
+    ``default`` exists only for tests that deliberately pass a dummy value.
+    """
+    value = os.getenv(f"SEED_PASSWORD_{user_id.upper()}", default)
+    if not value:
+        raise ValueError(
+            f"SEED_PASSWORD_{user_id.upper()} must be set before seeding demo users."
+        )
+    return value
 
 
 def seed_demo_data() -> Dict[str, Any]:
@@ -63,19 +71,20 @@ def seed_demo_data() -> Dict[str, Any]:
 
         # --- Users ---
         users = [
-            ("admin_root", "Admin User", "admin@rollcall.edu", "ADMIN", "admin_key_2026"),
-            ("teacher_cn", "Prof. CN", "cn@rollcall.edu", "FACULTY", "teacher_cn_pw"),
-            ("teacher_ml", "Prof. ML", "ml@rollcall.edu", "FACULTY", "teacher_ml_pw"),
-            ("teacher_db", "Prof. DB", "db@rollcall.edu", "FACULTY", "teacher_db_pw"),
+            ("admin_root", "Admin User", "admin@rollcall.edu", "ADMIN"),
+            ("teacher_cn", "Prof. CN", "cn@rollcall.edu", "FACULTY"),
+            ("teacher_ml", "Prof. ML", "ml@rollcall.edu", "FACULTY"),
+            ("teacher_db", "Prof. DB", "db@rollcall.edu", "FACULTY"),
         ]
         created_users: Dict[str, Any] = {}
-        for uid, name, email, role, pw in users:
+        for uid, name, email, role in users:
+            password = _demo_password(uid)
             existing = db.get(User, uid)
             if existing:
                 # Repair legacy/plaintext seed rows so demo logins keep working.
                 stored = existing.hashed_password or ""
                 if not stored.startswith("$2"):
-                    existing.hashed_password = _hash_password(_demo_password(uid, pw))
+                    existing.hashed_password = _hash_password(password)
                 created_users[uid] = existing
                 continue
             user = User(
@@ -83,7 +92,7 @@ def seed_demo_data() -> Dict[str, Any]:
                 name=name,
                 email=email,
                 role=role,
-                hashed_password=_hash_password(_demo_password(uid, pw)),
+                hashed_password=_hash_password(password),
                 is_active=1,
                 created_at=_utcnow_iso(),
             )

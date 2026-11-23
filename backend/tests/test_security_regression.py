@@ -53,7 +53,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.auth import Role, create_access_token, decode_and_verify_token, get_jwt_secret, reset_rate_limiter
-from app.auth.jwt import AuthenticationError
+from app.auth.jwt import AuthenticationError, DEV_FALLBACK_SECRET
 from app.auth.rate_limiter import rate_limiter
 from app.db.base import Base
 from app.db.models import Room, Session as DbSession, Student
@@ -283,7 +283,9 @@ def test_production_environment_rejects_insecure_dev_secret():
         {
             "APP_ENV": "production",
             "JWT_SECRET": "",
-            "JWT_SECRET_KEY": "rollcall-dev-secret-key-change-in-production-32bytes-min",
+            # The development fallback is generated per process, so import the
+            # live value instead of hardcoding the old committed literal.
+            "JWT_SECRET_KEY": DEV_FALLBACK_SECRET,
             "SUPABASE_JWT_SECRET": "",
         },
     ):
