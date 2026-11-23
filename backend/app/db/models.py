@@ -1125,3 +1125,411 @@ class SessionAllocation(Base):
 
     def __repr__(self) -> str:
         return f"<SessionAllocation(allocation_id={self.allocation_id!r}, date={self.allocation_date!r})>"
+
+
+class AcademicEvent(Base):
+    """Institutional calendar events (holidays, exams, CIE tests, milestones, workshops)."""
+
+    __tablename__ = "academic_events"
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    event_date: Mapped[str] = mapped_column(String, nullable=False)  # ISO YYYY-MM-DD
+    end_date: Mapped[Optional[str]] = mapped_column(String, nullable=True)  # ISO YYYY-MM-DD
+    event_type: Mapped[str] = mapped_column(
+        String, nullable=False, default="ACADEMIC"
+    )  # HOLIDAY | EXAM | CIE | ACADEMIC | MILESTONE | WORKSHOP
+    description: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    target_dept: Mapped[Optional[str]] = mapped_column(String, nullable=True, default="ALL")
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+
+    __table_args__ = (
+        Index("idx_academic_events_date", "event_date"),
+        Index("idx_academic_events_type", "event_type"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "event_id": self.event_id,
+            "title": self.title,
+            "event_date": self.event_date,
+            "end_date": self.end_date,
+            "event_type": self.event_type,
+            "description": self.description,
+            "target_dept": self.target_dept,
+            "created_at": self.created_at,
+        }
+
+    def __repr__(self) -> str:
+        return f"<AcademicEvent(event_id={self.event_id!r}, title={self.title!r}, date={self.event_date!r})>"
+
+
+class UserChatThread(Base):
+    """User-scoped conversational thread for AI attendance assistant."""
+
+    __tablename__ = "user_chat_threads"
+
+    thread_id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(
+        String, nullable=False, default="New Conversation", server_default="New Conversation"
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+    is_pinned: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+    is_archived: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
+
+    user: Mapped["User"] = relationship("User", foreign_keys=[user_id])
+    messages: Mapped[List["UserChatMessage"]] = relationship(
+        "UserChatMessage",
+        back_populates="thread",
+        cascade="all, delete-orphan",
+        order_by="UserChatMessage.created_at",
+    )
+
+    __table_args__ = (
+        Index("idx_user_chat_threads_user_id", "user_id"),
+        Index("idx_user_chat_threads_updated_at", "updated_at"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "thread_id": self.thread_id,
+            "user_id": self.user_id,
+            "title": self.title,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+            "is_pinned": bool(self.is_pinned),
+            "is_archived": bool(self.is_archived),
+        }
+
+    def __repr__(self) -> str:
+        return f"<UserChatThread(thread_id={self.thread_id!r}, user_id={self.user_id!r}, title={self.title!r})>"
+
+
+class UserChatMessage(Base):
+    """Individual message belonging to a UserChatThread."""
+
+    __tablename__ = "user_chat_messages"
+
+    message_id: Mapped[str] = mapped_column(String, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(
+        String, ForeignKey("user_chat_threads.thread_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(
+        String, ForeignKey("users.user_id", ondelete="CASCADE"), nullable=False
+    )
+    sender: Mapped[str] = mapped_column(String, nullable=False)
+    text: Mapped[str] = mapped_column(String, nullable=False)
+    timestamp: Mapped[str] = mapped_column(String, nullable=False)
+    metadata_json: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_utcnow_iso)
+
+    thread: Mapped["UserChatThread"] = relationship("UserChatThread", back_populates="messages")
+
+    __table_args__ = (
+        Index("idx_user_chat_messages_thread_id", "thread_id"),
+        Index("idx_user_chat_messages_user_id", "user_id"),
+        Index("idx_user_chat_messages_created_at", "created_at"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "message_id": self.message_id,
+            "thread_id": self.thread_id,
+            "user_id": self.user_id,
+            "sender": self.sender,
+            "text": self.text,
+            "timestamp": self.timestamp,
+            "metadata_json": self.metadata_json,
+            "created_at": self.created_at,
+        }
+
+    def __repr__(self) -> str:
+        return f"<UserChatMessage(message_id={self.message_id!r}, thread_id={self.thread_id!r}, sender={self.sender!r})>"
+
+
+class ClassDelegation(Base):
+    """Faculty class handover, proxy substitution or period exchange."""
+
+    __tablename__ = "class_delegations"
+
+    delegation_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    original_faculty_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    substitute_faculty_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    delegation_date: Mapped[str] = mapped_column(String(10), nullable=False)
+    delegation_type: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="PROXY",
+    )  # PROXY, EXCHANGE
+    exchange_session_id: Mapped[Optional[str]] = mapped_column(
+        String(50),
+        ForeignKey("sessions.session_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="ACTIVE",
+    )  # ACTIVE, COMPLETED, CANCELLED
+    created_at: Mapped[str] = mapped_column(String(40), nullable=False, default=_utcnow_iso)
+    updated_at: Mapped[str] = mapped_column(String(40), nullable=False, default=_utcnow_iso)
+
+    session: Mapped["Session"] = relationship(
+        "Session",
+        foreign_keys=[session_id],
+    )
+    original_faculty: Mapped["User"] = relationship("User", foreign_keys=[original_faculty_id])
+    substitute_faculty: Mapped["User"] = relationship("User", foreign_keys=[substitute_faculty_id])
+
+    __table_args__ = (
+        Index("idx_class_delegations_session_id", "session_id"),
+        Index("idx_class_delegations_orig_faculty", "original_faculty_id"),
+        Index("idx_class_delegations_sub_faculty", "substitute_faculty_id"),
+        Index("idx_class_delegations_date", "delegation_date"),
+    )
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "delegation_id": self.delegation_id,
+            "session_id": self.session_id,
+            "original_faculty_id": self.original_faculty_id,
+            "substitute_faculty_id": self.substitute_faculty_id,
+            "delegation_date": self.delegation_date,
+            "delegation_type": self.delegation_type,
+            "exchange_session_id": self.exchange_session_id,
+            "reason": self.reason,
+            "status": self.status,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"<ClassDelegation(id={self.delegation_id!r}, "
+            f"session={self.session_id!r}, from={self.original_faculty_id!r}, "
+            f"to={self.substitute_faculty_id!r}, status={self.status!r})>"
+        )
+
+
+class AttendanceUnlockRequest(Base):
+    """Teacher request to unlock an attendance session older than 24h for corrections."""
+
+    __tablename__ = "attendance_unlock_requests"
+
+    request_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    session_id: Mapped[str] = mapped_column(
+        String(50),
+        ForeignKey("sessions.session_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    teacher_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    target_usns: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    requested_change: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="PENDING")
+    admin_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    reviewed_by: Mapped[Optional[str]] = mapped_column(
+        String(64),
+        ForeignKey("users.user_id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    reviewed_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(50), nullable=False)
+    expires_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_attendance_unlock_requests_session_teacher", "session_id", "teacher_id"),
+        Index("ix_attendance_unlock_requests_status", "status"),
+    )
+
+    session = relationship("Session", foreign_keys=[session_id])
+    teacher = relationship("User", foreign_keys=[teacher_id])
+    reviewer = relationship("User", foreign_keys=[reviewed_by])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "session_id": self.session_id,
+            "teacher_id": self.teacher_id,
+            "reason": self.reason,
+            "target_usns": self.target_usns,
+            "requested_change": self.requested_change,
+            "status": self.status,
+            "admin_notes": self.admin_notes,
+            "reviewed_by": self.reviewed_by,
+            "reviewed_at": self.reviewed_at,
+            "created_at": self.created_at,
+            "expires_at": self.expires_at,
+        }
+
+    def __repr__(self) -> str:
+        return (
+            f"<AttendanceUnlockRequest(id={self.request_id!r}, "
+            f"session={self.session_id!r}, teacher={self.teacher_id!r}, "
+            f"status={self.status!r})>"
+        )
+
+
+class Exam(Base):
+    """Institutional Examination sitting (CIE, Lab, SEE)."""
+
+    __tablename__ = "exams"
+
+    exam_id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    exam_type: Mapped[str] = mapped_column(String(30), nullable=False, default="THEORY_CIE")
+    semester: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    department: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    date: Mapped[str] = mapped_column(String(20), nullable=False)
+    start_time: Mapped[str] = mapped_column(String(20), nullable=False)
+    end_time: Mapped[str] = mapped_column(String(20), nullable=False)
+    cutoff_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=45)
+    subject_code: Mapped[str] = mapped_column(String(30), nullable=False)
+    subject_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    created_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    created_at: Mapped[str] = mapped_column(String(50), nullable=False, default=_utcnow_iso)
+
+    __table_args__ = (
+        Index("ix_exams_date", "date"),
+        Index("ix_exams_type", "exam_type"),
+    )
+
+    rooms: Mapped[List["RoomAssignment"]] = relationship("RoomAssignment", back_populates="exam", cascade="all, delete-orphan")
+    seating: Mapped[List["ExamSeating"]] = relationship("ExamSeating", back_populates="exam", cascade="all, delete-orphan")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "exam_id": self.exam_id,
+            "name": self.name,
+            "exam_type": self.exam_type,
+            "semester": self.semester,
+            "department": self.department,
+            "date": self.date,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "cutoff_minutes": self.cutoff_minutes,
+            "subject_code": self.subject_code,
+            "subject_name": self.subject_name,
+            "created_by": self.created_by,
+            "created_at": self.created_at,
+        }
+
+
+class RoomAssignment(Base):
+    """Room allocation and invigilator assignment for an exam."""
+
+    __tablename__ = "room_assignments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exam_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("exams.exam_id", ondelete="CASCADE"), nullable=False
+    )
+    room_no: Mapped[str] = mapped_column(String(50), nullable=False)
+    block_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    capacity: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    invigilator_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("users.user_id", ondelete="SET NULL"), nullable=True
+    )
+    external_examiner_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    external_examiner_college: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    coordinator_id: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    status: Mapped[str] = mapped_column(String(30), nullable=False, default="SCHEDULED")
+    submitted_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    submitted_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_room_assignments_exam_room", "exam_id", "room_no", unique=True),
+        Index("ix_room_assignments_invigilator", "invigilator_id"),
+    )
+
+    exam: Mapped["Exam"] = relationship("Exam", back_populates="rooms")
+    invigilator: Mapped[Optional["User"]] = relationship("User", foreign_keys=[invigilator_id])
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "exam_id": self.exam_id,
+            "room_no": self.room_no,
+            "block_name": self.block_name,
+            "capacity": self.capacity,
+            "invigilator_id": self.invigilator_id,
+            "external_examiner_name": self.external_examiner_name,
+            "external_examiner_college": self.external_examiner_college,
+            "coordinator_id": self.coordinator_id,
+            "status": self.status,
+            "submitted_at": self.submitted_at,
+            "submitted_by": self.submitted_by,
+        }
+
+
+class ExamSeating(Base):
+    """Student seating allocation and attendance state on Form-B."""
+
+    __tablename__ = "exam_seating"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    exam_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("exams.exam_id", ondelete="CASCADE"), nullable=False
+    )
+    room_no: Mapped[str] = mapped_column(String(50), nullable=False)
+    sl_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    usn: Mapped[str] = mapped_column(String(30), nullable=False)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    branch: Mapped[str] = mapped_column(String(30), nullable=False)
+    subject_code: Mapped[str] = mapped_column(String(30), nullable=False)
+    seat_no: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="ABSENT")
+    marked_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    marked_source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    marked_at: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+
+    __table_args__ = (
+        Index("ix_exam_seating_exam_usn", "exam_id", "usn", unique=True),
+        Index("ix_exam_seating_exam_room", "exam_id", "room_no"),
+        Index("ix_exam_seating_branch", "branch"),
+    )
+
+    exam: Mapped["Exam"] = relationship("Exam", back_populates="seating")
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "id": self.id,
+            "exam_id": self.exam_id,
+            "room_no": self.room_no,
+            "sl_no": self.sl_no,
+            "usn": self.usn,
+            "name": self.name,
+            "branch": self.branch,
+            "subject_code": self.subject_code,
+            "seat_no": self.seat_no,
+            "status": self.status,
+            "marked_by": self.marked_by,
+            "marked_source": self.marked_source,
+            "marked_at": self.marked_at,
+        }
+
+
+
+

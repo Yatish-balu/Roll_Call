@@ -139,9 +139,10 @@ def test_value_error_exception_handler(client):
     response = client.get("/test/value-error")
     assert response.status_code == 400
     data = response.json()
-    assert data["error"] == "BadRequest"
-    assert data["message"] == "Invalid attendance status supplied"
-    assert "traceback" not in data
+    # N3 standard error envelope: {"error": {"code", "message"}}
+    assert data["error"]["code"] == "BAD_REQUEST"
+    assert data["error"]["message"] == "Invalid attendance status supplied"
+    assert "traceback" not in data["error"]
 
 
 def test_unhandled_exception_handler(client):
@@ -153,5 +154,5 @@ def test_unhandled_exception_handler(client):
     response = client.get("/test/internal-error")
     assert response.status_code == 500
     data = response.json()
-    assert data["error"] == "InternalServerError"
-    assert "Internal database secret" not in data["message"]
+    assert data["error"]["code"] == "INTERNAL_SERVER_ERROR"
+    assert "Internal database secret" not in data["error"]["message"]

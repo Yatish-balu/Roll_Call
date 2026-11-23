@@ -41,7 +41,7 @@ Response:
 ```json
 {
   "edit_lock_hours": 24,
-  "unlimited_attendance_editing": true,
+  "unlimited_attendance_editing": false,
   "admin_override_allowed": true,
   "defaulter_threshold_percent": 75.0,
   "defaulter_required_percent": 75.0,
@@ -148,9 +148,10 @@ Response: proposal with confirmation_id and confirmation_request.
 Body: `{ "confirmation_id": "...", "reason": "...", "request_id": "..." }`
 Response: `{ "success": true, "status": "confirmed", "old_status": "...", "new_status": "..." }`
 
-### POST /api/chat/confirm
-Query: `?pending_id=...&decision=yes` (or `no`)
-Body: optional `{ "reason": "..." }`
+### POST /api/agent/chat/confirm
+Query: `?pending_id=...&decision=yes` (or `no`), optional `&reason=...`
+Requires: authentication; the pending edit must belong to the caller; the
+24-hour lock is re-checked at confirmation time.
 Response: `{ "success": true, "confirmed": true/false, "decision": "yes"/"no", "message": "..." }`
 
 ---
@@ -251,7 +252,7 @@ Response: present/absent/percent per branch and per room.
 Requires: ADMIN
 Response: per-teacher last upload time, sessions in last 7 days, sessions this semester.
 
-### GET /api/admin/audit-log?event=&actor=&from=&to=&page=&page_size=
+### GET /api/admin/audit-logs?event=&actor=&from=&to=&limit=&offset=
 Requires: ADMIN
 Response: `{ "items": [...], "total": N, "limit": 50, "offset": 0 }`
 Read-only: no UPDATE or DELETE on audit_log.

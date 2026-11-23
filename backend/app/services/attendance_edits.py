@@ -5,10 +5,13 @@ commit - goes through this service so that:
 
 * **Authorization** is decided by exactly one policy: ADMIN is unrestricted;
   every other role needs session ownership, coordinator ownership, or an
-  exact (normalized) teacher-subject-code mapping. There is **no time-based
-  editing lock**: sessions of any age and any lifecycle status (including
-  ``COMPLETED``) may be edited by an authorized faculty member, and no admin
-  override reason is required.
+  exact (normalized) teacher-subject-code mapping.
+* **The 24-hour editing lock (N5)** is decided by exactly one policy as well:
+  :func:`app.policy.is_editable`. Faculty may edit a session only while it is
+  at most ``LOCK_HOURS`` old. ADMIN is never locked, but an admin edit of a
+  session older than the window requires a reason (enforced in
+  :func:`app.services.attendance_edit.update_attendance`). Reads are never
+  locked: only edit paths call :func:`assert_session_edit_unlocked`.
 * **Every successful modification** produces one append-only audit record per
   affected student, carrying actor identity, actor role, session, USN, the
   previous status, the new status and a UTC timestamp.
@@ -36,8 +39,10 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple, Un
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
+from app.config import LOCK_HOURS
 from app.db import crud
 from app.db.models import AuditLog
+from app.policy import is_editable as policy_is_editable
 from app.schemas.auth import AuthenticatedUser, Role
 
 logger = logging.getLogger("rollcall.services.attendance_edits")
@@ -91,8 +96,9 @@ def assert_session_edit_authorized(
     denied, and an authorized administrator can grant access by adding the
     subject-code mapping. Historical attendance data is not modified.
 
-    Session age and lifecycle status are deliberately NOT considered: there is
-    no 24-hour editing lock and no admin override reason.
+    Session age is deliberately NOT considered here: this function answers
+    *may this actor touch this session at all?* The 24-hour lock is a separate
+    decision made by :func:`assert_session_edit_unlocked` on write paths only.
     """
     if current_user.role == Role.ADMIN:
         return
@@ -104,6 +110,23 @@ def assert_session_edit_authorized(
     if owned:
         if str(owner).strip() == current_user.user_id:
             return
+        if db is not None:
+            try:
+                from sqlalchemy import select
+                from app.db.models import ClassDelegation
+
+                sid = str(session.get("session_id") or "").strip()
+                del_row = db.execute(
+                    select(ClassDelegation).where(
+                        ClassDelegation.session_id == sid,
+                        ClassDelegation.substitute_faculty_id == current_user.user_id,
+                        ClassDelegation.status == "ACTIVE",
+                    )
+                ).scalar_one_or_none()
+                if del_row is not None:
+                    return
+            except Exception:
+                pass
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=(
@@ -136,14 +159,71 @@ def assert_session_edit_authorized(
     )
 
 
-def session_is_editable(session: Dict[str, Any]) -> bool:
-    """Whether a session may be edited.
+def session_is_editable(
+    session: Dict[str, Any],
+    role: str = "FACULTY",
+    now_utc: Optional[str] = None,
+) -> bool:
+    """Whether *role* may edit *session* right now (N5 24-hour lock).
 
-    Always True: sessions of any age and any lifecycle status stay editable
-    for an authorized actor. Kept as an explicit function so the policy is
-    visible in one place and cannot drift into a time-based lock.
+    Delegates to :func:`app.policy.is_editable` so the lock rule lives in one
+    place: ADMIN is always editable; every other role only while the session is
+    at most ``LOCK_HOURS`` old. Legacy rows without ``created_at`` stay
+    editable because their age cannot be established.
     """
-    return True
+    clean_role = (role or "").strip().upper()
+    return policy_is_editable(session.get("created_at"), clean_role, now_utc)
+
+
+def assert_session_edit_unlocked(
+    current_user: AuthenticatedUser,
+    session: Dict[str, Any],
+    now_utc: Optional[str] = None,
+    db: Optional[Any] = None,
+) -> None:
+    """Raise ``403 LOCKED`` when a non-admin edits a session older than 24 h.
+
+    Only write paths call this: reading an old session stays allowed. ADMIN is
+    never locked (an override reason may still be required by the caller).
+    If an administrator has approved an AttendanceUnlockRequest for this teacher
+    and session that has not expired, the teacher is permitted to edit.
+    """
+    actor_role = getattr(current_user, "role", Role.VIEWER)
+    role_str = actor_role.value if hasattr(actor_role, "value") else str(actor_role)
+    if role_str.strip().upper() == "ADMIN":
+        return
+
+    check_now = now_utc or _utcnow_iso()
+    if policy_is_editable(session.get("created_at"), "FACULTY", check_now):
+        return
+
+    session_id = session.get("session_id", "<unknown>")
+
+    # Check for active admin-approved unlock request
+    if db is not None and hasattr(db, "execute"):
+        try:
+            from sqlalchemy import select
+            from app.db.models import AttendanceUnlockRequest
+            active_req = db.execute(
+                select(AttendanceUnlockRequest).where(
+                    AttendanceUnlockRequest.session_id == session_id,
+                    AttendanceUnlockRequest.teacher_id == current_user.user_id,
+                    AttendanceUnlockRequest.status == "APPROVED",
+                    AttendanceUnlockRequest.expires_at > check_now,
+                )
+            ).scalar_one_or_none()
+            if active_req is not None:
+                return
+        except Exception as e:
+            logger.warning("Error checking AttendanceUnlockRequest: %s", e)
+
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=(
+            f"Locked: session '{session_id}' is older than {int(LOCK_HOURS)} hours and can "
+            "no longer be edited. You can submit an unlock request to the administrator."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -501,6 +581,8 @@ def propose_attendance_edit(
 
     # Authorization is decided by the backend, never by the model or the client.
     assert_session_edit_authorized(current_user, session, db)
+    # N5: the 24-hour lock is a write-path decision (admin is never locked).
+    assert_session_edit_unlocked(current_user, session)
 
     student = crud.get_student(db, usn=intent.usn)
     if not student:
@@ -659,6 +741,9 @@ def confirm_attendance_edit(
     # Revalidate authorization at confirmation time: access may have been
     # revoked between the proposal and the confirmation.
     assert_session_edit_authorized(current_user, session, db)
+    # Revalidate the N5 24-hour lock too: the window may have closed since the
+    # proposal was created, and a stale proposal must not bypass it.
+    assert_session_edit_unlocked(current_user, session)
 
     actor_id, actor_role = actor_identity(current_user)
     try:

@@ -1,603 +1,316 @@
-import React, { useState, useEffect, useCallback, useMemo } from "react";
+"use client";
+
+import React, { useEffect, useState, useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
-  fetchActiveExam,
-  createExam,
-  uploadSeatingCsv,
-  downloadFormBAbsenteesPdf,
-  downloadRoomSignSheets,
-  type ActiveExamDetails,
-  type CreateExamParams,
+  examsApi,
+  type ExamItem,
+  type RoomSummaryItem,
+  type BranchSummaryItem,
 } from "@/services/api/exams";
-import { RoomCard } from "@/features/exams/components/RoomCard";
-import { BranchSummaryTable } from "@/features/exams/components/BranchSummaryTable";
+import { useAuth } from "@/hooks/useAuth";
+import { RoomCard } from "./components/RoomCard";
+import { BranchSummaryTable } from "./components/BranchSummaryTable";
 
 export function ExamControlView() {
-  const [data, setData] = useState<ActiveExamDetails | null>(null);
+  const navigate = useNavigate();
+  const { isAdmin } = useAuth();
+
+  const [exams, setExams] = useState<ExamItem[]>([]);
+  const [selectedExamId, setSelectedExamId] = useState<string>("");
+  const [selectedExam, setSelectedExam] = useState<ExamItem | null>(null);
+
+  const [rooms, setRooms] = useState<RoomSummaryItem[]>([]);
+  const [branches, setBranches] = useState<BranchSummaryItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [feedback, setFeedback] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
-  // Filter state for rooms
-  const [roomFilter, setRoomFilter] = useState<"ALL" | "OPEN" | "SUBMITTED" | "SCHEDULED">("ALL");
+  // Admin Override Modal state
+  const [overrideRoomNo, setOverrideRoomNo] = useState<string | null>(null);
+  const [overrideReason, setOverrideReason] = useState("");
+  const [overrideStatus, setOverrideStatus] = useState<"OPEN" | "SUBMITTED">("OPEN");
+  const [isSubmittingOverride, setIsSubmittingOverride] = useState(false);
+  const [overrideMsg, setOverrideMsg] = useState<string | null>(null);
 
-  // Create Exam Modal State
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
-  const [createForm, setCreateForm] = useState<CreateExamParams>({
-    title: "",
-    sem: "Sem 7",
-    branch: "CY",
-    course_code: "",
-    course_name: "",
-    date: new Date().toISOString().split("T")[0],
-    time: "10:00-11:30 AM",
-  });
-
-  // Upload Seating Modal State
-  const [isUploadOpen, setIsUploadOpen] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
-  const [isUploading, setIsUploading] = useState(false);
-
-  // Download loading states
-  const [isDownloadingPdf, setIsDownloadingPdf] = useState(false);
-  const [isDownloadingSheets, setIsDownloadingSheets] = useState(false);
-
-  // Load active exam details
-  const loadExamDetails = useCallback(async () => {
-    setIsLoading(true);
-    setError(null);
+  // Load initial exams
+  const loadExams = useCallback(async () => {
     try {
-      const activeData = await fetchActiveExam();
-      setData(activeData);
+      setIsLoading(true);
+      setError(null);
+      const list = await examsApi.listExams();
+      setExams(list);
+      if (list.length > 0 && !selectedExamId) {
+        setSelectedExamId(list[0].exam_id);
+      }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : "Failed to load active exam data.");
+      setError(err instanceof Error ? err.message : "Failed to load exams");
     } finally {
       setIsLoading(false);
     }
-  }, []);
+  }, [selectedExamId]);
 
   useEffect(() => {
-    void loadExamDetails();
-  }, [loadExamDetails]);
+    loadExams();
+  }, [loadExams]);
 
-  // Filter rooms
-  const filteredRooms = useMemo(() => {
-    if (!data?.rooms) return [];
-    if (roomFilter === "ALL") return data.rooms;
-    return data.rooms.filter((r) => r.status === roomFilter);
-  }, [data?.rooms, roomFilter]);
-
-  // Helper to trigger file download in browser
-  const triggerDownload = (blob: Blob, filename: string) => {
-    const url = window.URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    window.URL.revokeObjectURL(url);
-    document.body.removeChild(a);
-  };
-
-  // Download Form-B Absentees PDF
-  const handleDownloadFormBPdf = async () => {
-    if (!data?.exam) return;
-    setIsDownloadingPdf(true);
+  // Load summaries when exam changes
+  const loadSummaries = useCallback(async (examId: string) => {
+    if (!examId) return;
     try {
-      const blob = await downloadFormBAbsenteesPdf(data.exam.id);
-      triggerDownload(blob, `Form-B-Absentees-${data.exam.course_code}.txt`);
-      setFeedback({ type: "success", text: "Form-B Absentees report generated and downloaded successfully." });
-    } catch (err) {
-      setFeedback({
-        type: "error",
-        text: err instanceof Error ? err.message : "Failed to download Form-B report.",
-      });
+      setIsLoading(true);
+      setError(null);
+      const [roomData, branchData] = await Promise.all([
+        examsApi.getRoomWiseSummary(examId),
+        examsApi.getBranchWiseSummary(examId),
+      ]);
+      setRooms(roomData);
+      setBranches(branchData);
+      const cur = exams.find((e) => e.exam_id === examId) || null;
+      setSelectedExam(cur);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Failed to load exam summaries");
     } finally {
-      setIsDownloadingPdf(false);
+      setIsLoading(false);
+    }
+  }, [exams]);
+
+  useEffect(() => {
+    if (selectedExamId) {
+      loadSummaries(selectedExamId);
+    }
+  }, [selectedExamId, loadSummaries]);
+
+  // Download Absentees PDF
+  const handleDownloadAbsentees = async () => {
+    if (!selectedExamId) return;
+    try {
+      const blob = await examsApi.downloadAbsenteesPdf(selectedExamId);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Form_B_Absentees_${selectedExamId}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err: unknown) {
+      alert("Failed to download absentees PDF: " + (err instanceof Error ? err.message : String(err)));
     }
   };
 
-  // Download Room Sign Sheets
-  const handleDownloadRoomSheets = async () => {
-    if (!data?.exam) return;
-    setIsDownloadingSheets(true);
+  // Download Room Blank Form-B Sign Sheet PDF
+  const handleDownloadRoomPdf = async (roomNo: string) => {
+    if (!selectedExamId) return;
     try {
-      const blob = await downloadRoomSignSheets(data.exam.id);
-      triggerDownload(blob, `Room-Sign-Sheets-${data.exam.course_code}.txt`);
-      setFeedback({ type: "success", text: "Room Signature verification sheets downloaded successfully." });
-    } catch (err) {
-      setFeedback({
-        type: "error",
-        text: err instanceof Error ? err.message : "Failed to download sign sheets.",
-      });
-    } finally {
-      setIsDownloadingSheets(false);
+      const blob = await examsApi.downloadSignSheetPdf(selectedExamId, roomNo);
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `Form_B_SignSheet_${selectedExamId}_${roomNo.replace(/\s+/g, "_")}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err: unknown) {
+      alert("Failed to download signature sheet: " + (err instanceof Error ? err.message : String(err)));
     }
   };
 
-  // Create New Exam submit
-  const handleCreateExamSubmit = async (e: React.FormEvent) => {
+  // Admin Override Submit
+  const handleOverrideSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!createForm.title || !createForm.course_code) {
-      setFeedback({ type: "error", text: "Please enter an Exam Title and Course Code." });
+    if (!selectedExamId || !overrideRoomNo || !overrideReason.trim()) {
+      alert("Please provide a valid reason for this override (mandatory for audit trail)");
       return;
     }
-
-    setIsCreating(true);
     try {
-      await createExam(createForm);
-      setIsCreateOpen(false);
-      setFeedback({ type: "success", text: `Exam "${createForm.title}" scheduled successfully!` });
-      await loadExamDetails();
-    } catch (err) {
-      setFeedback({
-        type: "error",
-        text: err instanceof Error ? err.message : "Failed to create new exam.",
+      setIsSubmittingOverride(true);
+      const res = await examsApi.adminOverrideRoom(selectedExamId, overrideRoomNo, {
+        reason: overrideReason.trim(),
+        new_status: overrideStatus,
       });
+      setOverrideMsg(`Room ${overrideRoomNo} status updated to ${res.room_status}`);
+      setOverrideRoomNo(null);
+      setOverrideReason("");
+      // Reload room summaries
+      await loadSummaries(selectedExamId);
+    } catch (err: unknown) {
+      alert("Override failed: " + (err instanceof Error ? err.message : String(err)));
     } finally {
-      setIsCreating(false);
-    }
-  };
-
-  // Upload Seating CSV submit
-  const handleUploadSeatingSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!selectedFile) {
-      setFeedback({ type: "error", text: "Please select a valid CSV file to upload." });
-      return;
-    }
-
-    setIsUploading(true);
-    try {
-      const res = await uploadSeatingCsv(selectedFile);
-      setIsUploadOpen(false);
-      setSelectedFile(null);
-      setFeedback({ type: "success", text: res.message });
-      await loadExamDetails();
-    } catch (err) {
-      setFeedback({
-        type: "error",
-        text: err instanceof Error ? err.message : "Failed to upload seating CSV.",
-      });
-    } finally {
-      setIsUploading(false);
+      setIsSubmittingOverride(false);
     }
   };
 
   return (
     <div className="space-y-6">
-      {/* Top Header Bar */}
-      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+      {/* Top Header & Exam Selector */}
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white p-5 rounded-2xl border border-gray-200/80 shadow-sm">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="px-2.5 py-0.5 rounded-md text-[10px] font-black uppercase tracking-wider bg-[#3F451F] text-[#FBF8F0]">
-              CONTROLLER OF EXAMINATIONS
-            </span>
-            <span className="text-xs font-semibold text-[#77735F] dark:text-[#A9AE8C]">
-              Continuous Internal Evaluation (CIE)
-            </span>
-          </div>
-          <h1 className="text-2xl sm:text-3xl font-extrabold text-[#24251C] dark:text-[#EDE8D8] tracking-tight mt-1">
-            Exam Cell Control Dashboard
-          </h1>
-          <p className="text-xs sm:text-sm text-[#77735F] dark:text-[#A9AE8C] mt-0.5">
-            Real-time hall allocations, invigilator Form-B synchronization, and absentee consolidation.
+          <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
+            <span>📋</span> Exam Cell — Form-B Control Center
+          </h2>
+          <p className="text-xs text-gray-500 mt-1">
+            Real-time VTU/DSCE Form-B exam hall attendance, room tracking, and automated absentee reports.
           </p>
         </div>
 
-        {/* Action Buttons: [Create New Exam], [Upload Seating CSV] */}
-        <div className="flex items-center gap-2.5 flex-wrap">
-          <button
-            type="button"
-            onClick={() => setIsUploadOpen(true)}
-            className="inline-flex items-center justify-center gap-2 px-3.5 py-2.5 bg-[#FBF8F0] dark:bg-[#181913] text-[#24251C] dark:text-[#EDE8D8] text-xs font-bold rounded-xl border border-[#E4DDCA] dark:border-[#2C3022] hover:bg-[#EDE8D8] dark:hover:bg-[#2C3117] transition-all shadow-xs cursor-pointer"
+        <div className="flex items-center gap-3">
+          <label htmlFor="exam-select" className="text-xs font-semibold text-gray-600">Select Exam:</label>
+          <select
+            id="exam-select"
+            value={selectedExamId}
+            onChange={(e) => setSelectedExamId(e.target.value)}
+            className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 shadow-sm focus:border-[#3F451F] focus:outline-none"
           >
-            <svg className="w-4 h-4 text-[#6C5119] dark:text-[#D2A847]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12" />
-            </svg>
-            Upload Seating CSV
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsCreateOpen(true)}
-            className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-[#3F451F] text-[#FBF8F0] text-xs font-bold rounded-xl hover:bg-[#323719] transition-all shadow-sm cursor-pointer"
-          >
-            <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            Create New Exam
-          </button>
+            {exams.map((ex) => (
+              <option key={ex.exam_id} value={ex.exam_id}>
+                {ex.name} ({ex.exam_id})
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
-      {/* Global Feedback Banner */}
-      {feedback && (
-        <div
-          className={`p-3.5 rounded-xl border flex items-center justify-between gap-3 text-xs font-medium animate-in fade-in duration-200 ${
-            feedback.type === "success"
-              ? "bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950/40 dark:border-emerald-800 dark:text-emerald-300"
-              : "bg-red-50 border-red-200 text-red-800 dark:bg-red-950/40 dark:border-red-800 dark:text-red-300"
-          }`}
-        >
-          <span>{feedback.text}</span>
-          <button
-            onClick={() => setFeedback(null)}
-            className="text-xs font-bold hover:underline cursor-pointer"
-          >
-            Dismiss
-          </button>
+      {error && (
+        <div className="p-4 rounded-xl bg-red-50 border border-red-200 text-sm text-red-700">
+          {error}
         </div>
       )}
 
-      {/* Loading & Error States */}
-      {isLoading ? (
-        <div className="bg-[#FBF8F0] dark:bg-[#181913] border border-[#E4DDCA] dark:border-[#2C3022] rounded-2xl p-16 text-center text-[#77735F]">
-          <div className="inline-block animate-spin w-8 h-8 border-3 border-[#3F451F] border-t-transparent rounded-full mb-3" />
-          <p className="text-sm font-semibold">Loading live examination status...</p>
+      {overrideMsg && (
+        <div className="p-4 rounded-xl bg-emerald-50 border border-emerald-200 text-sm text-emerald-800 flex items-center justify-between">
+          <span>{overrideMsg}</span>
+          <button onClick={() => setOverrideMsg(null)} className="text-emerald-900 font-bold">✕</button>
         </div>
-      ) : error ? (
-        <div className="bg-red-50 dark:bg-red-950/30 border border-red-200 dark:border-red-900 rounded-2xl p-8 text-center space-y-3">
-          <p className="text-sm text-red-700 dark:text-red-300 font-semibold">{error}</p>
-          <button
-            onClick={() => void loadExamDetails()}
-            className="px-4 py-2 bg-[#3F451F] text-[#FBF8F0] text-xs font-bold rounded-xl hover:bg-[#323719] cursor-pointer"
-          >
-            Retry Loading
-          </button>
-        </div>
-      ) : !data || !data.exam ? (
-        <div className="bg-[#FBF8F0] dark:bg-[#181913] border border-[#E4DDCA] dark:border-[#2C3022] rounded-2xl p-12 text-center text-[#77735F]">
-          <p className="text-sm font-semibold">No active examination session found.</p>
-          <button
-            onClick={() => setIsCreateOpen(true)}
-            className="mt-4 px-4 py-2 bg-[#3F451F] text-[#FBF8F0] text-xs font-bold rounded-xl cursor-pointer"
-          >
-            Schedule Exam Now
-          </button>
-        </div>
-      ) : (
-        <>
-          {/* Active Exam Card */}
-          <div className="bg-[#FBF8F0] dark:bg-[#181913] border border-[#E4DDCA] dark:border-[#2C3022] rounded-2xl p-6 shadow-sm relative overflow-hidden">
-            <div className="absolute top-0 right-0 bg-[#A77A13] text-white text-[10px] font-black uppercase tracking-wider px-3 py-1 rounded-bl-xl shadow-xs">
-              LIVE EXAMINATION
-            </div>
+      )}
 
-            <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-6">
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="font-mono text-xs font-extrabold px-2.5 py-0.5 rounded-md bg-[#EDE8D8] dark:bg-[#2C3117] text-[#6C5119] dark:text-[#D2A847] border border-[#E4DDCA] dark:border-[#2C3022]">
-                    {data.exam.course_code}
-                  </span>
-                  <span className="text-xs font-bold text-[#77735F] dark:text-[#A9AE8C]">
-                    {data.exam.sem} · Branch: {data.exam.branch}
-                  </span>
-                </div>
-
-                <h2 className="text-xl sm:text-2xl font-black text-[#24251C] dark:text-[#EDE8D8] tracking-tight">
-                  {data.exam.title}
-                </h2>
-
-                {/* Specified format: "CIE-III November 2026 · Sem 7 · CY · 22CY72 · 02-Nov-2026 · 10:00-11:30 AM" */}
-                <p className="text-xs sm:text-sm font-semibold text-[#6C5119] dark:text-[#D2A847] flex items-center gap-2 flex-wrap">
-                  <span>{data.exam.title} · {data.exam.sem} · {data.exam.branch} · {data.exam.course_code} · {data.exam.date} · {data.exam.time}</span>
-                </p>
-              </div>
-
-              {/* Quick Metric Badges */}
-              <div className="grid grid-cols-3 gap-3 border-t lg:border-t-0 lg:border-l border-[#E4DDCA] dark:border-[#2C3022] pt-4 lg:pt-0 lg:pl-6 shrink-0">
-                <div className="text-center px-2">
-                  <p className="text-[10px] uppercase font-bold text-[#77735F] dark:text-[#A9AE8C]">Total Seated</p>
-                  <p className="text-2xl font-mono font-black text-[#24251C] dark:text-[#EDE8D8] mt-0.5">
-                    {data.exam.total_students}
-                  </p>
-                </div>
-                <div className="text-center px-2 border-x border-[#E4DDCA]/60 dark:border-[#2C3022]">
-                  <p className="text-[10px] uppercase font-bold text-emerald-700 dark:text-emerald-400">Present</p>
-                  <p className="text-2xl font-mono font-black text-emerald-700 dark:text-emerald-400 mt-0.5">
-                    {data.exam.present_count}
-                  </p>
-                </div>
-                <div className="text-center px-2">
-                  <p className="text-[10px] uppercase font-bold text-rose-600 dark:text-rose-400">Absentees</p>
-                  <p className="text-2xl font-mono font-black text-rose-600 dark:text-rose-400 mt-0.5">
-                    {data.exam.absent_count}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {/* Bottom Actions: [Download Form-B Absentees PDF], [Download Room Sign Sheets] */}
-            <div className="mt-6 pt-4 border-t border-[#E4DDCA]/70 dark:border-[#2C3022] flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <span className="text-xs text-[#77735F] dark:text-[#A9AE8C]">
-                Official Exam Documentation & Consolidated Attendance Registers:
-              </span>
-
-              <div className="flex items-center gap-2.5 flex-wrap">
-                <button
-                  type="button"
-                  disabled={isDownloadingPdf}
-                  onClick={handleDownloadFormBPdf}
-                  className="inline-flex items-center gap-2 px-3.5 py-2 bg-[#6C5119] text-[#FBF8F0] text-xs font-bold rounded-xl hover:bg-[#584213] transition-all shadow-xs disabled:opacity-50 cursor-pointer"
-                >
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                  {isDownloadingPdf ? "Generating..." : "Download Form-B Absentees PDF"}
-                </button>
-
-                <button
-                  type="button"
-                  disabled={isDownloadingSheets}
-                  onClick={handleDownloadRoomSheets}
-                  className="inline-flex items-center gap-2 px-3.5 py-2 bg-[#F2EDE0] dark:bg-[#2C3117] text-[#24251C] dark:text-[#EDE8D8] text-xs font-bold rounded-xl border border-[#E4DDCA] dark:border-[#2C3022] hover:bg-[#EAE4D4] transition-all shadow-xs disabled:opacity-50 cursor-pointer"
-                >
-                  <svg className="w-4 h-4 text-[#3F451F] dark:text-[#D2A847]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                  </svg>
-                  {isDownloadingSheets ? "Downloading..." : "Download Room Sign Sheets"}
-                </button>
-              </div>
-            </div>
-          </div>
-
-          {/* Room-wise Summary Section */}
-          <div className="space-y-3.5">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <h3 className="text-lg font-extrabold text-[#24251C] dark:text-[#EDE8D8]">
-                  Room-wise Invigilation Progress
-                </h3>
-                <p className="text-xs text-[#77735F] dark:text-[#A9AE8C]">
-                  Live status of room seating rosters and invigilator Form-B lock status.
-                </p>
-              </div>
-
-              {/* Status Filter */}
-              <div className="flex items-center gap-1.5 self-start sm:self-auto">
-                {(["ALL", "OPEN", "SUBMITTED", "SCHEDULED"] as const).map((filter) => (
-                  <button
-                    key={filter}
-                    onClick={() => setRoomFilter(filter)}
-                    className={`px-3 py-1.5 rounded-xl text-xs font-bold tracking-wide transition-all cursor-pointer ${
-                      roomFilter === filter
-                        ? "bg-[#3F451F] text-[#FBF8F0]"
-                        : "bg-[#FBF8F0] dark:bg-[#181913] text-[#77735F] dark:text-[#A9AE8C] border border-[#E4DDCA] dark:border-[#2C3022] hover:bg-[#EDE8D8]"
-                    }`}
-                  >
-                    {filter === "ALL" ? "All Rooms" : filter}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Grid of RoomCards */}
-            {filteredRooms.length === 0 ? (
-              <div className="bg-[#FBF8F0] dark:bg-[#181913] border border-[#E4DDCA] dark:border-[#2C3022] rounded-2xl p-8 text-center text-[#77735F]">
-                <p className="text-xs font-semibold">No rooms match the selected filter.</p>
-              </div>
-            ) : (
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-                {filteredRooms.map((room) => (
-                  <RoomCard key={room.room_id} room={room} />
-                ))}
-              </div>
-            )}
-          </div>
-
-          {/* Branch-wise Summary Section */}
-          <div className="space-y-3.5">
+      {/* Selected Exam Active Banner */}
+      {selectedExam && (
+        <div className="bg-[#EDE8D8]/40 border border-[#3F451F]/15 rounded-2xl p-5">
+          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
             <div>
-              <h3 className="text-lg font-extrabold text-[#24251C] dark:text-[#EDE8D8]">
-                Branch-wise Consolidated Summary
-              </h3>
-              <p className="text-xs text-[#77735F] dark:text-[#A9AE8C]">
-                Turnout ratio, candidate headcounts, and absentee rates grouped by engineering department.
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#3F451F] text-white">
+                  {selectedExam.exam_type}
+                </span>
+                <span className="text-xs font-medium text-gray-600">
+                  Subject: <strong className="text-gray-900">{selectedExam.subject_code}</strong> {selectedExam.subject_name && `(${selectedExam.subject_name})`}
+                </span>
+              </div>
+              <h3 className="text-lg font-bold text-gray-900 mt-1">{selectedExam.name}</h3>
+              <p className="text-xs text-gray-600">
+                Date: <strong>{selectedExam.date}</strong> · Time: <strong>{selectedExam.start_time} - {selectedExam.end_time}</strong> · Cutoff: <strong>{selectedExam.cutoff_minutes} mins</strong>
               </p>
             </div>
 
-            <BranchSummaryTable summaries={data.branch_summaries} />
-          </div>
-        </>
-      )}
-
-      {/* Modal: Create New Exam */}
-      {isCreateOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FBF8F0] dark:bg-[#181913] border border-[#E4DDCA] dark:border-[#2C3022] rounded-2xl p-6 max-w-lg w-full shadow-2xl animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA] dark:border-[#2C3022]">
-              <h3 className="text-lg font-extrabold text-[#24251C] dark:text-[#EDE8D8]">
-                Create New Examination
-              </h3>
+            <div className="flex flex-wrap items-center gap-2">
               <button
-                type="button"
-                onClick={() => setIsCreateOpen(false)}
-                className="text-[#77735F] hover:text-[#24251C] p-1 rounded-lg"
+                onClick={handleDownloadAbsentees}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#3F451F] text-white text-xs font-semibold shadow hover:bg-[#343919] transition-colors"
               >
-                ✕
+                <span>📑</span> Download Form-B Absentees PDF
+              </button>
+              <button
+                onClick={() => navigate("/invigilation")}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-gray-300 text-gray-800 text-xs font-semibold hover:bg-gray-50 transition-colors"
+              >
+                <span>📝</span> Open Invigilator View
               </button>
             </div>
-
-            <form onSubmit={handleCreateExamSubmit} className="mt-4 space-y-3.5">
-              <div>
-                <label className="block text-xs font-bold text-[#77735F] dark:text-[#A9AE8C] mb-1">
-                  Exam Title
-                </label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. CIE-III November 2026"
-                  value={createForm.title}
-                  onChange={(e) => setCreateForm({ ...createForm, title: e.target.value })}
-                  className="w-full bg-[#F2EDE0] dark:bg-[#11120D] border border-[#E4DDCA] dark:border-[#2C3022] rounded-xl px-3.5 py-2 text-sm text-[#24251C] dark:text-[#EDE8D8] focus:outline-none focus:border-[#3F451F]"
-                />
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-[#77735F] dark:text-[#A9AE8C] mb-1">
-                    Semester
-                  </label>
-                  <select
-                    value={createForm.sem}
-                    onChange={(e) => setCreateForm({ ...createForm, sem: e.target.value })}
-                    className="w-full bg-[#F2EDE0] dark:bg-[#11120D] border border-[#E4DDCA] dark:border-[#2C3022] rounded-xl px-3 py-2 text-sm text-[#24251C] dark:text-[#EDE8D8] focus:outline-none focus:border-[#3F451F]"
-                  >
-                    {["Sem 1", "Sem 2", "Sem 3", "Sem 4", "Sem 5", "Sem 6", "Sem 7", "Sem 8"].map((s) => (
-                      <option key={s} value={s}>{s}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#77735F] dark:text-[#A9AE8C] mb-1">
-                    Primary Branch
-                  </label>
-                  <select
-                    value={createForm.branch}
-                    onChange={(e) => setCreateForm({ ...createForm, branch: e.target.value })}
-                    className="w-full bg-[#F2EDE0] dark:bg-[#11120D] border border-[#E4DDCA] dark:border-[#2C3022] rounded-xl px-3 py-2 text-sm text-[#24251C] dark:text-[#EDE8D8] focus:outline-none focus:border-[#3F451F]"
-                  >
-                    {["CY", "CS", "IS", "EC", "EE", "ME", "CV", "AI"].map((b) => (
-                      <option key={b} value={b}>{b}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-[#77735F] dark:text-[#A9AE8C] mb-1">
-                    Course Code
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="e.g. 22CY72"
-                    value={createForm.course_code}
-                    onChange={(e) => setCreateForm({ ...createForm, course_code: e.target.value.toUpperCase() })}
-                    className="w-full bg-[#F2EDE0] dark:bg-[#11120D] border border-[#E4DDCA] dark:border-[#2C3022] rounded-xl px-3.5 py-2 text-sm text-[#24251C] dark:text-[#EDE8D8] focus:outline-none focus:border-[#3F451F] font-mono"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#77735F] dark:text-[#A9AE8C] mb-1">
-                    Course Name (Optional)
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="Cloud Security"
-                    value={createForm.course_name}
-                    onChange={(e) => setCreateForm({ ...createForm, course_name: e.target.value })}
-                    className="w-full bg-[#F2EDE0] dark:bg-[#11120D] border border-[#E4DDCA] dark:border-[#2C3022] rounded-xl px-3.5 py-2 text-sm text-[#24251C] dark:text-[#EDE8D8] focus:outline-none focus:border-[#3F451F]"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="block text-xs font-bold text-[#77735F] dark:text-[#A9AE8C] mb-1">
-                    Examination Date
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    value={createForm.date}
-                    onChange={(e) => setCreateForm({ ...createForm, date: e.target.value })}
-                    className="w-full bg-[#F2EDE0] dark:bg-[#11120D] border border-[#E4DDCA] dark:border-[#2C3022] rounded-xl px-3.5 py-2 text-sm text-[#24251C] dark:text-[#EDE8D8] focus:outline-none focus:border-[#3F451F]"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-bold text-[#77735F] dark:text-[#A9AE8C] mb-1">
-                    Time Slot
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    placeholder="10:00-11:30 AM"
-                    value={createForm.time}
-                    onChange={(e) => setCreateForm({ ...createForm, time: e.target.value })}
-                    className="w-full bg-[#F2EDE0] dark:bg-[#11120D] border border-[#E4DDCA] dark:border-[#2C3022] rounded-xl px-3.5 py-2 text-sm text-[#24251C] dark:text-[#EDE8D8] focus:outline-none focus:border-[#3F451F]"
-                  />
-                </div>
-              </div>
-
-              <div className="pt-3 flex items-center justify-end gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => setIsCreateOpen(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-[#77735F] hover:bg-[#F2EDE0] dark:hover:bg-[#2C3117] transition-colors"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={isCreating}
-                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#3F451F] text-[#FBF8F0] hover:bg-[#323719] transition-colors disabled:opacity-50 cursor-pointer"
-                >
-                  {isCreating ? "Scheduling..." : "Confirm & Schedule"}
-                </button>
-              </div>
-            </form>
           </div>
         </div>
       )}
 
-      {/* Modal: Upload Seating CSV */}
-      {isUploadOpen && (
-        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-[#FBF8F0] dark:bg-[#181913] border border-[#E4DDCA] dark:border-[#2C3022] rounded-2xl p-6 max-w-md w-full shadow-2xl animate-in fade-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA] dark:border-[#2C3022]">
-              <h3 className="text-lg font-extrabold text-[#24251C] dark:text-[#EDE8D8]">
-                Upload Seating CSV
-              </h3>
-              <button
-                type="button"
-                onClick={() => setIsUploadOpen(false)}
-                className="text-[#77735F] hover:text-[#24251C] p-1 rounded-lg"
-              >
-                ✕
-              </button>
-            </div>
+      {/* Room Summary Grid */}
+      <div>
+        <div className="flex items-center justify-between mb-3">
+          <h3 className="text-base font-bold text-gray-900">Room-Wise Attendance Status</h3>
+          <span className="text-xs text-gray-500">{rooms.length} Exam Rooms</span>
+        </div>
 
-            <form onSubmit={handleUploadSeatingSubmit} className="mt-4 space-y-4">
-              <p className="text-xs text-[#77735F] dark:text-[#A9AE8C]">
-                Upload student seating allocation matrix CSV file (columns: <code>Room, USN, Name, Branch, Seat</code>).
-              </p>
+        {isLoading ? (
+          <div className="text-center py-12 text-sm text-gray-500">Loading room attendance data...</div>
+        ) : rooms.length === 0 ? (
+          <div className="bg-white p-8 rounded-2xl border text-center text-gray-500 text-sm">
+            No rooms registered for this exam yet.
+          </div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+            {rooms.map((room) => (
+              <RoomCard
+                key={room.room_no}
+                room={room}
+                examId={selectedExamId}
+                isAdmin={isAdmin}
+                onSelect={(roomNo) => navigate(`/exams/${selectedExamId}/rooms/${encodeURIComponent(roomNo)}`)}
+                onDownloadPdf={handleDownloadRoomPdf}
+                onAdminOverride={(roomNo) => setOverrideRoomNo(roomNo)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
 
-              <div className="border-2 border-dashed border-[#E4DDCA] dark:border-[#2C3022] rounded-xl p-6 text-center hover:bg-[#F2EDE0]/50 transition-colors">
-                <svg className="w-8 h-8 text-[#6C5119] dark:text-[#D2A847] mx-auto mb-2" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                </svg>
-                <input
-                  type="file"
-                  accept=".csv,text/csv"
-                  onChange={(e) => setSelectedFile(e.target.files?.[0] || null)}
-                  className="block w-full text-xs text-[#77735F] file:mr-3 file:py-1.5 file:px-3 file:rounded-lg file:border-0 file:text-xs file:font-bold file:bg-[#3F451F] file:text-[#FBF8F0] hover:file:bg-[#323719] file:cursor-pointer cursor-pointer"
-                />
-                {selectedFile && (
-                  <p className="mt-2 text-xs font-mono font-bold text-emerald-700 dark:text-emerald-400">
-                    Selected: {selectedFile.name} ({(selectedFile.size / 1024).toFixed(1)} KB)
-                  </p>
-                )}
+      {/* Branch Summary */}
+      <div className="bg-white rounded-2xl border border-gray-200/80 p-5 shadow-sm">
+        <h3 className="text-base font-bold text-gray-900 mb-3">Branch-Wise Consolidation</h3>
+        <BranchSummaryTable branches={branches} />
+      </div>
+
+      {/* Admin Override Modal */}
+      {overrideRoomNo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-xl border border-gray-200">
+            <h4 className="text-lg font-bold text-gray-900 mb-1">
+              Admin Override: Room {overrideRoomNo}
+            </h4>
+            <p className="text-xs text-gray-500 mb-4">
+              Unlocking or modifying a room after cutoff requires an official audit reason stored in the immutable HMAC audit trail.
+            </p>
+
+            <form onSubmit={handleOverrideSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  New Status
+                </label>
+                <select
+                  value={overrideStatus}
+                  onChange={(e) => setOverrideStatus(e.target.value as "OPEN" | "SUBMITTED")}
+                  className="w-full rounded-xl border border-gray-300 p-2 text-sm"
+                >
+                  <option value="OPEN">OPEN (Allow Invigilator to edit & submit)</option>
+                  <option value="SUBMITTED">SUBMITTED (Force marked as submitted)</option>
+                </select>
               </div>
 
-              <div className="pt-2 flex items-center justify-end gap-2.5">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Reason for Override <span className="text-red-500">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={3}
+                  value={overrideReason}
+                  onChange={(e) => setOverrideReason(e.target.value)}
+                  placeholder="e.g. Chief Superintendent permitted late entry due to verified transit delay..."
+                  className="w-full rounded-xl border border-gray-300 p-2 text-sm focus:border-[#3F451F] focus:outline-none"
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsUploadOpen(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-bold text-[#77735F] hover:bg-[#F2EDE0] dark:hover:bg-[#2C3117] transition-colors"
+                  onClick={() => setOverrideRoomNo(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-600 hover:bg-gray-100"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  disabled={!selectedFile || isUploading}
-                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#3F451F] text-[#FBF8F0] hover:bg-[#323719] transition-colors disabled:opacity-50 cursor-pointer"
+                  disabled={isSubmittingOverride}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold bg-[#3F451F] text-white hover:bg-[#343919]"
                 >
-                  {isUploading ? "Uploading & Allocating..." : "Process Seating CSV"}
+                  {isSubmittingOverride ? "Applying..." : "Confirm Override"}
                 </button>
               </div>
             </form>

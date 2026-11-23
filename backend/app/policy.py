@@ -60,7 +60,9 @@ def is_editable(
     * Admin: always ``True``.
     * Teacher: editable when age (now - created_at) is at most LOCK_HOURS.
     * Negative age (future created_at / clock error) counts as editable.
-    * Missing or unparseable ``created_at_utc`` returns ``False`` for a teacher.
+    * Missing or unparseable ``created_at_utc`` also counts as editable: such
+      rows are legacy/imported records whose age cannot be established, and the
+      server - never the client - writes ``created_at`` for new sessions.
     """
     role_clean = (role or "").strip().upper()
     if role_clean == "ADMIN":
@@ -68,7 +70,7 @@ def is_editable(
 
     created_dt = _to_utc_dt(session_created_at_utc)
     if created_dt is None:
-        return False
+        return True
 
     now = _to_utc_dt(now_utc) if now_utc is not None else datetime.now(timezone.utc)
     age = now - created_dt

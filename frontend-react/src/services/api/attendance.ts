@@ -48,16 +48,19 @@ export async function recordStudentAttendance(
   }
 ): Promise<AttendanceRecord> {
   const upsert = data.upsert !== false;
+  const payload: Record<string, unknown> = {
+    session_id: sessionId,
+    usn: data.usn,
+    status: data.status,
+    source: data.source || "manual",
+    confidence: data.confidence ?? 1.0,
+  };
+  if (data.room_id) {
+    payload.room_id = data.room_id;
+  }
   return apiClient.post<AttendanceRecord>(
     `/api/v1/attendance/sessions/${encodeURIComponent(sessionId)}/record?upsert=${upsert}`,
-    {
-      session_id: sessionId,
-      usn: data.usn,
-      status: data.status,
-      room_id: data.room_id || "LH-101",
-      source: data.source || "manual",
-      confidence: data.confidence || 1.0,
-    }
+    payload
   );
 }
 
@@ -110,7 +113,7 @@ export async function reconcileAttendance(
 
   // No reason/override field is sent: the backend records the actor, role and
   // the previous -> new status itself (N5). The frontend never authors audit
-  // entries.
+  // entries or fabricated identity fields.
   await apiClient.post(
     `/api/v1/attendance/sessions/${encodeURIComponent(sessionId)}/reconcile`,
     {
@@ -118,7 +121,6 @@ export async function reconcileAttendance(
         {
           usn,
           resolved_status: resolvedStatus,
-          reconciled_by: "faculty",
           confidence: 1.0,
         },
       ],
@@ -127,3 +129,53 @@ export async function reconcileAttendance(
 
   return { success: true };
 }
+
+export interface AttendanceUnlockRequest {
+  request_id: string;
+  session_id: string;
+  subject_code?: string | null;
+  session_date?: string | null;
+  teacher_id: string;
+  teacher_name?: string | null;
+  teacher_email?: string | null;
+  reason: string;
+  target_usns?: string | null;
+  requested_change?: string | null;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  admin_notes?: string | null;
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  created_at: string;
+  expires_at?: string | null;
+}
+
+export async function createAttendanceUnlockRequest(data: {
+  session_id: string;
+  reason: string;
+  target_usns?: string[];
+  requested_change?: string;
+}): Promise<AttendanceUnlockRequest> {
+  return apiClient.post<AttendanceUnlockRequest>("/api/v1/attendance/unlock-requests", data);
+}
+
+export async function fetchAttendanceUnlockRequests(params?: {
+  session_id?: string;
+  status?: string;
+}): Promise<AttendanceUnlockRequest[]> {
+  return apiClient.get<AttendanceUnlockRequest[]>("/api/v1/attendance/unlock-requests", params);
+}
+
+export async function reviewAttendanceUnlockRequest(
+  requestId: string,
+  data: {
+    decision: "APPROVED" | "REJECTED";
+    admin_notes?: string;
+    unlock_hours?: number;
+  }
+): Promise<AttendanceUnlockRequest> {
+  return apiClient.post<AttendanceUnlockRequest>(
+    `/api/v1/attendance/unlock-requests/${encodeURIComponent(requestId)}/review`,
+    data
+  );
+}
+

@@ -11,7 +11,7 @@ export interface FacultyActivityItem {
 
 interface FacultyUploadActivityTableProps {
   sessions: VerifiedSession[];
-  teacherMappings: Array<{ teacher_id: string; subject_code: string }> | null;
+  teacherMappings: Array<{ teacher_id?: string; user_id?: string; subject_code: string }> | null;
   isLoading?: boolean;
 }
 
@@ -29,7 +29,8 @@ export function FacultyUploadActivityTable({
     // 1. Ingest all teacher mappings from backend (including those with 0 sessions)
     if (teacherMappings && teacherMappings.length > 0) {
       for (const m of teacherMappings) {
-        const tid = m.teacher_id.trim();
+        const tid = (m.teacher_id || m.user_id || "").trim();
+        if (!tid) continue;
         if (!facultyMap.has(tid)) {
           facultyMap.set(tid, { subjects: new Set(), sessionList: [] });
         }

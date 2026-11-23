@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { AuthProvider } from "@/context/AuthContext";
 import { AppShell } from "@/components/layout";
+import { ErrorBoundary } from "@/components/layout/ErrorBoundary";
 import { ProtectedRoute } from "@/components/auth";
 import { DashboardView } from "@/features/dashboard";
 import { StudentsView } from "@/features/students";
@@ -21,8 +22,9 @@ import { ExamControlView, InvigilatorFormBView } from "@/features/exams";
 export function App() {
   return (
     <AuthProvider>
-      <BrowserRouter>
-        <Routes>
+      <ErrorBoundary>
+        <BrowserRouter>
+          <Routes>
           <Route
             path="/login"
             element={
@@ -82,6 +84,36 @@ export function App() {
             }
           />
           <Route
+            path="/exams"
+            element={
+              <AppShell title="Exam Cell">
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Exam Cell & Form-B Control">
+                  <ExamControlView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/invigilation"
+            element={
+              <AppShell title="My Invigilation">
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Invigilator Form-B Sheet">
+                  <InvigilatorFormBView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/exams/:examId/rooms/:roomNo"
+            element={
+              <AppShell title="Form-B Attendance">
+                <ProtectedRoute allowedRoles={["ADMIN", "FACULTY"]} pageTitle="Invigilator Form-B Sheet">
+                  <InvigilatorFormBView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
             path="/sessions"
             element={
               <AppShell title="Sessions">
@@ -94,8 +126,18 @@ export function App() {
           <Route
             path="/faculty"
             element={
-              <AppShell title="Faculty & Departments">
-                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Faculty & Department Management">
+              <AppShell title="Admin Command Center">
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
+                  <FacultyView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/admin"
+            element={
+              <AppShell title="Admin Command Center">
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Admin Command Center">
                   <FacultyView />
                 </ProtectedRoute>
               </AppShell>
@@ -194,7 +236,8 @@ export function App() {
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
-    </AuthProvider>
+    </ErrorBoundary>
+  </AuthProvider>
   );
 }
 

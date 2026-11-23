@@ -18,10 +18,10 @@ from app.services.attendance_edits import resolve_edit_intent, propose_attendanc
 
 
 def update_attendance_tool(
-    db: Session,
-    actor_id: str,
-    actor_role: str,
-    query: str,
+    db: Optional[Session] = None,
+    actor_id: str = "anonymous",
+    actor_role: str = "FACULTY",
+    query: str = "",
     session_id: Optional[str] = None,
     usn: Optional[str] = None,
     new_status: Optional[str] = None,
@@ -37,6 +37,9 @@ def update_attendance_tool(
     expiry, single use, bound to the caller). Attendance is NOT modified
     here.
 
+    ``db`` may be omitted when the registry supplies no session; a
+    short-lived session is opened for the proposal insert in that case.
+
     Returns a dict with ``status`` ("proposed" or "clarification_required"),
     ``needs_confirmation``, ``confirmation_id``, ``confirmation_request``
     and a human-readable ``message``.
@@ -49,21 +52,31 @@ def update_attendance_tool(
         claims={},
     )
 
-    intent = resolve_edit_intent(
-        db,
-        query=query,
-        session_id=session_id,
-        usn=usn,
-        new_status=new_status,
-    )
+    own_session = db is None
+    if db is None:
+        from app.db.connection import get_sync_session_factory
 
-    return propose_attendance_edit(
-        db=db,
-        current_user=user,
-        intent=intent,
-        reason=reason,
-        request_id=kwargs.get("request_id"),
-    )
+        db = get_sync_session_factory()()
+
+    try:
+        intent = resolve_edit_intent(
+            db,
+            query=query,
+            session_id=session_id,
+            usn=usn,
+            new_status=new_status,
+        )
+
+        return propose_attendance_edit(
+            db=db,
+            current_user=user,
+            intent=intent,
+            reason=reason,
+            request_id=kwargs.get("request_id"),
+        )
+    finally:
+        if own_session:
+            db.close()
 
 
 __all__ = ["update_attendance_tool"]

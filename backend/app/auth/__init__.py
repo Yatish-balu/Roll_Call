@@ -25,6 +25,7 @@ from app.auth.rate_limiter import (
     rate_limit_process_file,
     rate_limit_confirm,
     rate_limit_reports,
+    rate_limit_models,
     reset_rate_limiter,
 )
 
@@ -51,6 +52,7 @@ __all__ = [
     "rate_limit_process_file",
     "rate_limit_confirm",
     "rate_limit_reports",
+    "rate_limit_models",
     "reset_rate_limiter",
 ]
 

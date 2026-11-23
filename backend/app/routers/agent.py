@@ -32,6 +32,7 @@ from app.services.attendance_edits import (
     AttendanceChange,
     actor_identity,
     assert_session_edit_authorized,
+    assert_session_edit_unlocked,
     capture_attendance_statuses,
     confirm_attendance_edit,
     propose_attendance_edit,
@@ -51,6 +52,7 @@ from app.security.uploads import (
     check_image_dimensions,
     get_malware_scanner,
 )
+from app.db.models import UserChatThread, UserChatMessage
 from app.schemas.agent import (
     AgentConfirmRequest,
     AgentResponseSchema,
@@ -60,6 +62,11 @@ from app.schemas.agent import (
     AttendanceEditProposalRequest,
     AttendanceEditProposalResponse,
     ChatQueryRequest,
+    CreateChatThreadRequest,
+    SyncChatThreadRequest,
+    UserChatMessageItem,
+    UserChatThreadDetail,
+    UserChatThreadSummary,
 )
 from app.schemas.auth import AuthenticatedUser
 from tools.validate_tool import validate_tool
@@ -294,6 +301,8 @@ async def agent_process_file(
     session_id: Optional[str] = Form(None),
     default_room: Optional[str] = Form(None),
     default_branch: Optional[str] = Form(None),
+    user_input: Optional[str] = Form(None),
+    user_confirmation: Optional[str] = Form(None),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -504,8 +513,68 @@ async def agent_process_file(
             except Exception as exc:  # pragma: no cover - inspection is best effort
                 logger.debug("Unable to inspect upload for embedded instructions: %s", exc)
 
+        # N9: image quality gate. A blurry or badly lit photo is rejected
+        # BEFORE the vision API is called, with the measured values and the
+        # thresholds returned in the message so the user knows what to fix.
+        if ext in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}:
+            from tools.quality_gate import check_image_quality
+
+            quality = check_image_quality(temp_path)
+            if not quality["ok"]:
+                measured = (
+                    f"sharpness={quality['sharpness']}, brightness={quality['brightness']}, "
+                    f"thresholds={quality['thresholds']}"
+                )
+                reasons = "; ".join(quality["reasons"]) or "Photo quality check failed."
+                log_security_event(
+                    "upload_rejected",
+                    severity="info",
+                    outcome="failure",
+                    actor_id=current_user.user_id,
+                    ip_address=_client_ip(request),
+                    request_id=get_request_id(),
+                    details={
+                        "reason": "quality_rejected",
+                        "filename": safe_filename,
+                        "sharpness": quality["sharpness"],
+                        "brightness": quality["brightness"],
+                    },
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        "Photo quality rejected. Please retake the photo. "
+                        f"{reasons} ({measured})"
+                    ),
+                )
+
         scope = resolve_data_scope(db, current_user)
-        agent = AttendanceAgent(db_target=db, scope=scope, role=current_user.role, actor_role=current_user.role)
+        assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
+        actor_name = getattr(current_user, "name", None) or current_user.user_id
+        try:
+            from app.db.models import User
+            u = db.query(User).filter(User.user_id == current_user.user_id).first()
+            if u and u.name:
+                actor_name = u.name
+            from sqlalchemy import text
+            prof_row = db.execute(
+                text("SELECT full_name FROM user_profiles WHERE user_id = :uid"),
+                {"uid": current_user.user_id},
+            ).fetchone()
+            if prof_row and prof_row[0] and prof_row[0].strip():
+                actor_name = prof_row[0].strip()
+        except Exception:
+            pass
+
+        agent = AttendanceAgent(
+            db_target=db,
+            scope=scope,
+            role=current_user.role,
+            actor_role=current_user.role,
+            actor_id=current_user.user_id,
+            actor_name=actor_name,
+            assigned_subjects=assigned_subs,
+        )
 
         # Pre-load master USNs and Rooms if available for master data validation.
         # The master list is restricted to the caller's scope, so validation
@@ -520,8 +589,7 @@ async def agent_process_file(
 
         # Resolve target session if not explicitly provided
         target_session = session_id
-        assigned_subs = crud.get_teacher_subjects(db, user_id=current_user.user_id) or []
-        if not target_session:
+        if not target_session and not user_input:
             from datetime import date
             today_str = date.today().isoformat()
             today_sessions = crud.get_sessions_by_date(db, date=today_str)
@@ -531,7 +599,9 @@ async def agent_process_file(
                     target_session = s_dict.get("session_id")
                     break
 
-        req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
+        req_text = (user_input or "").strip()
+        if not req_text:
+            req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
 
         resp = agent.process_request(
             user_input=req_text,
@@ -564,12 +634,18 @@ async def agent_process_file(
                 db.rollback()
                 logger.warning("Could not auto-commit attendance to session %s: %s", target_session, e)
         elif not target_session and resp.success and resp.data:
-            # Extraction only: no session was resolved, so nothing was written.
-            # Say so explicitly - the extraction message alone reads like a save.
-            resp.message = (
-                f"{resp.message or 'Attendance sheet processed.'} No records were saved: "
-                "open Attendance and choose a session to apply them."
+            # If this was timetable/session creation, sessions were already saved directly!
+            is_timetable = (
+                (isinstance(resp.data, dict) and (resp.data.get("is_timetable") or "sessions" in resp.data))
+                or (isinstance(resp.data, list) and len(resp.data) > 0 and isinstance(resp.data[0], dict) and "session_id" in resp.data[0])
             )
+            if not is_timetable and isinstance(resp.data, list):
+                # Extraction only: no session was resolved, so nothing was written.
+                # Say so explicitly - the extraction message alone reads like a save.
+                resp.message = (
+                    f"{resp.message or 'Attendance sheet processed.'} No records were saved: "
+                    "open Attendance and choose a session to apply them."
+                )
 
         if ext in (".png", ".jpg", ".jpeg", ".webp", ".bmp"):
             _log_embedded_instruction(
@@ -628,6 +704,22 @@ def agent_confirm(
     # Verify session exists
     session = crud.get_session(db, session_id=clean_sess)
     if not session:
+        try:
+            import datetime
+            import re
+            from app.services.session_initialization import initialize_sessions_for_date
+
+            match = re.search(r"(\d{4})(\d{2})(\d{2})", clean_sess)
+            if match:
+                y, m, d = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                initialize_sessions_for_date(db, datetime.date(y, m, d))
+            else:
+                initialize_sessions_for_date(db, datetime.date.today())
+            session = crud.get_session(db, session_id=clean_sess)
+        except Exception as init_err:
+            logger.warning("Could not auto-initialize session %s: %s", clean_sess, init_err)
+
+    if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session with ID '{clean_sess}' not found.",
@@ -638,6 +730,8 @@ def agent_confirm(
     # The same policy the direct API uses - never a decision taken from the
     # chat text or the LLM output.
     assert_session_edit_authorized(current_user, session, db)
+    # N5: the 24-hour lock applies to this write path too (admin is never locked).
+    assert_session_edit_unlocked(current_user, session, db=db)
 
     if not payload.records:
         raise HTTPException(
@@ -958,3 +1052,225 @@ def get_agent_status(
         confidence_threshold=CONFIDENCE_CONFIRMATION_THRESHOLD,
         available_tools=tools,
     )
+
+
+# ---------------------------------------------------------------------------
+# User-Scoped Multi-Chat Threads & Persistence
+# ---------------------------------------------------------------------------
+
+@router.get(
+    "/threads",
+    response_model=List[UserChatThreadSummary],
+    summary="List recent chat threads for current authenticated user",
+    description="Returns user-scoped chat threads sorted by updated_at descending. Strictly isolated per account.",
+)
+def list_user_chat_threads(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> List[UserChatThreadSummary]:
+    threads = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.user_id == current_user.user_id, UserChatThread.is_archived == 0)
+        .order_by(UserChatThread.updated_at.desc())
+        .limit(50)
+        .all()
+    )
+    result: List[UserChatThreadSummary] = []
+    for t in threads:
+        msg_count = len(t.messages)
+        last_msg = t.messages[-1] if t.messages else None
+        result.append(
+            UserChatThreadSummary(
+                thread_id=t.thread_id,
+                user_id=t.user_id,
+                title=t.title,
+                created_at=t.created_at,
+                updated_at=t.updated_at,
+                is_pinned=bool(t.is_pinned),
+                is_archived=bool(t.is_archived),
+                message_count=msg_count,
+                last_message=last_msg.text[:60] if last_msg else None,
+            )
+        )
+    return result
+
+
+@router.post(
+    "/threads",
+    response_model=UserChatThreadDetail,
+    summary="Create a new chat thread for current authenticated user",
+)
+def create_user_chat_thread(
+    payload: Optional[CreateChatThreadRequest] = None,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserChatThreadDetail:
+    now = _utcnow_iso()
+    thread_id = f"thread_{uuid.uuid4().hex[:12]}"
+    title = (payload.title.strip() if payload and payload.title else "New Conversation") or "New Conversation"
+    thread = UserChatThread(
+        thread_id=thread_id,
+        user_id=current_user.user_id,
+        title=title,
+        created_at=now,
+        updated_at=now,
+        is_pinned=0,
+        is_archived=0,
+    )
+    db.add(thread)
+    db.commit()
+    db.refresh(thread)
+    return UserChatThreadDetail(
+        thread_id=thread.thread_id,
+        user_id=thread.user_id,
+        title=thread.title,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+        is_pinned=bool(thread.is_pinned),
+        is_archived=bool(thread.is_archived),
+        messages=[],
+    )
+
+
+@router.get(
+    "/threads/{thread_id}",
+    response_model=UserChatThreadDetail,
+    summary="Get chat thread messages for current authenticated user",
+)
+def get_user_chat_thread(
+    thread_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserChatThreadDetail:
+    thread = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+        .first()
+    )
+    if not thread:
+        raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
+
+    msgs = (
+        db.query(UserChatMessage)
+        .filter(UserChatMessage.thread_id == thread_id)
+        .order_by(UserChatMessage.created_at.asc())
+        .all()
+    )
+    return UserChatThreadDetail(
+        thread_id=thread.thread_id,
+        user_id=thread.user_id,
+        title=thread.title,
+        created_at=thread.created_at,
+        updated_at=thread.updated_at,
+        is_pinned=bool(thread.is_pinned),
+        is_archived=bool(thread.is_archived),
+        messages=[
+            UserChatMessageItem(
+                message_id=m.message_id,
+                thread_id=m.thread_id,
+                user_id=m.user_id,
+                sender=m.sender,
+                text=m.text,
+                timestamp=m.timestamp,
+                metadata_json=m.metadata_json,
+                created_at=m.created_at,
+            )
+            for m in msgs
+        ],
+    )
+
+
+@router.post(
+    "/threads/{thread_id}/sync",
+    response_model=UserChatThreadDetail,
+    summary="Synchronize and persist chat messages in a thread",
+)
+def sync_user_chat_thread_messages(
+    thread_id: str,
+    payload: SyncChatThreadRequest,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> UserChatThreadDetail:
+    thread = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+        .first()
+    )
+    now = _utcnow_iso()
+    if not thread:
+        thread = UserChatThread(
+            thread_id=thread_id,
+            user_id=current_user.user_id,
+            title=(payload.title or "New Conversation").strip() or "New Conversation",
+            created_at=now,
+            updated_at=now,
+            is_pinned=0,
+            is_archived=0,
+        )
+        db.add(thread)
+        db.flush()
+
+    if payload.title and payload.title.strip():
+        thread.title = payload.title.strip()[:200]
+    elif thread.title == "New Conversation" and payload.messages:
+        for msg in payload.messages:
+            if msg.get("sender") == "user" and msg.get("text"):
+                clean_title = re.sub(r"\s+", " ", str(msg["text"])).strip()
+                if clean_title:
+                    thread.title = clean_title[:45] + ("…" if len(clean_title) > 45 else "")
+                    break
+
+    thread.updated_at = now
+
+    db.query(UserChatMessage).filter(UserChatMessage.thread_id == thread_id).delete()
+    db.flush()
+
+    items_to_add = []
+    for idx, msg in enumerate(payload.messages):
+        msg_id = str(msg.get("id") or f"msg_{uuid.uuid4().hex[:10]}_{idx}")
+        meta = msg.get("metadata") or {
+            k: v for k, v in msg.items() if k not in ("id", "sender", "text", "timestamp")
+        }
+        meta_str = json.dumps(meta) if meta else None
+        chat_msg = UserChatMessage(
+            message_id=msg_id,
+            thread_id=thread.thread_id,
+            user_id=current_user.user_id,
+            sender=str(msg.get("sender", "assistant")),
+            text=str(msg.get("text", "")),
+            timestamp=str(msg.get("timestamp", "")),
+            metadata_json=meta_str,
+            created_at=now,
+        )
+        items_to_add.append(chat_msg)
+
+    if items_to_add:
+        db.add_all(items_to_add)
+
+    db.commit()
+    db.refresh(thread)
+
+    return get_user_chat_thread(thread_id, current_user, db)
+
+
+@router.delete(
+    "/threads/{thread_id}",
+    summary="Delete a chat thread and all its messages",
+)
+def delete_user_chat_thread(
+    thread_id: str,
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    thread = (
+        db.query(UserChatThread)
+        .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
+        .first()
+    )
+    if not thread:
+        raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
+
+    db.delete(thread)
+    db.commit()
+    return {"message": "Chat thread deleted successfully.", "thread_id": thread_id}
+

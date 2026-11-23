@@ -48,17 +48,17 @@ def _headers(user_id: str, role: str) -> dict:
 # ---------------------------------------------------------------------------
 
 CONTRACTS: List[Tuple[str, str, str, str, List[str]]] = [
-    # (endpoint, method, role, description, required_fields)
-    ("GET", "/api/meta/config", "teacher", "Meta config", ["edit_lock_hours", "defaulter_threshold_percent", "attendance_bands", "upload_limits"]),
+    # (method, path, role, description, required_fields)
+    ("GET", "/api/meta/config", "teacher", "Meta config", ["edit_lock_hours", "unlimited_attendance_editing", "defaulter_threshold_percent", "attendance_bands", "upload_limits"]),
     ("GET", "/api/me/subjects", "teacher", "My subjects", ["user_id", "role", "subject_codes"]),
     ("GET", "/api/sessions", "teacher", "Session list", ["items", "total"]),
     ("GET", "/api/sessions", "admin", "Session list (admin)", ["items", "total"]),
     ("GET", "/api/defaulters", "teacher", "Defaulters", ["status", "threshold", "students"]),
     ("GET", "/api/defaulters", "admin", "Defaulters (admin)", ["status", "threshold", "students"]),
     ("GET", "/api/students/lookup", "teacher", "Student lookup", ["results", "total"]),
-    ("GET", "/api/admin/audit-log", "admin", "Audit log", ["items", "total"]),
-    ("GET", "/api/admin/overview", "admin", "Admin overview", []),  # flexible shape
-    ("GET", "/api/admin/faculty-uploads", "admin", "Faculty uploads", []),  # flexible shape
+    ("GET", "/api/admin/audit-logs", "admin", "Audit log", ["items", "total"]),
+    ("GET", "/api/admin/overview", "admin", "Admin overview", ["room_wise", "branch_wise", "overall"]),
+    ("GET", "/api/admin/faculty-uploads", "admin", "Faculty uploads", ["items", "total"]),
     ("GET", "/api/calendar", "teacher", "Calendar month", ["month", "days"]),
     ("GET", "/api/calendar/day", "teacher", "Calendar day", ["date", "sessions"]),
 ]
@@ -106,20 +106,18 @@ def test_contract_endpoint(method, path, role, desc, required):
         params["date"] = "2026-11-13"
     if "defaulters" in path:
         params["subject"] = "CN"
-    if "audit-log" in path:
-        params["page"] = "1"
-        params["page_size"] = "10"
+    if "audit-logs" in path:
+        params["limit"] = "10"
     if "sessions" in path:
         params["limit"] = "5"
 
     res = _call_endpoint(client, method, path, headers, params)
 
-    # Accept 200, 403 (if teacher lacks access to admin endpoint), or 404 (empty data is fine)
-    assert res.status_code in (200, 403, 404), f"{path} returned {res.status_code}: {res.text}"
+    # Every contract endpoint is implemented: a 403/404 is a real contract break.
+    assert res.status_code == 200, f"{path} ({role}) returned {res.status_code}: {res.text}"
 
-    if res.status_code == 200:
-        missing = _check_fields(res.json(), required)
-        assert not missing, f"{path} ({role}) missing fields: {missing}"
+    missing = _check_fields(res.json(), required)
+    assert not missing, f"{path} ({role}) missing fields: {missing}"
 
 
 def test_contract_table_output():
@@ -131,7 +129,8 @@ def test_contract_table_output():
     print(f"{'Endpoint':<35} {'Role':<10} {'Status':<10} {'Missing Fields'}")
     print("-" * 100)
     for method, path, role, desc, required in CONTRACTS:
-        headers = _headers("teacher_cn" if role == "teacher" else "admin_root", role.upper())
+        user_id = "faculty_cn" if role == "teacher" else "00000000-0000-0000-0000-000000000001"
+        headers = _headers(user_id, "FACULTY" if role == "teacher" else "ADMIN")
         params = {}
         if "lookup" in path:
             params["q"] = "1DS"
@@ -141,9 +140,8 @@ def test_contract_table_output():
             params["date"] = "2026-11-13"
         if "defaulters" in path:
             params["subject"] = "CN"
-        if "audit-log" in path:
-            params["page"] = "1"
-            params["page_size"] = "10"
+        if "audit-logs" in path:
+            params["limit"] = "10"
         if "sessions" in path:
             params["limit"] = "5"
 
@@ -157,6 +155,3 @@ def test_contract_table_output():
             missing_str = "n/a"
         print(f"{path:<35} {role:<10} {status_str:<10} {missing_str}")
     print("=" * 100 + "\n")
-
-
-__all__ = ["router"]

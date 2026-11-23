@@ -346,3 +346,23 @@ def test_models_endpoints_support_openai_discovery():
         ids = [m["id"] for m in data["data"]]
         assert "gemini-3.5-flash-lite" in ids
         assert "rollcall-ai-agent" in ids
+
+
+def test_models_rate_limiting(monkeypatch):
+    from app.auth.rate_limiter import reset_rate_limiter
+    reset_rate_limiter()
+    monkeypatch.setenv("RATE_LIMIT_ENABLED", "true")
+    monkeypatch.setenv("RATE_LIMIT_MODELS", "3")
+    client = TestClient(app)
+
+    try:
+        for _ in range(3):
+            res = client.get("/models")
+            assert res.status_code == 200
+
+        res = client.get("/models")
+        assert res.status_code == 429
+        assert "Retry-After" in res.headers
+    finally:
+        reset_rate_limiter()
+

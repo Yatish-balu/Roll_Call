@@ -98,7 +98,14 @@ try:
 
         test_users = [
             ("00000000-0000-0000-0000-000000000001", "admin@rollcall.edu", "ADMIN", "Test Admin"),
+            ("admin_root", "admin@rollcall.internal", "ADMIN", "System Administrator"),
             ("faculty_cn", "faculty_cn@rollcall.edu", "FACULTY", "Prof. Computer Networks"),
+            ("faculty_ds", "faculty_ds@rollcall.edu", "FACULTY", "Prof. Data Science"),
+            ("faculty_ml", "faculty.ml@rollcall.internal", "FACULTY", "Dr. Machine Learning"),
+            ("faculty_ai", "1ds24cy035@dsce.edu.in", "FACULTY", "Faculty AI"),
+            ("teacher_cn", "cn@rollcall.edu", "FACULTY", "Prof. CN"),
+            ("teacher_ml", "ml@rollcall.edu", "FACULTY", "Prof. ML"),
+            ("teacher_db", "db@rollcall.edu", "FACULTY", "Prof. DB"),
             ("other_faculty", "other_faculty@rollcall.edu", "FACULTY", "Prof. Other"),
             ("faculty_b", "faculty_b@rollcall.edu", "FACULTY", "Prof. B"),
             ("teacher_jane", "teacher_jane@rollcall.edu", "FACULTY", "Prof. Jane"),
@@ -110,6 +117,18 @@ try:
                     "INSERT INTO users (user_id, email, role, is_active, created_at, name) VALUES (?, ?, ?, 1, ?, ?)",
                     (u_id, email, role, _now, name),
                 )
+        _conn.execute(
+            """CREATE TABLE IF NOT EXISTS academic_events (
+                event_id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                end_date TEXT,
+                event_type TEXT NOT NULL DEFAULT 'ACADEMIC',
+                description TEXT,
+                target_dept TEXT DEFAULT 'ALL',
+                created_at TEXT NOT NULL
+            )"""
+        )
         _conn.commit()
     finally:
         _conn.close()

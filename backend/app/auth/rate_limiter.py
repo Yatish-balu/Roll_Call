@@ -75,6 +75,7 @@ class InMemoryRateLimiter:
             "process_file": ("RATE_LIMIT_PROCESS_FILE", 20),
             "confirm": ("RATE_LIMIT_CONFIRM", 30),
             "reports": ("RATE_LIMIT_REPORTS", 30),
+            "models": ("RATE_LIMIT_MODELS", 60),
             "default": ("RATE_LIMIT_DEFAULT", 120),
         }
         env_var, default_val = env_var_map.get(operation, ("RATE_LIMIT_DEFAULT", 120))
@@ -276,4 +277,5 @@ rate_limit_chat = rate_limit_dependency("chat")
 rate_limit_process_file = rate_limit_dependency("process_file")
 rate_limit_confirm = rate_limit_dependency("confirm")
 rate_limit_reports = rate_limit_dependency("reports")
+rate_limit_models = rate_limit_dependency("models")
 

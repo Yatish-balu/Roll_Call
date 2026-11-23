@@ -23,7 +23,7 @@ if _ENV_FILE.exists():
     load_dotenv(dotenv_path=_ENV_FILE)
 else:
     load_dotenv()
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -44,7 +44,10 @@ from app.routers import (
     profile_router,
     calendar_router,
     agent_stream_router,
+    defaulters_router,
+    exams_router,
 )
+from app.auth import rate_limit_models
 
 
 load_dotenv()
@@ -79,6 +82,16 @@ async def lifespan(app: FastAPI):
     # A failed Supabase connection must not be mistaken for a successful startup.
     from app.db.connection import verify_database_connectivity, get_sync_session_factory
     verify_database_connectivity()
+
+    # Warn if the Gemini API key is the development placeholder in production.
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    env = os.getenv("APP_ENV", "development").strip().lower()
+    if env == "production" and (not gemini_key or gemini_key.startswith("your_")):
+        logger.warning(
+            "Production environment detected but GEMINI_API_KEY is not set "
+            "(or uses the placeholder 'your_'). Please inject the key via a "
+            "secret‑manager or .env and restart the service."
+        )
 
     try:
         from app.routers.profile import _ensure_profile_table
@@ -424,9 +437,11 @@ async def value_error_handler(request: Request, exc: ValueError):
     return JSONResponse(
         status_code=status.HTTP_400_BAD_REQUEST,
         content={
-            "error": "BadRequest",
-            "message": str(exc),
-            "detail": str(exc),
+            "error": {
+                "code": "BAD_REQUEST",
+                "message": str(exc),
+            },
+            "status_code": 400,
         },
     )
 
@@ -438,8 +453,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={
-            "error": "InternalServerError",
-            "message": "An unexpected internal server error occurred. Please try again later.",
+            "error": {
+                "code": "INTERNAL_SERVER_ERROR",
+                "message": "An unexpected internal server error occurred. Please try again later.",
+            },
+            "status_code": 500,
         },
     )
 
@@ -520,10 +538,10 @@ def health_check():
     }
 
 
-@app.get("/models", tags=["General"])
-@app.get("/v1/models", tags=["General"])
-@app.get("/api/v1/models", tags=["General"])
-@app.get("/api/models", tags=["General"])
+@app.get("/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
+@app.get("/v1/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
+@app.get("/api/v1/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
+@app.get("/api/models", tags=["General"], dependencies=[Depends(rate_limit_models)])
 def list_models():
     """Return list of models supported by the RollCall AI backend in OpenAI-compatible format."""
     return {
@@ -571,6 +589,8 @@ app.include_router(agent_router, prefix="/api/v1")
 app.include_router(agent_stream_router, prefix="/api/v1")
 app.include_router(profile_router, prefix="/api/v1")
 app.include_router(calendar_router, prefix="/api/v1")
+app.include_router(defaulters_router, prefix="/api/v1")
+app.include_router(exams_router, prefix="/api/v1/exams")
 
 # Unversioned /api/ Routers (matching RollCall Playbook API Contract)
 app.include_router(auth_router, prefix="/api")
@@ -588,6 +608,8 @@ app.include_router(agent_router, prefix="/api")
 app.include_router(agent_stream_router, prefix="/api")
 app.include_router(profile_router, prefix="/api")
 app.include_router(calendar_router, prefix="/api")
+app.include_router(defaulters_router, prefix="/api")
+app.include_router(exams_router, prefix="/api/exams")
 
 
 

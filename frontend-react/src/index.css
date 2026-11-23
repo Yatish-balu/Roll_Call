@@ -100,6 +100,25 @@ body {
   flex-direction: column;
 }
 
+/* Custom scrollbar styling across application */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(114, 120, 94, 0.25);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(114, 120, 94, 0.45);
+}
+
 /* Custom subtle scrollbar for sidebar and dark surfaces */
 .sidebar-scrollbar::-webkit-scrollbar {
   width: 5px;

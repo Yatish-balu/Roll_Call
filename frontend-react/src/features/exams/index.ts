@@ -1,5 +1,5 @@
-export * from "./ExamControlView";
-export * from "./InvigilatorFormBView";
-export * from "./components/RoomCard";
-export * from "./components/BranchSummaryTable";
-export * from "./components/FormBTimer";
+export { ExamControlView } from "./ExamControlView";
+export { InvigilatorFormBView } from "./InvigilatorFormBView";
+export { RoomCard } from "./components/RoomCard";
+export { BranchSummaryTable } from "./components/BranchSummaryTable";
+export { FormBTimer } from "./components/FormBTimer";

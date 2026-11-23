@@ -47,7 +47,9 @@ Backend implementation specification for the attendance management system.
 ## 4. Attendance Editing & Lock Policy
 
 - 24-hour lock: `now - created_at ≤ 24h` is editable for teachers; admin always editable.
+- Legacy rows with a missing/unparseable `created_at` stay editable (age cannot be established; only the server writes `created_at`).
 - `app/policy.py`: `is_editable()`, `editable_until()`, `lock_hours()`.
+- Enforced by one helper (`assert_session_edit_unlocked`) on every write path; reads are never locked.
 - `PUT /api/sessions/{id}/attendance/{usn}` — atomic write + audit in one transaction.
 - Admin editing a session older than 24h must provide a reason (`ADMIN_OVERRIDE_EVENT`).
 - `audit_log` is append-only: database triggers reject UPDATE and DELETE.
@@ -59,7 +61,7 @@ Backend implementation specification for the attendance management system.
 - Tool `update_attendance_tool` prepares a pending edit (never modifies attendance).
 - `POST /api/agent/attendance/propose` — Step A: store pending edit (5-min expiry, single-use).
 - `POST /api/agent/attendance/confirm` — Step B: apply the pending edit.
-- `POST /api/chat/confirm` — chat confirmation (pending_id + yes/no decision).
+- `POST /api/agent/chat/confirm?pending_id=&decision=yes|no` — chat confirmation.
 - The LLM cannot confirm by itself — confirmation is a separate server step.
 
 ---
@@ -68,7 +70,7 @@ Backend implementation specification for the attendance management system.
 
 - `GET /api/admin/overview` — present/absent/percent per branch and room.
 - `GET /api/admin/faculty-uploads` — per-teacher upload stats.
-- `GET /api/admin/audit-log?event=&actor=&from=&to=&page=` — read-only, paginated.
+- `GET /api/admin/audit-logs?event=&actor=&from=&to=&limit=&offset=` — read-only, paginated.
 - `GET /api/admin/defaulters.pdf` — defaulter report PDF.
 
 ---

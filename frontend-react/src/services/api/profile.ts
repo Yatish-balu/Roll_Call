@@ -145,13 +145,17 @@ export async function loadFacultyProfile(userId: string): Promise<ProfileLoadRes
   }
 
   let serverProfile: Partial<FacultyProfile> | null = null;
-  if (serverProfileSupported !== false) {
+  try {
+    serverProfile = await apiClient.get<Partial<FacultyProfile>>("/api/v1/me/profile");
+  } catch {
     try {
-      serverProfile = await apiClient.get<Partial<FacultyProfile>>("/api/v1/me/profile");
-      serverProfileSupported = true;
+      serverProfile = await apiClient.get<Partial<FacultyProfile>>("/api/v1/profile");
     } catch {
-      serverProfileSupported = false;
       serverProfile = null;
+      if (!notice) {
+        notice =
+          "Could not sync with RollCall AI server. Showing device-cached profile. Please verify your backend server is running.";
+      }
     }
   }
 

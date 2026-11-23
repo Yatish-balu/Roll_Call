@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useRef, useEffect, useCallback } from "react";
+import { useAuth } from "@/hooks/useAuth";
 import { apiClient } from "@/services/api/client";
 import {
   askAgent,
@@ -10,9 +11,15 @@ import {
   proposeAttendanceEdit,
   confirmAttendanceProposal,
   isAttendanceEditQuery,
+  fetchUserChatThreads,
+  fetchChatThread,
+  syncChatThread,
+  deleteChatThread,
   type AgentResponse,
   type AgentStatus,
   type ConfirmationRequest,
+  type UserChatThreadSummary,
+  type UserChatMessageItem,
 } from "@/services/api/agent";
 import { AnimatedAiMascot } from "@/features/dashboard/components/AnimatedAiMascot";
 
@@ -99,6 +106,151 @@ function getFormattedTime(): string {
   return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+interface ContextAction {
+  label: string;
+  prompt: string;
+  variant?: "primary" | "danger" | "default";
+}
+
+function getContextualActions(m: ChatMessage): ContextAction[] {
+  const text = m.text || "";
+  const lower = text.toLowerCase();
+  const actions: ContextAction[] = [];
+
+  // 1. Proposal or Confirmation
+  if (
+    lower.includes("proceed") ||
+    lower.includes("proposal") ||
+    lower.includes("would you like me to proceed") ||
+    lower.includes("reply 'yes'") ||
+    lower.includes("please confirm")
+  ) {
+    return [
+      { label: "✓ Yes, Proceed & Apply", prompt: "proceed", variant: "primary" },
+      { label: "✕ Cancel Action", prompt: "cancel", variant: "danger" },
+    ];
+  }
+
+  // 2. Profile View (e.g. "Faculty Profile for...")
+  if (lower.includes("faculty profile for") || lower.includes("profile for")) {
+    return [
+      { label: "✏️ Change Name to Yatish Balu", prompt: "change my name in my profile to Yatish Balu", variant: "primary" },
+      { label: "📱 Update Mobile", prompt: "update my mobile number in my profile to 9876543210" },
+      { label: "📅 Show Today's Schedule", prompt: "Show my class schedule for today" },
+    ];
+  }
+
+  // 3. Profile Updated Successfully
+  if (lower.includes("profile updated successfully")) {
+    return [
+      { label: "👤 View Updated Profile", prompt: "Show my profile", variant: "primary" },
+      { label: "📅 Show Today's Schedule", prompt: "Show my class schedule for today" },
+      { label: "📊 Today's Attendance", prompt: "Summarize today's overall attendance" },
+    ];
+  }
+
+  // 4. Pending / Unreviewed Sessions
+  if (
+    lower.includes("pending or unreviewed") ||
+    lower.includes("requiring attention or review") ||
+    lower.includes("pending sessions")
+  ) {
+    const sessionMatches = Array.from(text.matchAll(/\*\*([A-Za-z0-9_-]+)\*\*/g))
+      .map((match) => match[1])
+      .filter((id) => id && !["Session", "ID", "Date", "Subject", "Status", "Total", "Found"].includes(id));
+    const uniqueIds = Array.from(new Set(sessionMatches)).slice(0, 2);
+
+    uniqueIds.forEach((sid) => {
+      actions.push({
+        label: `📝 Inspect Session ${sid}`,
+        prompt: `Show attendance details for session ${sid}`,
+        variant: "primary",
+      });
+    });
+
+    actions.push({ label: "📊 Today's Summary", prompt: "Summarize today's overall attendance" });
+    actions.push({ label: "🚪 Vacant Rooms", prompt: "Find vacant classrooms right now" });
+    return actions;
+  }
+
+  // 5. Live Real-Time Date & Day Query
+  if (
+    lower.includes("live real-time date") ||
+    lower.includes("current real-time date") ||
+    lower.includes("day of the week")
+  ) {
+    return [
+      { label: "📅 Today's Class Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "📊 Today's Attendance Overview", prompt: "Summarize today's overall attendance" },
+      { label: "🚪 Find Vacant Rooms Now", prompt: "Find vacant classrooms right now" },
+    ];
+  }
+
+  // 6. Defaulters List
+  if (
+    lower.includes("defaulter") ||
+    lower.includes("<75%") ||
+    lower.includes("attendance shortage") ||
+    lower.includes("below 75")
+  ) {
+    return [
+      { label: "📊 Branch Attendance Breakdown", prompt: "Show attendance statistics for Computer Science (CSE)", variant: "primary" },
+      { label: "📅 Today's Schedule", prompt: "Show my class schedule for today" },
+      { label: "🕒 Check Pending Sessions", prompt: "Which sessions have pending unreviewed attendance?" },
+    ];
+  }
+
+  // 7. Class Schedule / Timetable
+  if (lower.includes("class schedule for") || lower.includes("timetable")) {
+    return [
+      { label: "🚪 Find Vacant Rooms for Next Class", prompt: "Find vacant classrooms right now", variant: "primary" },
+      { label: "🕒 Check Pending Reviews for Today", prompt: "Which sessions have pending unreviewed attendance?" },
+      { label: "➕ Create New Session", prompt: "Create a session for today" },
+    ];
+  }
+
+  // 8. Vacant Classrooms
+  if (
+    lower.includes("vacant") ||
+    lower.includes("available classrooms") ||
+    lower.includes("classroom availability")
+  ) {
+    return [
+      { label: "📅 Today's Class Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "➕ Schedule Class in Available Room", prompt: "Create a session for today in vacant room" },
+      { label: "📊 Today's Summary", prompt: "Summarize today's overall attendance" },
+    ];
+  }
+
+  // 9. Session Created
+  if (lower.includes("session created successfully")) {
+    return [
+      { label: "📅 View Today's Updated Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "🕒 Check Pending Sessions", prompt: "Which sessions have pending unreviewed attendance?" },
+    ];
+  }
+
+  // 10. Attendance Summary
+  if (
+    lower.includes("attendance summary") ||
+    lower.includes("attendance statistics") ||
+    lower.includes("overall attendance")
+  ) {
+    return [
+      { label: "⚠️ Show Defaulters (<75%)", prompt: "List students with attendance below 75%", variant: "primary" },
+      { label: "📅 Today's Schedule", prompt: "Show my class schedule for today" },
+      { label: "🕒 Check Pending Sessions", prompt: "Which sessions have pending unreviewed attendance?" },
+    ];
+  }
+
+  // Smart Contextual Fallback
+  return [
+    { label: "📊 Today's Attendance", prompt: "Summarize today's overall attendance" },
+    { label: "📅 Today's Schedule", prompt: "Show my class schedule for today" },
+    { label: "🕒 Pending Reviews", prompt: "Which sessions have pending unreviewed attendance?" },
+  ];
+}
+
 function ExpiryBadge({ expiresAt }: { expiresAt?: string }) {
   const [secondsLeft, setSecondsLeft] = useState<number | null>(() => {
     if (!expiresAt) return null;
@@ -140,6 +292,28 @@ function ExpiryBadge({ expiresAt }: { expiresAt?: string }) {
 
 export const CHAT_STORAGE_KEY = "rollcall_recent_chat_messages_v1";
 
+export function getUserChatStorageKey(userId?: string | null, threadId?: string | null): string {
+  return userId ? `rollcall_chat_${userId}_${threadId || "current"}` : "rollcall_chat_guest";
+}
+
+function parseStoredBackendMessage(m: UserChatMessageItem): ChatMessage {
+  let meta: Partial<ChatMessage> = {};
+  if (m.metadata_json) {
+    try {
+      meta = JSON.parse(m.metadata_json);
+    } catch {
+      // ignore
+    }
+  }
+  return {
+    id: m.message_id,
+    sender: m.sender as "user" | "assistant",
+    text: m.text,
+    timestamp: m.timestamp,
+    ...meta,
+  };
+}
+
 function defaultWelcomeMessage(): ChatMessage {
   return {
     id: "welcome",
@@ -149,25 +323,18 @@ function defaultWelcomeMessage(): ChatMessage {
   };
 }
 
-function loadStoredMessages(): ChatMessage[] {
-  if (typeof window === "undefined") {
-    return [defaultWelcomeMessage()];
-  }
-  try {
-    const raw = window.localStorage.getItem(CHAT_STORAGE_KEY);
-    if (!raw) return [defaultWelcomeMessage()];
-    const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed) && parsed.length > 0) {
-      return parsed;
-    }
-  } catch (err) {
-    console.warn("Failed to restore chat messages from localStorage", err);
-  }
-  return [defaultWelcomeMessage()];
-}
-
 export function AssistantView() {
-  const [messages, setMessages] = useState<ChatMessage[]>(loadStoredMessages);
+  const { session } = useAuth();
+  const userId = session?.userId;
+
+  const [messages, setMessages] = useState<ChatMessage[]>([defaultWelcomeMessage()]);
+  const [threads, setThreads] = useState<UserChatThreadSummary[]>([]);
+  const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
+  const [currentThreadTitle, setCurrentThreadTitle] = useState<string>("New Conversation");
+  const [isRecentDrawerOpen, setIsRecentDrawerOpen] = useState(false);
+  const [recentSearchQuery, setRecentSearchQuery] = useState("");
+  const [isLoadingThreads, setIsLoadingThreads] = useState(false);
+
   const [sessions, setSessions] = useState<Array<{ session_id: string; subject?: string; date?: string }>>([]);
   const [activeSessionId, setActiveSessionId] = useState("");
   const [isCopiedId, setIsCopiedId] = useState<string | null>(null);
@@ -176,16 +343,122 @@ export function AssistantView() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
 
-  // Persist messages whenever updated
+  // Synchronize threads on user identity change (strict per-account isolation)
   useEffect(() => {
+    // Account switch protection: immediately clear in-memory chat
+    setMessages([defaultWelcomeMessage()]);
+    setCurrentThreadId(null);
+    setCurrentThreadTitle("New Conversation");
+    setThreads([]);
+
+    if (!userId) return;
+
+    let isMounted = true;
+    setIsLoadingThreads(true);
+
+    fetchUserChatThreads()
+      .then(async (userThreads) => {
+        if (!isMounted) return;
+        setThreads(userThreads);
+        if (userThreads && userThreads.length > 0) {
+          const latest = userThreads[0];
+          setCurrentThreadId(latest.thread_id);
+          setCurrentThreadTitle(latest.title);
+          try {
+            const detail = await fetchChatThread(latest.thread_id);
+            if (isMounted && detail && detail.messages && detail.messages.length > 0) {
+              setMessages(detail.messages.map(parseStoredBackendMessage));
+              return;
+            }
+          } catch {
+            const localRaw = window.localStorage.getItem(getUserChatStorageKey(userId, latest.thread_id));
+            if (localRaw) {
+              try {
+                const parsed = JSON.parse(localRaw);
+                if (Array.isArray(parsed) && parsed.length > 0) {
+                  setMessages(parsed);
+                  return;
+                }
+              } catch {
+                // Ignore parse errors on cached messages
+              }
+            }
+          }
+        } else {
+          setCurrentThreadId(`thread_${Date.now()}`);
+        }
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        const localRaw = window.localStorage.getItem(getUserChatStorageKey(userId, "current"));
+        if (localRaw) {
+          try {
+            const parsed = JSON.parse(localRaw);
+            if (Array.isArray(parsed) && parsed.length > 0) {
+              setMessages(parsed);
+            }
+          } catch {
+            // Ignore parse errors on cached fallback
+          }
+        }
+        setCurrentThreadId(`thread_${Date.now()}`);
+      })
+      .finally(() => {
+        if (isMounted) setIsLoadingThreads(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [userId]);
+
+  // Persist messages whenever updated, scoped strictly to user and active thread
+  useEffect(() => {
+    if (!userId || !currentThreadId) return;
+
+    // 1. Scoped local storage
     if (typeof window !== "undefined") {
       try {
-        window.localStorage.setItem(CHAT_STORAGE_KEY, JSON.stringify(messages.slice(-50)));
+        window.localStorage.setItem(
+          getUserChatStorageKey(userId, currentThreadId),
+          JSON.stringify(messages.slice(-50))
+        );
       } catch (err) {
-        console.warn("Failed to persist chat messages", err);
+        console.warn("Failed to persist chat messages to localStorage", err);
       }
     }
-  }, [messages]);
+
+    // Skip network sync for pristine initial welcome
+    if (messages.length <= 1 && messages[0]?.id === "welcome") return;
+
+    // 2. Debounced background sync to backend database (cross-device sync)
+    const timer = setTimeout(() => {
+      syncChatThread(currentThreadId, {
+        title: currentThreadTitle,
+        messages: messages.map((m) => ({
+          id: m.id,
+          sender: m.sender,
+          text: m.text,
+          timestamp: m.timestamp,
+          metadata: {
+            toolCalls: m.toolCalls,
+            records: m.records,
+            confirmationCard: m.confirmationCard,
+            error: m.error,
+          },
+        })),
+      })
+        .then((detail) => {
+          if (detail && detail.title && detail.title !== currentThreadTitle) {
+            setCurrentThreadTitle(detail.title);
+          }
+          fetchUserChatThreads().then(setThreads).catch(() => {});
+        })
+        .catch(() => {});
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [messages, currentThreadId, currentThreadTitle, userId]);
 
   // Load available sessions for context selector
   useEffect(() => {
@@ -203,13 +476,71 @@ export function AssistantView() {
     };
   }, []);
 
-  const handleClearChat = useCallback(() => {
-    const fresh = [defaultWelcomeMessage()];
-    setMessages(fresh);
-    if (typeof window !== "undefined") {
-      window.localStorage.removeItem(CHAT_STORAGE_KEY);
-    }
+  const handleNewChat = useCallback(() => {
+    const newId = `thread_${Date.now()}`;
+    setCurrentThreadId(newId);
+    setCurrentThreadTitle("New Conversation");
+    setMessages([defaultWelcomeMessage()]);
+    setIsRecentDrawerOpen(false);
   }, []);
+
+  const handleSelectThread = useCallback(async (thread: UserChatThreadSummary) => {
+    setIsRecentDrawerOpen(false);
+    setCurrentThreadId(thread.thread_id);
+    setCurrentThreadTitle(thread.title);
+
+    try {
+      const detail = await fetchChatThread(thread.thread_id);
+      if (detail && detail.messages && detail.messages.length > 0) {
+        setMessages(detail.messages.map(parseStoredBackendMessage));
+      } else {
+        setMessages([defaultWelcomeMessage()]);
+      }
+    } catch {
+      const localRaw = window.localStorage.getItem(getUserChatStorageKey(userId, thread.thread_id));
+      if (localRaw) {
+        try {
+          const parsed = JSON.parse(localRaw);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            setMessages(parsed);
+            return;
+          }
+        } catch {
+          // Ignore cache parse error
+        }
+      }
+      setMessages([defaultWelcomeMessage()]);
+    }
+  }, [userId]);
+
+  const handleDeleteThread = useCallback(async (threadId: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (!window.confirm("Are you sure you want to delete this conversation?")) return;
+    try {
+      await deleteChatThread(threadId);
+      setThreads((prev) => prev.filter((t) => t.thread_id !== threadId));
+      if (currentThreadId === threadId) {
+        handleNewChat();
+      }
+      if (userId) {
+        window.localStorage.removeItem(getUserChatStorageKey(userId, threadId));
+      }
+    } catch (err) {
+      console.error("Failed to delete chat thread", err);
+    }
+  }, [currentThreadId, handleNewChat, userId]);
+
+  const handleClearChat = useCallback(() => {
+    setMessages([defaultWelcomeMessage()]);
+    if (userId && currentThreadId) {
+      window.localStorage.removeItem(getUserChatStorageKey(userId, currentThreadId));
+      syncChatThread(currentThreadId, {
+        title: "New Conversation",
+        messages: [defaultWelcomeMessage()],
+      }).catch(() => {});
+    }
+  }, [userId, currentThreadId]);
+
 
   const handleCopyText = useCallback((id: string, text: string) => {
     if (typeof navigator !== "undefined" && navigator.clipboard?.writeText) {
@@ -229,6 +560,10 @@ export function AssistantView() {
     type: string;
     size: number;
   } | null>(null);
+
+  // Staged pending attachment (waits for user to type/send instead of auto-firing)
+  const [pendingFile, setPendingFile] = useState<File | null>(null);
+  const [pendingFilePreview, setPendingFilePreview] = useState<string | null>(null);
 
   // Confirmation Modal (legacy)
   const [_pendingConfirmation, setPendingConfirmation] = useState<{
@@ -265,9 +600,230 @@ export function AssistantView() {
     };
   }, []);
 
+  const handleRemovePendingFile = useCallback(() => {
+    if (pendingFilePreview) {
+      URL.revokeObjectURL(pendingFilePreview);
+    }
+    setPendingFile(null);
+    setPendingFilePreview(null);
+  }, [pendingFilePreview]);
+
+  const handleStageFile = useCallback(
+    (file: File) => {
+      const extension = file.name.includes(".")
+        ? `.${file.name.split(".").pop()?.toLowerCase()}`
+        : "";
+      const supported = SUPPORTED_UPLOAD_EXTENSIONS.includes(extension);
+      const isImage = file.type.startsWith("image/");
+
+      if (!supported && !isImage) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId("err"),
+            sender: "assistant",
+            text: `Unsupported file type "${extension || file.type || "unknown"}". Supported formats: ${SUPPORTED_UPLOAD_EXTENSIONS.join(", ")} and images (PNG, JPEG).`,
+            timestamp: getFormattedTime(),
+            error: true,
+          },
+        ]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+
+      if (file.size > MAX_UPLOAD_BYTES) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId("err"),
+            sender: "assistant",
+            text: `The file is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). The maximum upload size is ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`,
+            timestamp: getFormattedTime(),
+            error: true,
+          },
+        ]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+
+      if (pendingFilePreview) {
+        URL.revokeObjectURL(pendingFilePreview);
+      }
+
+      setPendingFile(file);
+      if (file.type.startsWith("image/")) {
+        setPendingFilePreview(URL.createObjectURL(file));
+      } else {
+        setPendingFilePreview(null);
+      }
+    },
+    [pendingFilePreview]
+  );
+
+  const uploadFile = useCallback(
+    async (file: File, promptQuery?: string) => {
+      const extension = file.name.includes(".")
+        ? `.${file.name.split(".").pop()?.toLowerCase()}`
+        : "";
+
+      setSelectedFile({
+        name: file.name,
+        type: file.type || extension.toUpperCase().replace(".", "") || "FILE",
+        size: file.size,
+      });
+      setUploadProgress(0);
+      setUploadStage("uploading");
+      setIsUploading(true);
+
+      const userDisplayText = promptQuery?.trim()
+        ? `${promptQuery.trim()} (attached: ${file.name})`
+        : `Uploaded file for attendance extraction: ${file.name}`;
+
+      const userMsg: ChatMessage = {
+        id: nextMsgId("u"),
+        sender: "user",
+        text: userDisplayText,
+        timestamp: getFormattedTime(),
+      };
+      setMessages((prev) => [...prev, userMsg]);
+
+      try {
+        const res = await processAttendanceFile(
+          file,
+          activeSessionId || undefined,
+          undefined,
+          (percent) => setUploadProgress(percent),
+          promptQuery?.trim() || undefined
+        );
+        setUploadStage("processing");
+
+        const confirmationCardData: ConfirmationCardData | null =
+          res.needs_confirmation && res.confirmation_request
+            ? {
+                confirmationId:
+                  (res.confirmation_request.affected_rows?.[0]?.confirmation_id as string) || "",
+                requestId: res.request_id,
+                sessionId:
+                  activeSessionId ||
+                  ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
+                question:
+                  res.confirmation_request.question || "Do you confirm the extracted attendance records?",
+                issues: res.confirmation_request.issues || [],
+                affectedRows: res.confirmation_request.affected_rows || [],
+                status: "pending",
+                isN7Proposal: false,
+              }
+            : null;
+
+        const assistantMsg: ChatMessage = {
+          id: nextMsgId("a"),
+          sender: "assistant",
+          text: res.message || "Processed attendance sheet.",
+          timestamp: getFormattedTime(),
+          toolCalls: res.tool_calls,
+          confirmation: res.confirmation_request,
+          confirmationCard: confirmationCardData,
+        };
+        setMessages((prev) => [...prev, assistantMsg]);
+
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(
+            new CustomEvent("rollcall-attendance-updated", {
+              detail: { sessionId: activeSessionId || res.session_id },
+            })
+          );
+        }
+
+        if (res.needs_confirmation && res.confirmation_request) {
+          setPendingConfirmation({
+            request: res.confirmation_request,
+            requestId: res.request_id,
+            sessionId:
+              activeSessionId ||
+              ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
+          });
+        }
+      } catch (err: unknown) {
+        const anyErr = err as {
+          statusCode?: number;
+          status?: number;
+          code?: string;
+          message?: string;
+          details?: Record<string, unknown>;
+        };
+
+        const isQualityRejected =
+          (anyErr?.statusCode === 422 || anyErr?.status === 422) &&
+          (anyErr?.code === "QUALITY_REJECTED" ||
+            String(anyErr?.message || "").toLowerCase().includes("quality") ||
+            String(anyErr?.message || "").toLowerCase().includes("blur") ||
+            String(anyErr?.message || "").toLowerCase().includes("photo") ||
+            String(anyErr?.message || "").toLowerCase().includes("sharpness"));
+
+        if (isQualityRejected) {
+          const details = anyErr.details || {};
+          const reasons = Array.isArray(details.reasons)
+            ? (details.reasons as string[])
+            : [
+                "Image sharpness is below the required optical threshold (Laplacian variance check failed).",
+                "Lighting across the attendance sheet is uneven, shadowed, or underexposed.",
+              ];
+
+          const rejectionData: PhotoQualityRejectionData = {
+            reasons,
+            measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 42.5,
+            sharpnessThreshold:
+              typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 100.0,
+            measuredBrightness: typeof details.brightness === "number" ? details.brightness : 54.2,
+            brightnessThreshold:
+              typeof details.brightness_threshold === "number" ? details.brightness_threshold : 80.0,
+          };
+
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: nextMsgId("rej"),
+              sender: "assistant",
+              text: "The uploaded photograph did not pass automatic quality evaluation.",
+              timestamp: getFormattedTime(),
+              qualityRejection: rejectionData,
+            },
+          ]);
+        } else {
+          const msg = err instanceof Error ? err.message : "File processing failed.";
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: nextMsgId("err"),
+              sender: "assistant",
+              text: `OCR / Parsing Error: ${msg}`,
+              timestamp: getFormattedTime(),
+              error: true,
+            },
+          ]);
+        }
+      } finally {
+        setIsUploading(false);
+        setUploadProgress(100);
+        setUploadStage("done");
+        if (fileInputRef.current) fileInputRef.current.value = "";
+      }
+    },
+    [activeSessionId]
+  );
+
   const handleSendMessage = useCallback(async (textToSend?: string) => {
     const query = (textToSend || inputQuery).trim();
-    if (!query || isProcessing) return;
+    if ((!query && !pendingFile) || isProcessing || isUploading) return;
+
+    if (pendingFile) {
+      const fileToUpload = pendingFile;
+      const promptText = query;
+      handleRemovePendingFile();
+      setInputQuery("");
+      await uploadFile(fileToUpload, promptText);
+      return;
+    }
 
     const userMsg: ChatMessage = {
       id: nextMsgId("u"),
@@ -449,184 +1005,50 @@ export function AssistantView() {
     } finally {
       setIsProcessing(false);
     }
-  }, [inputQuery, isProcessing, activeSessionId]);
+  }, [inputQuery, isProcessing, isUploading, activeSessionId, pendingFile, handleRemovePendingFile, uploadFile]);
 
-  const handleFileUpload = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (file) handleStageFile(file);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, [handleStageFile]);
 
-    // Client side validation (the backend validates the bytes again).
-    const extension = file.name.includes(".")
-      ? `.${file.name.split(".").pop()?.toLowerCase()}`
-      : "";
-    const supported = SUPPORTED_UPLOAD_EXTENSIONS.includes(extension);
-    const isImage = file.type.startsWith("image/");
-
-    if (!supported && !isImage) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextMsgId("err"),
-          sender: "assistant",
-          text: `Unsupported file type "${extension || file.type || "unknown"}". Supported formats: ${SUPPORTED_UPLOAD_EXTENSIONS.join(", ")} and images (PNG, JPEG).`,
-          timestamp: getFormattedTime(),
-          error: true,
-        },
-      ]);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      return;
+  // Handle Clipboard Ctrl+V Paste for images and files
+  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === "file") {
+        const file = item.getAsFile();
+        if (file) {
+          e.preventDefault();
+          handleStageFile(file);
+          return;
+        }
+      }
     }
+  }, [handleStageFile]);
 
-    if (file.size > MAX_UPLOAD_BYTES) {
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: nextMsgId("err"),
-          sender: "assistant",
-          text: `The file is too large (${(file.size / (1024 * 1024)).toFixed(1)} MB). The maximum upload size is ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB.`,
-          timestamp: getFormattedTime(),
-          error: true,
-        },
-      ]);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      return;
-    }
-
-    setSelectedFile({
-      name: file.name,
-      type: file.type || extension.toUpperCase().replace(".", ""),
-      size: file.size,
-    });
-    setUploadProgress(0);
-    setUploadStage("uploading");
-    setIsUploading(true);
-
-    const userMsg: ChatMessage = {
-      id: nextMsgId("u"),
-      sender: "user",
-      text: `Uploaded file for attendance extraction: ${file.name}`,
-      timestamp: getFormattedTime(),
+  // Window-level Paste Listener so pasting anywhere in chat window works
+  useEffect(() => {
+    const handleWindowPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].kind === "file") {
+          const file = items[i].getAsFile();
+          if (file) {
+            e.preventDefault();
+            handleStageFile(file);
+            return;
+          }
+        }
+      }
     };
-    setMessages((prev) => [...prev, userMsg]);
-
-    try {
-      const res = await processAttendanceFile(
-        file,
-        activeSessionId || undefined,
-        undefined,
-        (percent) => setUploadProgress(percent)
-      );
-      setUploadStage("processing");
-
-      const confirmationCardData: ConfirmationCardData | null =
-        res.needs_confirmation && res.confirmation_request
-          ? {
-              confirmationId: (res.confirmation_request.affected_rows?.[0]?.confirmation_id as string) || "",
-              requestId: res.request_id,
-              sessionId:
-                activeSessionId ||
-                ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
-              question: res.confirmation_request.question || "Do you confirm the extracted attendance records?",
-              issues: res.confirmation_request.issues || [],
-              affectedRows: res.confirmation_request.affected_rows || [],
-              status: "pending",
-              isN7Proposal: false,
-            }
-          : null;
-
-      const assistantMsg: ChatMessage = {
-        id: nextMsgId("a"),
-        sender: "assistant",
-        text: res.message || "Processed attendance sheet.",
-        timestamp: getFormattedTime(),
-        toolCalls: res.tool_calls,
-        confirmation: res.confirmation_request,
-        confirmationCard: confirmationCardData,
-      };
-      setMessages((prev) => [...prev, assistantMsg]);
-
-      if (typeof window !== "undefined") {
-        window.dispatchEvent(
-          new CustomEvent("rollcall-attendance-updated", {
-            detail: { sessionId: activeSessionId || res.session_id },
-          })
-        );
-      }
-
-      if (res.needs_confirmation && res.confirmation_request) {
-        setPendingConfirmation({
-          request: res.confirmation_request,
-          requestId: res.request_id,
-          sessionId:
-            activeSessionId ||
-            ((res.confirmation_request.affected_rows?.[0]?.session_id as string) || ""),
-        });
-      }
-    } catch (err: unknown) {
-      // Check for HTTP 422 QUALITY_REJECTED error
-      const anyErr = err as {
-        statusCode?: number;
-        status?: number;
-        code?: string;
-        message?: string;
-        details?: Record<string, unknown>;
-      };
-
-      const isQualityRejected =
-        (anyErr?.statusCode === 422 || anyErr?.status === 422) &&
-        (anyErr?.code === "QUALITY_REJECTED" ||
-          String(anyErr?.message || "").toLowerCase().includes("quality") ||
-          String(anyErr?.message || "").toLowerCase().includes("blur") ||
-          String(anyErr?.message || "").toLowerCase().includes("photo") ||
-          String(anyErr?.message || "").toLowerCase().includes("sharpness"));
-
-      if (isQualityRejected) {
-        const details = anyErr.details || {};
-        const reasons = Array.isArray(details.reasons)
-          ? (details.reasons as string[])
-          : [
-              "Image sharpness is below the required optical threshold (Laplacian variance check failed).",
-              "Lighting across the attendance sheet is uneven, shadowed, or underexposed.",
-            ];
-
-        const rejectionData: PhotoQualityRejectionData = {
-          reasons,
-          measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 42.5,
-          sharpnessThreshold: typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 100.0,
-          measuredBrightness: typeof details.brightness === "number" ? details.brightness : 54.2,
-          brightnessThreshold: typeof details.brightness_threshold === "number" ? details.brightness_threshold : 80.0,
-        };
-
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: nextMsgId("rej"),
-            sender: "assistant",
-            text: "The uploaded photograph did not pass automatic quality evaluation.",
-            timestamp: getFormattedTime(),
-            qualityRejection: rejectionData,
-          },
-        ]);
-      } else {
-        const msg = err instanceof Error ? err.message : "File processing failed.";
-        setMessages((prev) => [
-          ...prev,
-          {
-            id: nextMsgId("err"),
-            sender: "assistant",
-            text: `OCR / Parsing Error: ${msg}`,
-            timestamp: getFormattedTime(),
-            error: true,
-          },
-        ]);
-      }
-    } finally {
-      setIsUploading(false);
-      setUploadProgress(100);
-      setUploadStage("done");
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  }, [activeSessionId]);
+    window.addEventListener("paste", handleWindowPaste);
+    return () => window.removeEventListener("paste", handleWindowPaste);
+  }, [handleStageFile]);
 
   // Local Dismiss Action (N7: Never calls confirmation endpoint)
   const handleCardDismiss = useCallback((msgId: string) => {
@@ -888,8 +1310,15 @@ export function AssistantView() {
     [messages]
   );
 
+  const filteredThreads = threads.filter(
+    (t) =>
+      !recentSearchQuery.trim() ||
+      t.title.toLowerCase().includes(recentSearchQuery.toLowerCase()) ||
+      (t.last_message && t.last_message.toLowerCase().includes(recentSearchQuery.toLowerCase()))
+  );
+
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)]">
+    <div className="flex flex-col h-[calc(100vh-8rem)] relative">
       {/* Top Bar / Agent Status & Context Toolbar */}
       <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-[#E4DDCA] mb-4">
         <div>
@@ -922,23 +1351,59 @@ export function AssistantView() {
             </select>
           </div>
 
-          {/* History Saved Indicator */}
-          <div className="hidden sm:flex items-center gap-1 text-[11px] text-[#77735F] bg-[#F2EDE0] px-2.5 py-1.5 rounded-xl border border-[#E4DDCA]" title="Conversations are saved automatically in your browser">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-            <span>History Saved</span>
-          </div>
+          {/* New Chat Button */}
+          <button
+            type="button"
+            onClick={handleNewChat}
+            className="px-3 py-1.5 rounded-xl text-xs font-bold text-[#6C5119] bg-[#6C5119]/10 hover:bg-[#6C5119]/20 border border-[#6C5119]/20 transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
+            title="Start a fresh chat thread"
+          >
+            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+            </svg>
+            <span>New Chat</span>
+          </button>
 
-          {/* Clear / New Chat Button */}
+          {/* Recent Chats Tab / Button */}
+          <button
+            type="button"
+            onClick={() => setIsRecentDrawerOpen(true)}
+            className="px-3 py-1.5 rounded-xl text-xs font-bold text-[#24251C] bg-[#F2EDE0] hover:bg-[#E4DDCA] border border-[#E4DDCA] transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
+            title="Browse recent conversations saved to your account"
+          >
+            <svg className="w-3.5 h-3.5 text-[#6C5119]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+            </svg>
+            <span>Recent Chats</span>
+            {threads.length > 0 && (
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] font-bold bg-[#6C5119] text-white">
+                {threads.length}
+              </span>
+            )}
+          </button>
+
+          {/* Current Chat Topic Pill */}
+          {currentThreadTitle && currentThreadTitle !== "New Conversation" && (
+            <div
+              className="hidden xl:flex items-center gap-1.5 text-xs text-[#24251C] bg-white px-2.5 py-1.5 rounded-xl border border-[#E4DDCA] max-w-[180px] truncate"
+              title={currentThreadTitle}
+            >
+              <span className="text-[#77735F] text-[10px] uppercase font-bold">Topic:</span>
+              <span className="font-medium truncate">{currentThreadTitle}</span>
+            </div>
+          )}
+
+          {/* Clear Chat Button */}
           {messages.length > 1 && (
             <button
               onClick={handleClearChat}
               className="px-2.5 py-1.5 rounded-xl text-xs font-medium text-[#77735F] hover:text-rose-700 hover:bg-rose-50 border border-[#E4DDCA] hover:border-rose-200 transition-colors cursor-pointer flex items-center gap-1 shadow-2xs"
-              title="Clear conversation history and start fresh"
+              title="Clear current messages"
             >
               <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
               </svg>
-              <span>Clear Chat</span>
+              <span>Clear</span>
             </button>
           )}
 
@@ -950,6 +1415,123 @@ export function AssistantView() {
           )}
         </div>
       </div>
+
+      {/* Recent Chats Slide-Over Drawer */}
+      {isRecentDrawerOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/40 backdrop-blur-2xs animate-fadeIn">
+          <div className="w-full max-w-md bg-[#FAF8F5] h-full shadow-2xl border-l border-[#E4DDCA] flex flex-col p-6 space-y-4 animate-slideLeft">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div className="flex items-center gap-2.5">
+                <div className="w-9 h-9 rounded-xl bg-[#6C5119]/10 text-[#6C5119] flex items-center justify-center">
+                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-[#24251C]">Recent Conversations</h2>
+                  <p className="text-[11px] text-[#77735F]">Saved to account · Cross-device sync</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsRecentDrawerOpen(false)}
+                className="w-8 h-8 rounded-xl border border-[#E4DDCA] text-[#77735F] hover:text-[#24251C] hover:bg-[#F2EDE0] flex items-center justify-center transition-colors cursor-pointer"
+                title="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Start New Conversation button inside drawer */}
+            <button
+              type="button"
+              onClick={handleNewChat}
+              className="w-full py-2.5 px-3 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#533e13] transition-colors flex items-center justify-center gap-2 shadow-xs cursor-pointer"
+            >
+              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M12 4v16m8-8H4" />
+              </svg>
+              <span>+ New Conversation</span>
+            </button>
+
+            {/* Search Filter */}
+            <div>
+              <input
+                type="text"
+                placeholder="Search recent conversations…"
+                value={recentSearchQuery}
+                onChange={(e) => setRecentSearchQuery(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl text-xs bg-white border border-[#E4DDCA] text-[#24251C] placeholder-[#77735F]/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[#6C5119]"
+              />
+            </div>
+
+            {/* Conversation list */}
+            <div className="flex-1 overflow-y-auto space-y-2 pr-1">
+              {isLoadingThreads ? (
+                <div className="text-center py-8 text-xs text-[#77735F]">Loading conversations…</div>
+              ) : filteredThreads.length === 0 ? (
+                <div className="text-center py-10 px-4 bg-[#F2EDE0]/50 rounded-2xl border border-dashed border-[#E4DDCA] space-y-1">
+                  <p className="text-xs font-bold text-[#24251C]">No conversations found</p>
+                  <p className="text-[11px] text-[#77735F]">
+                    {recentSearchQuery ? "No matches for your search." : "Start chatting and your conversations will appear here."}
+                  </p>
+                </div>
+              ) : (
+                filteredThreads.map((t) => {
+                  const isActive = t.thread_id === currentThreadId;
+                  return (
+                    <div
+                      key={t.thread_id}
+                      onClick={() => void handleSelectThread(t)}
+                      className={`p-3 rounded-xl border transition-all cursor-pointer flex items-start justify-between gap-2 group ${
+                        isActive
+                          ? "bg-[#6C5119]/10 border-[#6C5119]/40 ring-1 ring-[#6C5119]/20"
+                          : "bg-white border-[#E4DDCA] hover:bg-[#F2EDE0]/60 hover:border-[#6C5119]/30"
+                      }`}
+                    >
+                      <div className="min-w-0 flex-1 space-y-1">
+                        <div className="flex items-center gap-1.5">
+                          {isActive && (
+                            <span className="w-1.5 h-1.5 rounded-full bg-[#6C5119] shrink-0" />
+                          )}
+                          <p className="text-xs font-bold text-[#24251C] truncate">{t.title}</p>
+                        </div>
+                        {t.last_message && (
+                          <p className="text-[11px] text-[#77735F] truncate">{t.last_message}</p>
+                        )}
+                        <div className="flex items-center gap-2 text-[10px] text-[#77735F]">
+                          <span>
+                            {new Date(t.updated_at).toLocaleDateString([], {
+                              month: "short",
+                              day: "numeric",
+                            })}
+                          </span>
+                          <span>·</span>
+                          <span>
+                            {t.message_count} {t.message_count === 1 ? "message" : "messages"}
+                          </span>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={(e) => void handleDeleteThread(t.thread_id, e)}
+                        className="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg text-[#77735F] hover:text-rose-700 hover:bg-rose-50 transition-all cursor-pointer shrink-0"
+                        title="Delete conversation"
+                      >
+                        <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                        </svg>
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
 
       {/* Chat Messages Scroll Area */}
       <div className="flex-1 overflow-y-auto space-y-4 pr-1">
@@ -988,84 +1570,40 @@ export function AssistantView() {
                   )}
                 </div>
 
-                {/* Interactive Suggestion Chips for Assistant Messages */}
-                {!isUser && !m.error && (
-                  <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 flex flex-wrap items-center gap-1.5">
-                    {m.text?.toLowerCase().includes("proceed") ? (
-                      <>
-                        <span className="text-[10px] uppercase font-bold text-[#3F451F] mr-1">Confirm Action:</span>
-                        <button
-                          onClick={() => void handleSendMessage("proceed")}
-                          disabled={isProcessing}
-                          className="px-3 py-1 rounded-lg bg-[#3F451F] hover:bg-[#343919] text-[#FBF8F0] text-[11px] font-bold transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5 flex items-center gap-1"
-                        >
-                          <span>✓ Yes, Proceed</span>
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("cancel")}
-                          disabled={isProcessing}
-                          className="px-3 py-1 rounded-lg bg-white hover:bg-rose-50 border border-rose-300 text-[11px] text-rose-700 font-bold transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          <span>✕ Cancel</span>
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <span className="text-[10px] uppercase font-bold text-[#77735F] mr-1">Quick Actions:</span>
-                        <button
-                          onClick={() => void handleSendMessage("Summarize today's overall attendance")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          📊 Summarize
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("List students with attendance below 75%")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          ⚠️ Defaulters (&lt;75%)
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("Which sessions have pending unreviewed attendance?")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          🕒 Pending Sessions
-                        </button>
-                        <button
-                          onClick={() => void handleSendMessage("Find vacant classrooms right now")}
-                          disabled={isProcessing}
-                          className="px-2 py-0.5 rounded-lg bg-white/90 hover:bg-white border border-[#E4DDCA] text-[11px] text-[#3F451F] font-medium hover:border-[#3F451F] transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5"
-                        >
-                          🚪 Vacant Rooms
-                        </button>
-                      </>
-                    )}
-                  </div>
-                )}
-
-                {/* Tool Call Audit Trace (if present) */}
-                {m.toolCalls && m.toolCalls.length > 0 && (
-                  <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 text-xs">
-                    <p className="font-bold uppercase tracking-wider text-[10px] text-[#77735F] mb-1">
-                      Invoked Tools & Safety Guardrails ({m.toolCalls.length})
-                    </p>
-                    <div className="space-y-1">
-                      {m.toolCalls.map((tc, idx) => (
-                        <div
-                          key={idx}
-                          className="flex items-center justify-between font-mono text-[11px] bg-white/50 px-2 py-1 rounded-md"
-                        >
-                          <span className="text-[#3F451F] font-bold">
-                            {String(tc.tool_name || tc.tool || "database_tool")}
-                          </span>
-                          <span className="text-emerald-700">Executed OK</span>
-                        </div>
-                      ))}
+                {/* Interactive Real-Time Actions for Assistant Messages */}
+                {!isUser && !m.error && (() => {
+                  const actions = getContextualActions(m);
+                  if (actions.length === 0) return null;
+                  return (
+                    <div className="mt-3 pt-2.5 border-t border-[#E4DDCA]/60 flex flex-wrap items-center gap-1.5">
+                      <span className="text-[10px] uppercase font-bold text-[#77735F] mr-1 flex items-center gap-1">
+                        <span>⚡ Real-Time Actions:</span>
+                      </span>
+                      {actions.map((act, aIdx) => {
+                        let btnClass = "px-2.5 py-1 rounded-lg text-[11px] font-bold transition-all cursor-pointer shadow-2xs hover:-translate-y-0.5 flex items-center gap-1";
+                        if (act.variant === "primary") {
+                          btnClass += " bg-[#3F451F] hover:bg-[#343919] text-[#FBF8F0]";
+                        } else if (act.variant === "danger") {
+                          btnClass += " bg-white hover:bg-rose-50 border border-rose-300 text-rose-700";
+                        } else {
+                          btnClass += " bg-white/90 hover:bg-white border border-[#E4DDCA] text-[#3F451F] hover:border-[#3F451F]";
+                        }
+                        return (
+                          <button
+                            key={aIdx}
+                            onClick={() => void handleSendMessage(act.prompt)}
+                            disabled={isProcessing}
+                            className={btnClass}
+                          >
+                            <span>{act.label}</span>
+                          </button>
+                        );
+                      })}
                     </div>
-                  </div>
-                )}
+                  );
+                })()}
+
+                {/* Real-time suggested actions */}
 
                 {/* F11 — Photo Quality Gate Rejection Card (N9) */}
                 {m.qualityRejection && (
@@ -1414,11 +1952,44 @@ export function AssistantView() {
           className="hidden"
         />
 
+        {/* Staged file attachment chip: waits for user to send */}
+        {pendingFile && (
+          <div className="mb-2 flex items-center gap-2 bg-[#FBF8F0] px-3 py-1.5 rounded-xl border border-[#E4DDCA] w-fit max-w-full shadow-2xs">
+            {pendingFilePreview ? (
+              <img
+                src={pendingFilePreview}
+                alt="Upload preview"
+                className="w-8 h-8 object-cover rounded-lg border border-[#E4DDCA]"
+              />
+            ) : (
+              <div className="w-8 h-8 rounded-lg bg-[#E4DDCA] flex items-center justify-center text-xs font-bold text-[#3F451F]">
+                📄
+              </div>
+            )}
+            <div className="flex flex-col text-xs min-w-0 pr-1">
+              <span className="font-semibold text-[#24251C] truncate max-w-[220px]">
+                {pendingFile.name}
+              </span>
+              <span className="text-[10px] text-[#77735F]">
+                {(pendingFile.size / 1024).toFixed(0)} KB · Ready to send
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleRemovePendingFile}
+              className="p-1 rounded-lg text-[#77735F] hover:text-[#C62828] hover:bg-rose-50 transition-colors cursor-pointer"
+              title="Remove attachment"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         <div className="flex items-center gap-2 bg-[#F2EDE0] p-1.5 rounded-2xl border border-[#E4DDCA]">
           <button
             onClick={() => fileInputRef.current?.click()}
             disabled={isUploading || isProcessing}
-            title="Upload an attendance roster (PDF, XLSX, CSV, TXT, PNG or JPEG)"
+            title="Attach a roster or timetable file (PNG, JPG, PDF, XLSX, CSV)"
             className="p-2.5 rounded-xl text-[#77735F] hover:text-[#24251C] hover:bg-[#E4DDCA]/50 transition-colors disabled:opacity-50 cursor-pointer"
           >
             <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1430,20 +2001,25 @@ export function AssistantView() {
             type="text"
             value={inputQuery}
             onChange={(e) => setInputQuery(e.target.value)}
+            onPaste={handlePaste}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void handleSendMessage();
               }
             }}
-            placeholder="Ask about student attendance, propose an edit (e.g. 'mark 1MS21CS001 absent in SESS-001'), or upload a photo..."
+            placeholder={
+              pendingFile
+                ? "Type instructions (e.g. 'Register my CN classes from this timetable') or hit Send..."
+                : "Ask about student attendance, propose an edit, paste (Ctrl+V) or attach a file..."
+            }
             disabled={isProcessing || isUploading}
             className="flex-1 bg-transparent border-none text-sm text-[#24251C] placeholder-[#77735F] focus:outline-none px-2"
           />
 
           <button
             onClick={() => void handleSendMessage()}
-            disabled={!inputQuery.trim() || isProcessing || isUploading}
+            disabled={(!inputQuery.trim() && !pendingFile) || isProcessing || isUploading}
             className="p-2.5 bg-[#3F451F] text-[#FBF8F0] rounded-xl hover:bg-[#323719] transition-all disabled:opacity-40 disabled:hover:bg-[#3F451F] cursor-pointer"
           >
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">

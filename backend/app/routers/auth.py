@@ -25,10 +25,19 @@ from sqlalchemy.orm import Session
 from app.auth.dependencies import get_current_user
 from app.auth.jwt import create_access_token
 from app.auth.roles import normalize_role
+from app.config import ACCESS_TOKEN_TTL_MINUTES
 from app.db import crud
 from app.db.connection import get_sync_session_factory
 from app.db.models import AuthRefreshToken, AuthSession, LoginAttempt, TeacherSubject, User
-from app.schemas.auth import AuthenticatedUser, LoginRequest, LoginResponse, Role, UserMeResponse
+from app.schemas.auth import (
+    AuthenticatedUser,
+    LoginRequest,
+    LoginResponse,
+    RevokeAllOtpResponse,
+    RevokeAllSessionsRequest,
+    Role,
+    UserMeResponse,
+)
 from app.security.context import get_request_id
 from app.security.detection import detector
 from app.security.email import get_email_provider
@@ -311,7 +320,19 @@ def login(request: Request, payload: LoginRequest):
         with _login_user_lock(clean_uid):
             user = db.get(User, clean_uid)
             if user is None:
-                user = db.query(User).filter(func.lower(User.email) == func.lower(clean_uid)).first()
+                # Support login by case-insensitive user_id or email
+                user = (
+                    db.query(User)
+                    .filter(
+                        or_(
+                            func.lower(User.user_id) == clean_uid.lower(),
+                            func.lower(User.email) == clean_uid.lower(),
+                        )
+                    )
+                    .first()
+                )
+            if user is not None:
+                clean_uid = user.user_id
             record_uid = user.user_id if user is not None else None
 
             # 1. Quota check (rolling 10-minute window, per user and per IP).
@@ -386,6 +407,20 @@ def login(request: Request, payload: LoginRequest):
             # 4. ADMIN role extra authentication check
             if user.role.upper() == "ADMIN":
                 configured_admin_key = os.getenv("ADMIN_KEY")
+                if not configured_admin_key or len(configured_admin_key.strip()) == 0:
+                    try:
+                        from dotenv import dotenv_values
+                        from pathlib import Path
+                        _here = Path(__file__).resolve()
+                        for _candidate in (_here.parents[3] / ".env", _here.parents[2] / ".env", _here.parents[1] / ".env"):
+                            if _candidate.exists():
+                                _val = dotenv_values(_candidate).get("ADMIN_KEY")
+                                if _val and _val.strip():
+                                    configured_admin_key = _val.strip()
+                                    os.environ["ADMIN_KEY"] = configured_admin_key
+                                    break
+                    except Exception:
+                        pass
                 if not configured_admin_key or len(configured_admin_key.strip()) == 0:
                     logger.error("ADMIN login failed closed: ADMIN_KEY is not configured on the server.")
                     _record_attempt(db, user_id=record_uid, ip_address=client_ip, success=0, timestamp=now_iso)
@@ -518,10 +553,10 @@ def login(request: Request, payload: LoginRequest):
             )
             db.add(refresh_record)
 
-            # 8. Issue signed JWT token with 15-minute expiry before committing the session
+            # 8. Issue signed JWT token with configured TTL before committing the session
             # so a token creation error rolls back cleanly without leaving an orphaned session.
             try:
-                exp_dt = now_dt + timedelta(minutes=15)
+                exp_dt = now_dt + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
                 exp_iso = _format_utc_iso(exp_dt)
                 token_claims = {
                     "sub": user.user_id,
@@ -530,7 +565,7 @@ def login(request: Request, payload: LoginRequest):
                     "iat": int(now_dt.timestamp()),
                     "exp": int(exp_dt.timestamp()),
                 }
-                token = create_access_token(token_claims, expires_delta=timedelta(minutes=15))
+                token = create_access_token(token_claims, expires_delta=timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES))
             except Exception as e:
                 logger.error("Failed to create JWT token on login: %s", e)
                 db.rollback()
@@ -775,8 +810,8 @@ def refresh(request: Request):
         # Fetch assigned subject codes
         subject_codes = crud.get_teacher_subjects(db, user_id=user.user_id)
 
-        # Issue replacement 15-minute access JWT
-        exp_dt = now_dt + timedelta(minutes=15)
+        # Issue replacement access JWT with configured TTL
+        exp_dt = now_dt + timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES)
         exp_iso = _format_utc_iso(exp_dt)
         token_claims = {
             "sub": user.user_id,
@@ -785,7 +820,7 @@ def refresh(request: Request):
             "iat": int(now_dt.timestamp()),
             "exp": int(exp_dt.timestamp()),
         }
-        new_access_token = create_access_token(token_claims, expires_delta=timedelta(minutes=15))
+        new_access_token = create_access_token(token_claims, expires_delta=timedelta(minutes=ACCESS_TOKEN_TTL_MINUTES))
 
         # Preserve remember_me cookie lifetime up to original 7-day absolute deadline
         if session_family.remember_me == 1:
@@ -1829,22 +1864,150 @@ def revoke_user_session(
         return {"message": "Session revoked successfully"}
 
 
+_REVOKE_ALL_OTP_STORE: Dict[str, Dict[str, Any]] = {}
+_REVOKE_ALL_OTP_LOCK = threading.Lock()
+
+
+def _mask_email(email: str) -> str:
+    """Mask email for privacy, e.g. 'ad***@rollcall.internal'."""
+    if not email or "@" not in email:
+        return email or "registered email"
+    user_part, domain = email.split("@", 1)
+    if len(user_part) <= 2:
+        masked_user = user_part[0] + "***"
+    else:
+        masked_user = user_part[:2] + "***"
+    return f"{masked_user}@{domain}"
+
+
+@router.post(
+    "/sessions/revoke-all/request-otp",
+    response_model=RevokeAllOtpResponse,
+    summary="Request email verification OTP before revoking all user sessions.",
+    description="Generates a 6-digit confirmation code and delivers it to the user's verified email address.",
+)
+def request_revoke_all_sessions_otp(
+    current_user: AuthenticatedUser = Depends(get_current_user),
+) -> RevokeAllOtpResponse:
+    SessionLocal = get_sync_session_factory()
+    with SessionLocal() as db:
+        user = db.get(User, current_user.user_id)
+        if not user or not user.email:
+            raise HTTPException(
+                status_code=400,
+                detail="No registered email address found for this account to deliver security verification OTP.",
+            )
+
+        # Generate cryptographically secure 6-digit OTP
+        otp_code = f"{secrets.randbelow(1000000):06d}"
+        otp_hash = hashlib.sha256(otp_code.encode("utf-8")).hexdigest()
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=5)
+
+        with _REVOKE_ALL_OTP_LOCK:
+            _REVOKE_ALL_OTP_STORE[current_user.user_id] = {
+                "otp_hash": otp_hash,
+                "expires_at": expires_at,
+                "attempts": 0,
+            }
+
+        # Send email via security provider
+        provider = get_email_provider()
+        masked_email = _mask_email(user.email)
+        subject = "RollCall AI Security: Sign out all devices verification code"
+        body = (
+            f"Hello {user.name or user.user_id},\n\n"
+            f"A request was submitted from your RollCall account ({user.user_id}) to sign out all other active devices.\n\n"
+            f"Your 6-digit security verification code is:\n\n"
+            f"    {otp_code}\n\n"
+            f"This code will expire in 5 minutes.\n\n"
+            f"If you did NOT initiate this action, please change your password immediately as someone may have gained access to your active session.\n"
+        )
+        delivery = provider.send(user.email, subject, body)
+        if not delivery.delivered:
+            logger.info("Dev/Test: OTP for revoke-all sessions on %s is %s", user.user_id, otp_code)
+
+        resp = RevokeAllOtpResponse(
+            message=f"A 6-digit security code has been sent to your email ({masked_email}). Please enter it to confirm signing out all other devices.",
+            email=masked_email,
+            expires_in_seconds=300,
+        )
+        if not _is_production():
+            resp.dev_otp = otp_code
+        return resp
+
+
 @router.post(
     "/sessions/revoke-all",
     summary="Revoke all other user sessions.",
     description="Revoke all sessions for the authenticated user except the currently active one.",
     responses={
         200: {"description": "All other sessions revoked successfully"},
+        400: {"description": "Invalid or expired verification code"},
         401: {"description": "User not authenticated"},
+        403: {"description": "Security verification code required"},
     },
 )
 def revoke_all_other_sessions(
+    payload: Optional[RevokeAllSessionsRequest] = None,
     current_user: AuthenticatedUser = Depends(get_current_user),
 ):
     """Revoke all other sessions for the authenticated user.
 
-    Does not revoke the currently active session (use logout for that).
+    Requires email OTP verification when code is provided or in production.
     """
+    now = datetime.now(timezone.utc)
+    user_id = current_user.user_id
+
+    with _REVOKE_ALL_OTP_LOCK:
+        otp_entry = _REVOKE_ALL_OTP_STORE.get(user_id)
+
+    # If an OTP was submitted in payload
+    if payload and payload.otp and payload.otp.strip():
+        provided_otp = payload.otp.strip()
+        if not otp_entry:
+            raise HTTPException(
+                status_code=400,
+                detail="No verification code was requested or it has expired. Please request a new code.",
+            )
+        if now > otp_entry["expires_at"]:
+            with _REVOKE_ALL_OTP_LOCK:
+                _REVOKE_ALL_OTP_STORE.pop(user_id, None)
+            raise HTTPException(
+                status_code=400,
+                detail="The verification code has expired. Please request a new code.",
+            )
+        if otp_entry["attempts"] >= 3:
+            with _REVOKE_ALL_OTP_LOCK:
+                _REVOKE_ALL_OTP_STORE.pop(user_id, None)
+            raise HTTPException(
+                status_code=400,
+                detail="Too many failed verification attempts. Please request a new code.",
+            )
+
+        expected_hash = otp_entry["otp_hash"]
+        provided_hash = hashlib.sha256(provided_otp.encode("utf-8")).hexdigest()
+        if not hmac.compare_digest(expected_hash, provided_hash):
+            with _REVOKE_ALL_OTP_LOCK:
+                if user_id in _REVOKE_ALL_OTP_STORE:
+                    _REVOKE_ALL_OTP_STORE[user_id]["attempts"] += 1
+            raise HTTPException(status_code=400, detail="Invalid verification code. Please check your email.")
+
+        # Valid OTP: remove consumed code
+        with _REVOKE_ALL_OTP_LOCK:
+            _REVOKE_ALL_OTP_STORE.pop(user_id, None)
+    else:
+        # No OTP supplied
+        if otp_entry and now <= otp_entry["expires_at"]:
+            raise HTTPException(
+                status_code=400,
+                detail="A security verification code was sent to your email. Please enter the code to confirm.",
+            )
+        if _is_production():
+            raise HTTPException(
+                status_code=403,
+                detail="Security verification required. Please request an email verification code first.",
+            )
+
     SessionLocal = get_sync_session_factory()
     with SessionLocal() as db:
         # Revoke all sessions except potentially the current one
@@ -1866,6 +2029,7 @@ def revoke_all_other_sessions(
         db.commit()
 
         return {"message": "All other sessions have been revoked."}
+
 
 
 

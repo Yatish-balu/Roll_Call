@@ -54,3 +54,18 @@ export async function downloadStudentRosterPdf(params: {
     responseType: "blob",
   });
 }
+
+export async function downloadConsolidatedAttendanceSheetPdf(params?: {
+  branch?: string;
+  semester?: string | number;
+  threshold?: number;
+}): Promise<Blob> {
+  const queryParams: Record<string, string | number> = {};
+  if (params?.branch && params.branch !== "ALL") queryParams.branch = params.branch;
+  if (params?.semester && params.semester !== "ALL") queryParams.semester = params.semester;
+  if (params?.threshold) queryParams.threshold = params.threshold;
+
+  return apiClient.get<Blob>("/api/v1/admin/reports/attendance-sheet.pdf", queryParams, {
+    responseType: "blob",
+  });
+}

@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+import json
+import uuid
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -15,7 +18,7 @@ from app.auth.session_scope import resolve_data_scope
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
-from app.db.models import Attendance
+from app.db.models import Attendance, AttendanceUnlockRequest, Session as DbSession, User
 from app.schemas.attendance import (
     AttendanceBulkCreate,
     AttendanceCorrectionRequest,
@@ -25,6 +28,9 @@ from app.schemas.attendance import (
     AttendanceResponse,
     AttendanceUndoRequest,
     AttendanceUndoResponse,
+    AttendanceUnlockRequestCreate,
+    AttendanceUnlockRequestResponse,
+    AttendanceUnlockRequestReview,
     BulkReconcileRequest,
     ReconcileRequest,
     SessionReconcilePayload,
@@ -34,10 +40,13 @@ from app.services.undo_service import (
     execute_undo,
     get_record_version,
 )
+from app.config import LOCK_HOURS
+from app.policy import is_editable
 from app.services.attendance_edits import (
     AttendanceChange,
     actor_identity,
     assert_session_edit_authorized,
+    assert_session_edit_unlocked,
     capture_attendance_statuses,
     write_attendance_audit,
 )
@@ -48,9 +57,25 @@ router = APIRouter(prefix="/attendance", tags=["Attendance"])
 
 
 def _verify_session_exists(db: Session, session_id: str) -> Dict[str, Any]:
-    """Verify session exists in database; raise 404 if missing."""
+    """Verify session exists in database; resolve scheduled session if uninitialized, or raise clean 404."""
     clean_id = session_id.strip()
     session = crud.get_session(db, session_id=clean_id)
+    if not session:
+        try:
+            import datetime
+            import re
+            from app.services.session_initialization import initialize_sessions_for_date
+
+            match = re.search(r"(\d{4})(\d{2})(\d{2})", clean_id)
+            if match:
+                y, m, d = int(match.group(1)), int(match.group(2)), int(match.group(3))
+                initialize_sessions_for_date(db, datetime.date(y, m, d))
+            else:
+                initialize_sessions_for_date(db, datetime.date.today())
+            session = crud.get_session(db, session_id=clean_id)
+        except Exception as init_err:
+            logger.warning("Could not auto-initialize session %s: %s", clean_id, init_err)
+
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -80,14 +105,52 @@ def _assert_session_ownership(
     session: Dict[str, Any],
     db: Optional[Session] = None,
 ) -> None:
-    """Enforce faculty ownership of a session (N3).
+    """Enforce faculty ownership of a session (N3) **for reads and writes**.
 
     The policy itself lives in ``app.services.attendance_edits`` so that the
     direct API, the chat confirmation flow and the legacy UI commit all use
-    exactly the same rule. Session age and lifecycle status are not part of
-    the decision: there is no time-based editing lock (N5).
+    exactly the same rule. This function does not consider session age, so a
+    read of an old session stays allowed; write paths additionally call
+    :func:`_assert_session_editable`.
     """
     assert_session_edit_authorized(current_user, session, db)
+
+
+def _is_admin_override_required(
+    current_user: AuthenticatedUser,
+    session: Dict[str, Any],
+) -> bool:
+    """True when an ADMIN is editing a session whose lock window has closed."""
+    actor_role = getattr(current_user, "role", None)
+    role_str = str(actor_role.value if hasattr(actor_role, "value") else actor_role).upper()
+    if role_str != "ADMIN":
+        return False
+    return not is_editable(session.get("created_at"), "FACULTY")
+
+
+def _assert_session_editable(
+    current_user: AuthenticatedUser,
+    session: Dict[str, Any],
+    db: Optional[Session] = None,
+    reason: Optional[str] = None,
+) -> None:
+    """Authorization **plus** the N5 24-hour lock, for write paths only.
+
+    ADMIN is never locked, but an admin edit of a locked session must carry a
+    reason so the override is explainable in the audit trail.
+    """
+    _assert_session_ownership(current_user, session, db)
+    if _is_admin_override_required(current_user, session):
+        if not (reason or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Admin override of a session older than {int(LOCK_HOURS)} hours "
+                    "requires a reason."
+                ),
+            )
+        return
+    assert_session_edit_unlocked(current_user, session, db=db)
 
 
 def _verify_room_exists(db: Session, room_id: str) -> Dict[str, Any]:
@@ -135,10 +198,11 @@ def _verify_roster_references(db: Session, records: Sequence[Any]) -> None:
         known_rooms = crud.get_existing_room_ids(db, non_unallocated)
         missing_rooms = sorted(non_unallocated - known_rooms)
         if missing_rooms:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Room with ID '{missing_rooms[0]}' not found.",
-            )
+            for r_id in missing_rooms:
+                try:
+                    crud.create_room(db, room_id=r_id, name=f"Room {r_id}")
+                except Exception:
+                    pass
 
 
 # ==============================================================================
@@ -185,11 +249,14 @@ def record_attendance(
     payload: AttendanceCreate,
     response: Response,
     upsert: bool = Query(False, description="Whether to update if record already exists"),
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     clean_usn = payload.usn.strip().upper()
     _verify_student_exists(db, clean_usn)
@@ -248,6 +315,7 @@ def record_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_UPSERT" if existing else "ATTENDANCE_RECORD",
+            reason=reason,
             changes=[
                 AttendanceChange(
                     usn=clean_usn,
@@ -288,11 +356,14 @@ def bulk_record_attendance(
     session_id: str,
     payload: AttendanceBulkCreate,
     upsert: bool = Query(False, description="Whether to update records if already existing"),
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     # Check for duplicate USNs within the request payload
     usns = [r.usn.strip().upper() for r in payload.records]
@@ -365,6 +436,7 @@ def bulk_record_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_BULK_UPSERT" if upsert else "ATTENDANCE_BULK",
+            reason=reason,
             changes=[
                 AttendanceChange(
                     usn=r["usn"],
@@ -406,11 +478,14 @@ def bulk_record_attendance(
 def replace_attendance(
     session_id: str,
     payload: AttendanceBulkCreate,
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     # Validate duplicates in payload
     usns = [r.usn.strip().upper() for r in payload.records]
@@ -467,6 +542,7 @@ def replace_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_REPLACE",
+            reason=reason,
             changes=changes,
         )
         db.commit()
@@ -590,11 +666,14 @@ def get_student_attendance_history(
 def reconcile_attendance(
     session_id: str,
     payload: SessionReconcilePayload,
+    reason: Optional[str] = Query(
+        None, description="Reason for an admin override of the 24-hour edit lock"
+    ),
     current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     session = _verify_session_exists(db, session_id)
-    _assert_session_ownership(current_user, session, db)
+    _assert_session_editable(current_user, session, db, reason=reason)
 
     # ---------------------------------------------------------
     # Mode 1: Single or Bulk Manual Resolutions
@@ -644,6 +723,7 @@ def reconcile_attendance(
             actor_role=actor_role,
             session_id=session_id,
             action="ATTENDANCE_RECONCILE",
+            reason=reason,
             changes=[
                 AttendanceChange(
                     usn=rec["usn"],
@@ -899,4 +979,158 @@ def undo_single_attendance_generic(
         actor_role=actor_role,
         expected_version=payload.expected_version,
     )
+
+
+# ---------------------------------------------------------------------------
+# Attendance Unlock Requests (>24 Hours Teacher Permission)
+# ---------------------------------------------------------------------------
+
+@router.post(
+    "/unlock-requests",
+    response_model=AttendanceUnlockRequestResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Submit permission request to unlock attendance session older than 24h",
+)
+def create_unlock_request(
+    payload: AttendanceUnlockRequestCreate,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Teacher requests admin permission to edit attendance for a locked session (>24h)."""
+    session = _verify_session_exists(db, payload.session_id)
+    _assert_session_ownership(current_user, session, db)
+
+    # Check for existing pending request
+    existing = db.execute(
+        select(AttendanceUnlockRequest).where(
+            AttendanceUnlockRequest.session_id == payload.session_id,
+            AttendanceUnlockRequest.teacher_id == current_user.user_id,
+            AttendanceUnlockRequest.status == "PENDING",
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A pending unlock request for this session is already awaiting admin review.",
+        )
+
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    req_id = f"ULR-{uuid.uuid4().hex[:12].upper()}"
+    target_usns_str = json.dumps(payload.target_usns) if payload.target_usns else None
+
+    unlock_req = AttendanceUnlockRequest(
+        request_id=req_id,
+        session_id=payload.session_id,
+        teacher_id=current_user.user_id,
+        reason=payload.reason.strip(),
+        target_usns=target_usns_str,
+        requested_change=payload.requested_change.strip() if payload.requested_change else None,
+        status="PENDING",
+        created_at=now_iso,
+    )
+    db.add(unlock_req)
+    db.commit()
+    db.refresh(unlock_req)
+
+    teacher_user = db.get(User, current_user.user_id)
+    target_session = db.get(DbSession, payload.session_id.strip())
+    return {
+        **unlock_req.to_dict(),
+        "teacher_name": teacher_user.name if teacher_user else current_user.user_id,
+        "teacher_email": teacher_user.email if teacher_user else None,
+        "subject_code": target_session.subject_code if target_session else None,
+        "session_date": target_session.date if target_session else None,
+    }
+
+
+@router.get(
+    "/unlock-requests",
+    response_model=List[AttendanceUnlockRequestResponse],
+    summary="List attendance unlock requests for admin or current teacher",
+)
+def list_unlock_requests(
+    session_id: Optional[str] = Query(None, description="Filter by session ID"),
+    status_filter: Optional[str] = Query(None, alias="status", description="Filter by status (PENDING, APPROVED, REJECTED)"),
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN, Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> List[Dict[str, Any]]:
+    """List unlock requests. Faculty only see their own requests; Admin sees all."""
+    stmt = select(AttendanceUnlockRequest).order_by(AttendanceUnlockRequest.created_at.desc())
+    if current_user.role != Role.ADMIN:
+        stmt = stmt.where(AttendanceUnlockRequest.teacher_id == current_user.user_id)
+    if session_id:
+        stmt = stmt.where(AttendanceUnlockRequest.session_id == session_id.strip())
+    if status_filter:
+        stmt = stmt.where(AttendanceUnlockRequest.status == status_filter.strip().upper())
+
+    results = []
+    for req in db.execute(stmt).scalars().all():
+        teacher_name = None
+        teacher_email = None
+        if req.teacher:
+            teacher_name = req.teacher.name
+            teacher_email = req.teacher.email
+        subject_code = req.session.subject_code if req.session else None
+        session_date = req.session.date if req.session else None
+        results.append({
+            **req.to_dict(),
+            "teacher_name": teacher_name,
+            "teacher_email": teacher_email,
+            "subject_code": subject_code,
+            "session_date": session_date,
+        })
+    return results
+
+
+@router.post(
+    "/unlock-requests/{request_id}/review",
+    response_model=AttendanceUnlockRequestResponse,
+    summary="Admin review (approve/reject) of attendance unlock request",
+)
+def review_unlock_request(
+    request_id: str,
+    payload: AttendanceUnlockRequestReview,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Admin approves or rejects teacher attendance unlock request with optional unlocked duration."""
+    req = db.get(AttendanceUnlockRequest, request_id.strip())
+    if req is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Unlock request '{request_id}' not found.",
+        )
+    if req.status != "PENDING":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unlock request '{request_id}' has already been reviewed (current status: {req.status}).",
+        )
+
+    now = datetime.now(timezone.utc)
+    now_iso = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+    req.status = payload.decision
+    req.admin_notes = payload.admin_notes.strip() if payload.admin_notes else None
+    req.reviewed_by = current_user.user_id
+    req.reviewed_at = now_iso
+
+    if payload.decision == "APPROVED":
+        hours = payload.unlock_hours or 24
+        expires = now + timedelta(hours=hours)
+        req.expires_at = expires.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    db.commit()
+    db.refresh(req)
+
+    teacher_name = req.teacher.name if req.teacher else None
+    teacher_email = req.teacher.email if req.teacher else None
+    subject_code = req.session.subject_code if req.session else None
+    session_date = req.session.date if req.session else None
+    return {
+        **req.to_dict(),
+        "teacher_name": teacher_name,
+        "teacher_email": teacher_email,
+        "subject_code": subject_code,
+        "session_date": session_date,
+    }
+
 

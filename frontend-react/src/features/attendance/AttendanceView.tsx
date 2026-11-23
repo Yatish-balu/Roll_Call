@@ -9,85 +9,33 @@ import {
   type SessionItem,
 } from "@/services/api/sessions";
 import { fetchStudents } from "@/services/api/students";
+import { fetchRooms, type Room } from "@/services/api/rooms";
 import { useAuth } from "@/hooks/useAuth";
 import {
   fetchSessionAttendance,
   updateSessionAttendance,
   reconcileAttendance,
+  createAttendanceUnlockRequest,
+  fetchAttendanceUnlockRequests,
+  reviewAttendanceUnlockRequest,
   type AttendanceRecord,
   type AttendanceStatus,
+  type AttendanceUnlockRequest,
 } from "@/services/api/attendance";
-import { useResource } from "@/hooks/useResource";
-import { invalidate, mutateCache } from "@/services/api/cache";
-
-const SESSIONS_LIST_KEY = "/api/v1/sessions?limit=50";
-const SESSIONS_ALLOCATIONS_KEY = "/api/v1/sessions/allocations";
 
 export function AttendanceView() {
   const [searchParams] = useSearchParams();
   const querySession = searchParams.get("session") || searchParams.get("sessionId") || "";
   const { session, isAdmin, isFaculty, isViewer, canMarkAttendance } = useAuth();
-
-  const sessionsRes = useResource<{ items?: SessionItem[]; total?: number }>(
-    SESSIONS_LIST_KEY,
-    () => fetchSessions({ limit: 50 })
-  );
-  const allocationsRes = useResource<{ items?: SessionAllocation[]; total?: number }>(
-    SESSIONS_ALLOCATIONS_KEY,
-    () => fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 }))
-  );
-
-  const sessions = useMemo(() => sessionsRes.data?.items ?? [], [sessionsRes.data]);
-  const allocations = useMemo(() => allocationsRes.data?.items ?? [], [allocationsRes.data]);
-  const isLoadingSessions = sessionsRes.isLoading && !sessionsRes.data;
-
+  const [sessions, setSessions] = useState<SessionItem[]>([]);
+  // Real class slots (room / batch / time) of the sessions the caller may see.
+  const [allocations, setAllocations] = useState<SessionAllocation[]>([]);
+  const [availableRooms, setAvailableRooms] = useState<Room[]>([]);
+  const [selectedRoomOverride, setSelectedRoomOverride] = useState<string>("");
   const [selectedSessionId, setSelectedSessionId] = useState<string>(querySession);
-
-  // Auto-select initial session
-  useEffect(() => {
-    if (querySession) {
-      setSelectedSessionId(querySession);
-    } else if (!selectedSessionId && sessions.length > 0) {
-      setSelectedSessionId(sessions[0].session_id);
-    }
-  }, [querySession, selectedSessionId, sessions]);
-
-  const attendanceKey = selectedSessionId
-    ? `/api/v1/attendance/sessions/${selectedSessionId}`
-    : null;
-
-  const attendanceRes = useResource<AttendanceRecord[]>(
-    attendanceKey,
-    () => fetchSessionAttendance(selectedSessionId!)
-  );
-
   const [attendanceRecords, setAttendanceRecords] = useState<AttendanceRecord[]>([]);
-  const [initialAttendanceRecords, setInitialAttendanceRecords] = useState<AttendanceRecord[]>([]);
-
-  useEffect(() => {
-    if (attendanceRes.data) {
-      setAttendanceRecords(attendanceRes.data);
-      setInitialAttendanceRecords(attendanceRes.data);
-    }
-  }, [attendanceRes.data]);
-
-  // Dirty count computation for smart save state
-  const dirtyCount = useMemo(() => {
-    if (initialAttendanceRecords.length === 0 && attendanceRecords.length > 0) {
-      return attendanceRecords.length;
-    }
-    const initialMap = new Map<string, string>();
-    initialAttendanceRecords.forEach((r) => initialMap.set(r.usn, r.status));
-    let changed = 0;
-    attendanceRecords.forEach((r) => {
-      if (initialMap.get(r.usn) !== r.status) {
-        changed++;
-      }
-    });
-    return changed;
-  }, [attendanceRecords, initialAttendanceRecords]);
-
-  const isLoadingAttendance = attendanceRes.isLoading && !attendanceRes.data;
+  const [isLoadingSessions, setIsLoadingSessions] = useState(true);
+  const [isLoadingAttendance, setIsLoadingAttendance] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
@@ -95,6 +43,15 @@ export function AttendanceView() {
   const [reconcileTarget, setReconcileTarget] = useState<AttendanceRecord | null>(null);
   const [reconcileStatus, setReconcileStatus] = useState<AttendanceStatus>("PRESENT");
   const [isReconciling, setIsReconciling] = useState(false);
+
+  // Attendance Unlock Request (>24h edit permission) state
+  const [activeUnlockRequest, setActiveUnlockRequest] = useState<AttendanceUnlockRequest | null>(null);
+  const [pendingAdminRequests, setPendingAdminRequests] = useState<AttendanceUnlockRequest[]>([]);
+  const [isUnlockModalOpen, setIsUnlockModalOpen] = useState(false);
+  const [unlockReason, setUnlockReason] = useState("");
+  const [unlockTargetUsn, setUnlockTargetUsn] = useState("");
+  const [unlockChangeDesc, setUnlockChangeDesc] = useState("Mark Present due to medical / OD leave");
+  const [isSubmittingUnlock, setIsSubmittingUnlock] = useState(false);
 
   // Filter state
   const [searchQuery, setSearchQuery] = useState("");
@@ -123,27 +80,76 @@ export function AttendanceView() {
     return err instanceof Error ? err.message : "Failed to load or update attendance records.";
   };
 
+  // Load available sessions on mount
   useEffect(() => {
-    if (sessionsRes.error) {
+    let isMounted = true;
+    Promise.resolve().then(() => {
+      if (!isMounted) return;
+      Promise.all([
+        fetchSessions({ limit: 50 }),
+        fetchSessionAllocations().catch(() => ({ items: [] as SessionAllocation[], total: 0 })),
+        fetchRooms({ limit: 100 }).catch(() => ({ items: [] as Room[], total: 0, limit: 100, offset: 0 })),
+      ])
+        .then(([res, allocationsRes, roomsRes]) => {
+          if (!isMounted) return;
+          const allItems = res.items || [];
+          setSessions(allItems);
+          setAllocations(allocationsRes.items || []);
+          setAvailableRooms(roomsRes.items || []);
+
+          if (querySession) {
+            setSelectedSessionId(querySession);
+          } else {
+            setSelectedSessionId((prev) => prev || (allItems.length > 0 ? allItems[0].session_id : ""));
+          }
+        })
+        .catch((err: unknown) => {
+          if (!isMounted) return;
+          setStatusMessage({
+            type: "error",
+            text: formatApiError(err),
+          });
+        })
+        .finally(() => {
+          if (isMounted) setIsLoadingSessions(false);
+        });
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [querySession]);
+
+  // Load attendance whenever selected session changes
+  const loadAttendance = useCallback(async (sessionId: string, clearMessage = true) => {
+    if (!sessionId) return;
+    setIsLoadingAttendance(true);
+    // Keep the save confirmation visible: a silent refresh after a successful
+    // save used to wipe the "Saved" banner before the teacher could read it.
+    if (clearMessage) setStatusMessage(null);
+    try {
+      const records = await fetchSessionAttendance(sessionId);
+      setAttendanceRecords(records || []);
+    } catch (err: unknown) {
       setStatusMessage({
         type: "error",
-        text: formatApiError(sessionsRes.error),
+        text: err instanceof Error ? err.message : "Failed to load session roster.",
       });
+    } finally {
+      setIsLoadingAttendance(false);
     }
-  }, [sessionsRes.error]);
+  }, []);
 
   useEffect(() => {
-    if (attendanceRes.error) {
-      setStatusMessage({
-        type: "error",
-        text: formatApiError(attendanceRes.error),
-      });
-    }
-  }, [attendanceRes.error]);
-
-  const _loadAttendance = useCallback(async (_sessionId?: string) => {
-    await attendanceRes.refresh();
-  }, [attendanceRes]);
+    if (!selectedSessionId) return;
+    setSelectedRoomOverride("");
+    let isMounted = true;
+    Promise.resolve().then(() => {
+      if (isMounted) void loadAttendance(selectedSessionId);
+    });
+    return () => {
+      isMounted = false;
+    };
+  }, [selectedSessionId, loadAttendance]);
 
   // Selected session object
   const activeSession = useMemo(() => {
@@ -179,6 +185,127 @@ export function AttendanceView() {
   );
   const sessionSlot = sessionAllocations[0] ?? null;
   const sessionRoom = sessionRooms[0] ?? "";
+  const effectiveRoom = selectedRoomOverride || sessionRoom || "UNALLOCATED";
+
+  const isSessionLocked = useMemo(() => {
+    if (isAdmin) return false;
+    if (!activeSession) return false;
+    if (activeSession.created_at) {
+      const ageHours = (Date.now() - new Date(activeSession.created_at).getTime()) / (1000 * 60 * 60);
+      return ageHours > 24;
+    }
+    if (activeSession.date) {
+      const sessionDate = new Date(`${activeSession.date}T23:59:59Z`);
+      const ageHours = (Date.now() - sessionDate.getTime()) / (1000 * 60 * 60);
+      return ageHours > 24;
+    }
+    return false;
+  }, [activeSession, isAdmin]);
+
+  const isUnlockedByAdmin = useMemo(() => {
+    if (!activeUnlockRequest) return false;
+    if (activeUnlockRequest.status !== "APPROVED") return false;
+    if (!activeUnlockRequest.expires_at) return true;
+    return new Date(activeUnlockRequest.expires_at).getTime() > Date.now();
+  }, [activeUnlockRequest]);
+
+  // Load unlock request for current session
+  const refreshUnlockRequest = useCallback(async () => {
+    if (!selectedSessionId) {
+      setActiveUnlockRequest(null);
+      return;
+    }
+    try {
+      const reqs = await fetchAttendanceUnlockRequests({ session_id: selectedSessionId });
+      if (reqs && reqs.length > 0) {
+        setActiveUnlockRequest(reqs[0]);
+      } else {
+        setActiveUnlockRequest(null);
+      }
+    } catch {
+      setActiveUnlockRequest(null);
+    }
+  }, [selectedSessionId]);
+
+  // Load all pending unlock requests for administrator
+  const loadPendingAdminRequests = useCallback(async () => {
+    if (!isAdmin) {
+      setPendingAdminRequests([]);
+      return;
+    }
+    try {
+      const pending = await fetchAttendanceUnlockRequests({ status: "PENDING" });
+      setPendingAdminRequests(pending || []);
+    } catch {
+      setPendingAdminRequests([]);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    void refreshUnlockRequest();
+    void loadPendingAdminRequests();
+
+    const handleSync = () => {
+      void refreshUnlockRequest();
+      void loadPendingAdminRequests();
+    };
+    window.addEventListener("rollcall-unlock-request-updated", handleSync);
+    return () => {
+      window.removeEventListener("rollcall-unlock-request-updated", handleSync);
+    };
+  }, [refreshUnlockRequest, loadPendingAdminRequests]);
+
+  const handleRequestUnlock = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedSessionId || !unlockReason.trim()) return;
+    setIsSubmittingUnlock(true);
+    try {
+      const req = await createAttendanceUnlockRequest({
+        session_id: selectedSessionId,
+        reason: unlockReason.trim(),
+        target_usns: unlockTargetUsn.trim() ? [unlockTargetUsn.trim().toUpperCase()] : undefined,
+        requested_change: unlockChangeDesc.trim() || undefined,
+      });
+      setActiveUnlockRequest(req);
+      setIsUnlockModalOpen(false);
+      setUnlockReason("");
+      setUnlockTargetUsn("");
+      setStatusMessage({
+        type: "success",
+        text: "Permission request submitted to administrator successfully.",
+      });
+      window.dispatchEvent(new CustomEvent("rollcall-unlock-request-updated"));
+    } catch (err: unknown) {
+      setStatusMessage({
+        type: "error",
+        text: formatApiError(err),
+      });
+    } finally {
+      setIsSubmittingUnlock(false);
+    }
+  };
+
+  const handleReviewRequest = async (requestId: string, decision: "APPROVED" | "REJECTED") => {
+    try {
+      const updated = await reviewAttendanceUnlockRequest(requestId, {
+        decision,
+        unlock_hours: 24,
+      });
+      setActiveUnlockRequest(updated);
+      setStatusMessage({
+        type: "success",
+        text: decision === "APPROVED" ? "Session unlocked for teacher edits (24h)." : "Unlock request rejected.",
+      });
+      window.dispatchEvent(new CustomEvent("rollcall-unlock-request-updated"));
+      window.dispatchEvent(new CustomEvent("rollcall-attendance-updated"));
+      void loadPendingAdminRequests();
+    } catch (err: unknown) {
+      setStatusMessage({
+        type: "error",
+        text: formatApiError(err),
+      });
+    }
+  };
 
   // Attendance counts
   const counts = useMemo(() => {
@@ -212,6 +339,13 @@ export function AttendanceView() {
       });
       return;
     }
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Please request permission from the administrator to make changes.",
+      });
+      return;
+    }
     setAttendanceRecords((prev) =>
       prev.map((rec) => (rec.usn === usn ? { ...rec, status: nextStatus } : rec))
     );
@@ -222,6 +356,13 @@ export function AttendanceView() {
   // Initialize roster from enrolled students
   const handleInitializeRoster = async () => {
     if (!canMarkAttendance || !selectedSessionId || isInitializing) return;
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Request permission from an admin to initialize or edit the roster.",
+      });
+      return;
+    }
     setIsInitializing(true);
     setStatusMessage(null);
     try {
@@ -233,7 +374,7 @@ export function AttendanceView() {
         student_name: s.name,
         branch: s.branch,
         status: "UNREVIEWED",
-        room_id: sessionRoom || "UNALLOCATED",
+        room_id: effectiveRoom,
         source: "manual",
       }));
       setAttendanceRecords(newRecords);
@@ -254,6 +395,13 @@ export function AttendanceView() {
   // Mark all present
   const handleMarkAllPresent = () => {
     if (!canMarkAttendance) return;
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Request permission from an admin to edit marks.",
+      });
+      return;
+    }
     setAttendanceRecords((prev) =>
       prev.map((rec) => ({ ...rec, status: "PRESENT" }))
     );
@@ -266,13 +414,27 @@ export function AttendanceView() {
   // Save changes to backend
   const handleSaveChanges = async () => {
     if (!canMarkAttendance || !selectedSessionId || isSaving) return;
+    if (isSessionLocked && !isUnlockedByAdmin) {
+      setStatusMessage({
+        type: "error",
+        text: "Session is locked (>24h old). Submit an unlock request to the administrator to save changes.",
+      });
+      return;
+    }
+    if (attendanceRecords.length === 0) {
+      setStatusMessage({
+        type: "error",
+        text: "No attendance records to save. Please load or add students to the roster first.",
+      });
+      return;
+    }
     setIsSaving(true);
     setStatusMessage(null);
 
     try {
       const payload = attendanceRecords.map((r) => ({
         usn: r.usn,
-        room_id: r.room_id || sessionRoom || "UNALLOCATED",
+        room_id: (r.room_id && r.room_id !== "UNALLOCATED") ? r.room_id : effectiveRoom,
         status: r.status,
       }));
       const res = await updateSessionAttendance(selectedSessionId, payload);
@@ -280,17 +442,8 @@ export function AttendanceView() {
         type: "success",
         text: res.message || `Successfully synchronized ${payload.length} attendance marks for session '${selectedSessionId}'.`,
       });
-      setInitialAttendanceRecords([...attendanceRecords]);
-      // Update cache immediately and invalidate dependent queries
-      if (attendanceKey) {
-        mutateCache(attendanceKey, attendanceRecords);
-      }
-      invalidate([
-        `/api/v1/attendance/sessions/${selectedSessionId}`,
-        "dashboard",
-        "calendar",
-        "analytics",
-      ]);
+      // Refresh roster directly from backend to ensure authoritative display
+      await loadAttendance(selectedSessionId, false);
       // Let other views (calendar, sessions) know that the attendance changed.
       window.dispatchEvent(
         new CustomEvent("rollcall:attendance-changed", {
@@ -319,19 +472,11 @@ export function AttendanceView() {
         resolved_status: reconcileStatus,
       });
       // Update local state
-      const updated = attendanceRecords.map((r) =>
-        r.usn === reconcileTarget.usn ? { ...r, status: reconcileStatus } : r
+      setAttendanceRecords((prev) =>
+        prev.map((r) =>
+          r.usn === reconcileTarget.usn ? { ...r, status: reconcileStatus } : r
+        )
       );
-      setAttendanceRecords(updated);
-      if (attendanceKey) {
-        mutateCache(attendanceKey, updated);
-      }
-      invalidate([
-        `/api/v1/attendance/sessions/${selectedSessionId}`,
-        "dashboard",
-        "calendar",
-        "analytics",
-      ]);
       setReconcileTarget(null);
       setStatusMessage({
         type: "success",
@@ -401,12 +546,8 @@ export function AttendanceView() {
             </button>
             <button
               onClick={() => void handleSaveChanges()}
-              disabled={attendanceRecords.length === 0 || isSaving || isLoadingAttendance || dirtyCount === 0}
-              className={`inline-flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition-all shadow-2xs ${
-                dirtyCount > 0
-                  ? "bg-[#6C5119] hover:bg-[#594214] text-white cursor-pointer ring-2 ring-[#B6892C]/40"
-                  : "bg-[#EDE8D8] text-[#77735F] border border-[#E4DDCA] cursor-not-allowed opacity-60"
-              }`}
+              disabled={attendanceRecords.length === 0 || isSaving || isLoadingAttendance}
+              className="inline-flex items-center space-x-2 px-4 py-2 rounded-xl text-xs sm:text-sm font-bold bg-[#6C5119] hover:bg-[#594214] text-white shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
             >
               {isSaving ? (
                 <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
@@ -415,7 +556,7 @@ export function AttendanceView() {
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.2} d="M5 13l4 4L19 7" />
                 </svg>
               )}
-              <span>{isSaving ? "Saving..." : dirtyCount > 0 ? `Save Changes (${dirtyCount})` : "Save Changes"}</span>
+              <span>{isSaving ? "Saving..." : "Save Changes"}</span>
             </button>
           </div>
         ) : (
@@ -444,19 +585,19 @@ export function AttendanceView() {
         </div>
       )}
 
-      {/* Compact Session Selection & Metadata Toolbar */}
-      <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-3.5 sm:p-4 shadow-2xs">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+      {/* Session Selection & Allocation Metadata Card */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-5 shadow-2xs space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
           {/* Session Selector */}
-          <div className="flex items-center space-x-2.5 w-full lg:w-auto flex-1 max-w-xl">
-            <span className="text-xs font-bold text-[#77735F] uppercase tracking-wider shrink-0">
-              Session:
-            </span>
+          <div className="w-full lg:w-96">
+            <label className="block text-xs font-bold text-[#77735F] uppercase tracking-wider mb-1.5">
+              Select Attendance Session
+            </label>
             <select
               value={selectedSessionId}
               onChange={(e) => setSelectedSessionId(e.target.value)}
               disabled={isLoadingSessions}
-              className="w-full px-3 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm font-semibold text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm font-semibold text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
             >
               {isLoadingSessions && <option>Loading sessions...</option>}
               {!isLoadingSessions && sessions.length === 0 && (
@@ -471,159 +612,261 @@ export function AttendanceView() {
             </select>
           </div>
 
-          {/* Clean Inline Metadata Pairs */}
+          {/* Allocation Chips */}
           {activeSession && (
-            <div className="flex flex-wrap items-center gap-x-3.5 gap-y-1 text-xs text-[#77735F] lg:border-l lg:border-[#E4DDCA] lg:pl-4">
-              <span className="inline-flex items-center space-x-1 font-bold text-[#24251C]">
-                <span>📚</span>
-                <span>{activeSession.subject}</span>
+            <div className="flex flex-wrap items-center gap-2 text-xs">
+              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#24251C] font-semibold border border-[#E4DDCA]">
+                Subject: {activeSession.subject}
               </span>
-              <span>•</span>
-              <span className="inline-flex items-center space-x-1 font-medium">
-                <span>📅</span>
-                <span>{activeSession.date}</span>
+              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#24251C] font-semibold border border-[#E4DDCA]">
+                Date: {activeSession.date}
               </span>
-              <span>•</span>
-              <span className="inline-flex items-center space-x-1 font-medium">
-                <span>🏛️</span>
-                <span>{sessionRooms.length > 0 ? sessionRooms.join(", ") : "Not allocated"}</span>
-              </span>
-              <span>•</span>
-              <span className="inline-flex items-center space-x-1 font-medium">
-                <span>🕒</span>
-                <span>
-                  {sessionSlot
-                    ? `${sessionSlot.start_time} - ${sessionSlot.end_time}`
-                    : "Not scheduled"}
-                  {sessionBatches.length > 0 ? ` (Batch ${sessionBatches.join(", ")})` : ""}
+              {sessionRooms.length > 0 ? (
+                <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
+                  Room: {sessionRooms.join(", ")}
                 </span>
+              ) : (
+                <div className="inline-flex items-center space-x-1.5 px-3 py-1 rounded-xl bg-[#EDE8D8] text-[#24251C] text-xs font-semibold border border-[#E4DDCA]">
+                  <span className="text-[#77735F] font-medium">Room:</span>
+                  <select
+                    value={selectedRoomOverride || "UNALLOCATED"}
+                    onChange={(e) => {
+                      const newRoom = e.target.value;
+                      setSelectedRoomOverride(newRoom);
+                      setAttendanceRecords((prev) =>
+                        prev.map((rec) => ({ ...rec, room_id: newRoom }))
+                      );
+                    }}
+                    className="bg-transparent font-bold text-[#24251C] focus:outline-none cursor-pointer py-0.5"
+                  >
+                    <option value="UNALLOCATED">Not allocated / General</option>
+                    {availableRooms
+                      .filter((r) => r.room_id !== "UNALLOCATED")
+                      .map((r) => (
+                        <option key={r.room_id} value={r.room_id}>
+                          {r.room_id} ({r.name})
+                        </option>
+                      ))}
+                  </select>
+                </div>
+              )}
+              <span className="px-3 py-1.5 rounded-xl bg-[#EDE8D8] text-[#77735F] font-medium border border-[#E4DDCA]">
+                Time:{" "}
+                {sessionSlot
+                  ? `${sessionSlot.start_time} - ${sessionSlot.end_time}`
+                  : "Not scheduled"}
+                {sessionBatches.length > 0 ? ` (Batch ${sessionBatches.join(", ")})` : ""}
               </span>
             </div>
           )}
         </div>
-      </div>
 
-      {/* Interactive KPI Filter Cards (56px Sleek Stat Cards with active ring) */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-        {/* PRESENT */}
-        <button
-          type="button"
-          onClick={() => setStatusFilter((prev) => (prev === "PRESENT" ? "ALL" : "PRESENT"))}
-          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
-            statusFilter === "PRESENT"
-              ? "bg-[#E8F5E9] border-[#2E7D32] ring-2 ring-[#2E7D32]/30 shadow-xs"
-              : "bg-[#E8F5E9]/60 hover:bg-[#E8F5E9] border-[#C8E6C9]"
-          }`}
-        >
-          <div className="flex items-center space-x-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#2E7D32]" />
-            <span className="text-xs font-bold text-[#2E7D32] uppercase">Present</span>
-          </div>
-          <p className="text-xl font-black text-[#1B5E20]">{counts.present}</p>
-        </button>
-
-        {/* ABSENT */}
-        <button
-          type="button"
-          onClick={() => setStatusFilter((prev) => (prev === "ABSENT" ? "ALL" : "ABSENT"))}
-          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
-            statusFilter === "ABSENT"
-              ? "bg-[#FFEBEE] border-[#C62828] ring-2 ring-[#C62828]/30 shadow-xs"
-              : "bg-[#FFEBEE]/60 hover:bg-[#FFEBEE] border-[#FFCDD2]"
-          }`}
-        >
-          <div className="flex items-center space-x-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#C62828]" />
-            <span className="text-xs font-bold text-[#C62828] uppercase">Absent</span>
-          </div>
-          <p className="text-xl font-black text-[#B71C1C]">{counts.absent}</p>
-        </button>
-
-        {/* PENDING */}
-        <button
-          type="button"
-          onClick={() => setStatusFilter((prev) => (prev === "PENDING" ? "ALL" : "PENDING"))}
-          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
-            statusFilter === "PENDING"
-              ? "bg-[#FFF8E1] border-[#F57F17] ring-2 ring-[#F57F17]/30 shadow-xs"
-              : "bg-[#FFF8E1]/60 hover:bg-[#FFF8E1] border-[#FFE082]"
-          }`}
-        >
-          <div className="flex items-center space-x-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#F57F17]" />
-            <span className="text-xs font-bold text-[#F57F17] uppercase">Pending</span>
-          </div>
-          <p className="text-xl font-black text-[#E65100]">{counts.pending}</p>
-        </button>
-
-        {/* UNREVIEWED */}
-        <button
-          type="button"
-          onClick={() => setStatusFilter((prev) => (prev === "UNREVIEWED" ? "ALL" : "UNREVIEWED"))}
-          className={`h-14 rounded-xl border p-2.5 flex items-center justify-between transition-all cursor-pointer text-left ${
-            statusFilter === "UNREVIEWED"
-              ? "bg-[#EDE8D8] border-[#72785E] ring-2 ring-[#72785E]/30 shadow-xs"
-              : "bg-[#EDE8D8]/60 hover:bg-[#EDE8D8] border-[#DCD5BE]"
-          }`}
-        >
-          <div className="flex items-center space-x-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-[#72785E]" />
-            <span className="text-xs font-bold text-[#72785E] uppercase">Unreviewed</span>
-          </div>
-          <p className="text-xl font-black text-[#3F451F]">{counts.unreviewed}</p>
-        </button>
-      </div>
-
-      {/* Student Roster Table Card with Embedded Search */}
-      <div className="card-crisp bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
-        {/* Card Header Toolbar with Embedded Search */}
-        <div className="p-3.5 sm:p-4 border-b border-[#E4DDCA] bg-[#EDE8D8]/30 flex flex-col sm:flex-row items-center justify-between gap-3">
-          <div className="flex items-center space-x-2 w-full sm:w-auto">
-            <span className="text-xs font-bold text-[#24251C] uppercase tracking-wider">
-              Student Roster
-            </span>
-            <span className="text-xs font-semibold text-[#77735F]">
-              ({filteredRecords.length} of {attendanceRecords.length})
-            </span>
-            {statusFilter !== "ALL" && (
-              <button
-                type="button"
-                onClick={() => setStatusFilter("ALL")}
-                className="ml-2 text-[11px] font-bold text-[#6C5119] hover:underline cursor-pointer"
-              >
-                Clear filter
-              </button>
-            )}
+        {/* 4 Attendance State Quick Counters */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-2">
+          {/* PRESENT */}
+          <div className="bg-[#E8F5E9] border border-[#C8E6C9] rounded-xl p-3 text-center">
+            <span className="text-[11px] font-bold text-[#2E7D32] uppercase">Present</span>
+            <p className="text-xl sm:text-2xl font-black text-[#1B5E20]">{counts.present}</p>
           </div>
 
-          <div className="relative w-full sm:w-80">
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Filter roster by USN or student name..."
-              className="w-full pl-8 pr-3 py-1.5 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm text-[#24251C] placeholder-[#77735F]/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
-            />
-            <svg
-              className="w-4 h-4 text-[#77735F] absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
-            >
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
-            </svg>
+          {/* ABSENT */}
+          <div className="bg-[#FFEBEE] border border-[#FFCDD2] rounded-xl p-3 text-center">
+            <span className="text-[11px] font-bold text-[#C62828] uppercase">Absent</span>
+            <p className="text-xl sm:text-2xl font-black text-[#B71C1C]">{counts.absent}</p>
+          </div>
+
+          {/* PENDING */}
+          <div className="bg-[#FFF8E1] border border-[#FFE082] rounded-xl p-3 text-center">
+            <span className="text-[11px] font-bold text-[#F57F17] uppercase">Pending</span>
+            <p className="text-xl sm:text-2xl font-black text-[#E65100]">{counts.pending}</p>
+          </div>
+
+          {/* UNREVIEWED */}
+          <div className="bg-[#EDE8D8] border border-[#DCD5BE] rounded-xl p-3 text-center">
+            <span className="text-[11px] font-bold text-[#72785E] uppercase">Unreviewed</span>
+            <p className="text-xl sm:text-2xl font-black text-[#3F451F]">{counts.unreviewed}</p>
           </div>
         </div>
 
+        {/* Admin Overview Banner of Pending Unlock Requests Across All Sessions */}
+        {isAdmin && pendingAdminRequests.length > 0 && (
+          <div className="p-3.5 rounded-xl bg-amber-50 border-2 border-amber-300 text-amber-950 flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-2.5">
+              <span className="text-xl">🔔</span>
+              <div>
+                <h4 className="font-bold text-xs sm:text-sm">
+                  {pendingAdminRequests.length} Teacher Edit Permission Request{pendingAdminRequests.length > 1 ? "s" : ""} Pending Review
+                </h4>
+                <p className="text-[11px] text-amber-900/80">
+                  Select a session below to review justification and grant or deny 24-hour temporary edit access.
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {pendingAdminRequests.map((req) => (
+                <button
+                  key={req.request_id}
+                  type="button"
+                  onClick={() => setSelectedSessionId(req.session_id)}
+                  className={`px-3 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    selectedSessionId === req.session_id
+                      ? "bg-amber-700 text-white shadow-xs"
+                      : "bg-white border border-amber-300 text-amber-900 hover:bg-amber-100"
+                  }`}
+                >
+                  Review {req.subject_code || "Session"} ({req.teacher_name || req.teacher_id}) →
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* 24-Hour Edit Lock & Permission Request Banner */}
+        {(isSessionLocked || Boolean(activeUnlockRequest)) && (
+          <div
+            className={`p-4 rounded-xl border flex items-center justify-between gap-4 flex-wrap text-xs ${
+              isUnlockedByAdmin
+                ? "bg-emerald-50 border-emerald-300 text-emerald-950"
+                : activeUnlockRequest?.status === "PENDING"
+                ? "bg-amber-50 border-amber-300 text-amber-950"
+                : activeUnlockRequest?.status === "REJECTED"
+                ? "bg-stone-100 border-stone-300 text-stone-800"
+                : "bg-rose-50 border-rose-300 text-rose-950"
+            }`}
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-xl">
+                {isUnlockedByAdmin
+                  ? "🔓"
+                  : activeUnlockRequest?.status === "PENDING"
+                  ? "⏳"
+                  : activeUnlockRequest?.status === "REJECTED"
+                  ? "❌"
+                  : "🔒"}
+              </span>
+              <div>
+                <h4 className="font-bold text-xs sm:text-sm">
+                  {isAdmin
+                    ? activeUnlockRequest?.status === "PENDING"
+                      ? `Teacher Edit Permission Request · ${activeUnlockRequest.teacher_name || activeUnlockRequest.teacher_id}`
+                      : isUnlockedByAdmin
+                      ? `Teacher Temporary Unlock Active (Expires ${
+                          activeUnlockRequest?.expires_at
+                            ? new Date(activeUnlockRequest.expires_at).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })
+                            : "end of window"
+                        })`
+                      : activeUnlockRequest?.status === "REJECTED"
+                      ? "Teacher Edit Request Declined"
+                      : "Session Older Than 24h"
+                    : isUnlockedByAdmin
+                    ? `Admin Override Active (Unlocked until ${
+                        activeUnlockRequest?.expires_at
+                          ? new Date(activeUnlockRequest.expires_at).toLocaleTimeString([], {
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : "end of window"
+                      })`
+                    : activeUnlockRequest?.status === "PENDING"
+                    ? "Edit Permission Request Pending Admin Review"
+                    : activeUnlockRequest?.status === "REJECTED"
+                    ? "Edit Permission Declined by Admin"
+                    : "Session Locked (>24 Hours Old)"}
+                </h4>
+                <p className="text-xs opacity-90 mt-0.5 max-w-xl">
+                  {isAdmin
+                    ? activeUnlockRequest?.status === "PENDING"
+                      ? `Submitted on ${activeUnlockRequest.created_at.slice(0, 10)}: "${activeUnlockRequest.reason}"${
+                          activeUnlockRequest.target_usns ? ` • Target: ${activeUnlockRequest.target_usns}` : ""
+                        }${activeUnlockRequest.requested_change ? ` • Change: ${activeUnlockRequest.requested_change}` : ""}`
+                      : isUnlockedByAdmin
+                      ? "The teacher currently has active override authorization to edit attendance."
+                      : "Administrative master view."
+                    : isUnlockedByAdmin
+                    ? "You have temporary authorization from the administrator to modify and save attendance records."
+                    : activeUnlockRequest?.status === "PENDING"
+                    ? `Submitted on ${activeUnlockRequest.created_at.slice(0, 10)}: "${activeUnlockRequest.reason}"`
+                    : activeUnlockRequest?.status === "REJECTED"
+                    ? `Administrator declined the request${activeUnlockRequest.admin_notes ? `: "${activeUnlockRequest.admin_notes}"` : "."}`
+                    : "Teacher editing is restricted after 24 hours of class. Submit a permission request to the administrator to unlock changes."}
+                </p>
+              </div>
+            </div>
+
+            {!isAdmin && !isUnlockedByAdmin && activeUnlockRequest?.status !== "PENDING" && (
+              <button
+                type="button"
+                onClick={() => setIsUnlockModalOpen(true)}
+                className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs shadow-xs transition-all cursor-pointer whitespace-nowrap"
+              >
+                📨 Request Permission from Admin
+              </button>
+            )}
+
+            {isAdmin && activeUnlockRequest?.status === "PENDING" && (
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleReviewRequest(activeUnlockRequest.request_id, "APPROVED")}
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs shadow-xs transition-all cursor-pointer"
+                >
+                  ✅ Approve (24h)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleReviewRequest(activeUnlockRequest.request_id, "REJECTED")}
+                  className="px-3.5 py-1.5 rounded-xl bg-rose-700 hover:bg-rose-800 text-white font-bold text-xs shadow-xs transition-all cursor-pointer"
+                >
+                  ❌ Reject
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Filter and Search Bar */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs flex flex-col sm:flex-row items-center justify-between gap-3">
+        <div className="relative w-full sm:w-80">
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Filter roster by USN or student name..."
+            className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs sm:text-sm text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+          />
+        </div>
+
+        <div className="flex items-center space-x-2.5 w-full sm:w-auto">
+          <span className="text-xs font-semibold text-[#77735F]">Status Filter:</span>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-medium text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] cursor-pointer"
+          >
+            <option value="ALL">All States ({attendanceRecords.length})</option>
+            <option value="PRESENT">Present ({counts.present})</option>
+            <option value="ABSENT">Absent ({counts.absent})</option>
+            <option value="PENDING">Pending ({counts.pending})</option>
+            <option value="UNREVIEWED">Unreviewed ({counts.unreviewed})</option>
+          </select>
+        </div>
+      </div>
+
+      {/* Student Roster Table */}
+      <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-left text-xs sm:text-sm">
             <thead>
-              <tr className="border-b border-[#E4DDCA] bg-[#EDE8D8]/50 text-[#77735F] font-semibold">
-                <th className="py-3 pl-4 sm:pl-6">USN</th>
-                <th className="py-3 px-4">Student Name</th>
-                <th className="py-3 px-4">Room Allocation</th>
-                <th className="py-3 px-4">Attendance Status</th>
-                <th className="py-3 pr-4 sm:pr-6 text-right">Action</th>
+              <tr className="border-b border-[#E4DDCA] bg-[#EDE8D8]/40 text-[#77735F] font-semibold">
+                <th className="py-3.5 pl-4 sm:pl-6">USN</th>
+                <th className="py-3.5 px-4">Student Name</th>
+                <th className="py-3.5 px-4">Room Allocation</th>
+                <th className="py-3.5 px-4">Status & Quick Toggle</th>
+                <th className="py-3.5 pr-4 sm:pr-6 text-right">Reconciliation</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[#E4DDCA]/60 text-[#24251C]">
@@ -663,33 +906,29 @@ export function AttendanceView() {
               {!isLoadingAttendance &&
                 filteredRecords.map((rec) => {
                   return (
-                    <tr key={rec.usn} className="group hover:bg-[#EDE8D8]/25 transition-colors">
-                      <td className="py-3 pl-4 sm:pl-6 font-bold text-[#6C5119] [font-variant-numeric:tabular-nums]">
+                    <tr key={rec.usn} className="hover:bg-[#EDE8D8]/20 transition-colors">
+                      <td className="py-3.5 pl-4 sm:pl-6 font-bold text-[#6C5119]">
                         {rec.usn}
                       </td>
-                      <td className="py-3 px-4 font-semibold text-[#24251C]">
+                      <td className="py-3.5 px-4 font-semibold text-[#24251C]">
                         {rec.student_name || rec.usn}
                       </td>
-                      <td className="py-3 px-4 text-xs text-[#77735F]">
+                      <td className="py-3.5 px-4 text-xs font-medium">
                         {rec.room_id && rec.room_id !== "UNALLOCATED" ? (
-                          rec.room_id
+                          <span className="font-mono font-bold text-[#6C5119]">{rec.room_id}</span>
                         ) : (
-                          <span className="text-[#A9AE8C] font-mono">—</span>
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-stone-100 text-stone-600 border border-stone-200">
+                            Not allocated
+                          </span>
                         )}
                       </td>
-                      <td className="py-3 px-4">
+                      <td className="py-3.5 px-4">
                         {canMarkAttendance ? (
-                          /* Clean 3-Option Segmented Control (Present | Absent | Pending) with implicit Unreviewed */
-                          <div className="inline-flex rounded-lg border border-[#E4DDCA] p-0.5 bg-white space-x-0.5 shadow-2xs">
+                          /* 4 State Toggle Pills */
+                          <div className="inline-flex rounded-lg border border-[#E4DDCA] p-0.5 bg-white space-x-0.5">
                             <button
                               type="button"
-                              onClick={() =>
-                                handleStatusChange(
-                                  rec.usn,
-                                  rec.status === "PRESENT" ? "UNREVIEWED" : "PRESENT"
-                                )
-                              }
-                              title={rec.status === "PRESENT" ? "Click to clear (Unreviewed)" : "Mark Present"}
+                              onClick={() => handleStatusChange(rec.usn, "PRESENT")}
                               className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                                 rec.status === "PRESENT"
                                   ? "bg-emerald-600 text-white shadow-2xs"
@@ -700,13 +939,7 @@ export function AttendanceView() {
                             </button>
                             <button
                               type="button"
-                              onClick={() =>
-                                handleStatusChange(
-                                  rec.usn,
-                                  rec.status === "ABSENT" ? "UNREVIEWED" : "ABSENT"
-                                )
-                              }
-                              title={rec.status === "ABSENT" ? "Click to clear (Unreviewed)" : "Mark Absent"}
+                              onClick={() => handleStatusChange(rec.usn, "ABSENT")}
                               className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                                 rec.status === "ABSENT"
                                   ? "bg-rose-600 text-white shadow-2xs"
@@ -717,13 +950,7 @@ export function AttendanceView() {
                             </button>
                             <button
                               type="button"
-                              onClick={() =>
-                                handleStatusChange(
-                                  rec.usn,
-                                  rec.status === "PENDING" ? "UNREVIEWED" : "PENDING"
-                                )
-                              }
-                              title={rec.status === "PENDING" ? "Click to clear (Unreviewed)" : "Mark Pending"}
+                              onClick={() => handleStatusChange(rec.usn, "PENDING")}
                               className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
                                 rec.status === "PENDING"
                                   ? "bg-amber-500 text-white shadow-2xs"
@@ -732,10 +959,21 @@ export function AttendanceView() {
                             >
                               Pending
                             </button>
+                            <button
+                              type="button"
+                              onClick={() => handleStatusChange(rec.usn, "UNREVIEWED")}
+                              className={`px-2.5 py-1 rounded-md text-[11px] font-bold transition-all cursor-pointer ${
+                                rec.status === "UNREVIEWED"
+                                  ? "bg-[#72785E] text-white shadow-2xs"
+                                  : "text-[#77735F] hover:bg-[#EDE8D8]"
+                              }`}
+                            >
+                              Unreviewed
+                            </button>
                           </div>
                         ) : (
                           <span
-                            className={`inline-block px-2.5 py-0.5 rounded-lg text-xs font-bold border ${
+                            className={`inline-block px-3 py-1 rounded-lg text-xs font-bold border ${
                               rec.status === "PRESENT"
                                 ? "bg-emerald-100 text-emerald-800 border-emerald-300"
                                 : rec.status === "ABSENT"
@@ -749,7 +987,7 @@ export function AttendanceView() {
                           </span>
                         )}
                       </td>
-                      <td className="py-3 pr-4 sm:pr-6 text-right">
+                      <td className="py-3.5 pr-4 sm:pr-6 text-right">
                         {canMarkAttendance ? (
                           <button
                             type="button"
@@ -757,10 +995,9 @@ export function AttendanceView() {
                               setReconcileTarget(rec);
                               setReconcileStatus(rec.status);
                             }}
-                            className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs font-semibold text-[#77735F] group-hover:text-[#6C5119] border border-transparent group-hover:border-[#E4DDCA] group-hover:bg-[#EDE8D8]/50 transition-all cursor-pointer"
+                            className="px-3 py-1 rounded-lg text-xs font-semibold bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer"
                           >
-                            <span>Reconcile</span>
-                            <span>→</span>
+                            Audit / Reconcile
                           </button>
                         ) : (
                           <span className="text-[11px] text-[#77735F] font-mono">Read-Only</span>
@@ -834,6 +1071,90 @@ export function AttendanceView() {
                   className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   {isReconciling ? "Reconciling..." : "Confirm Reconciliation"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Attendance Unlock Request Modal (>24h Permission) */}
+      {isUnlockModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-lg w-full p-6 shadow-xl space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-[#E4DDCA]">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">📨</span>
+                <h3 className="text-base font-bold text-[#24251C]">Request Attendance Edit Permission</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsUnlockModalOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            <p className="text-xs text-[#77735F]">
+              Session <span className="font-mono font-bold text-[#24251C]">{selectedSessionId}</span> is older than 24 hours. Submit a formal change request to the administrator with the justification.
+            </p>
+
+            <form onSubmit={handleRequestUnlock} className="space-y-3.5 text-xs sm:text-sm">
+              <div>
+                <label className="block font-bold text-[#24251C] mb-1">
+                  Reason for Modification *
+                </label>
+                <textarea
+                  value={unlockReason}
+                  onChange={(e) => setUnlockReason(e.target.value)}
+                  placeholder="e.g. Medical certificate verified for absent student, late OD duty approval, or optical reconciliation discrepancy"
+                  required
+                  rows={3}
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-[#24251C] mb-1">
+                  Affected Student USN (Optional)
+                </label>
+                <input
+                  type="text"
+                  value={unlockTargetUsn}
+                  onChange={(e) => setUnlockTargetUsn(e.target.value)}
+                  placeholder="e.g. 1DS24CY015"
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] font-mono focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                />
+              </div>
+
+              <div>
+                <label className="block font-bold text-[#24251C] mb-1">
+                  Requested Change / Action
+                </label>
+                <input
+                  type="text"
+                  value={unlockChangeDesc}
+                  onChange={(e) => setUnlockChangeDesc(e.target.value)}
+                  placeholder="e.g. Mark Present due to medical / OD leave"
+                  className="w-full px-3.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                />
+              </div>
+
+              <div className="pt-2 flex justify-end space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setIsUnlockModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-[#EDE8D8] text-[#24251C] hover:bg-[#E4DDCA] font-semibold text-xs transition-colors cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingUnlock || !unlockReason.trim()}
+                  className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  {isSubmittingUnlock ? "Submitting..." : "Send Request to Admin"}
                 </button>
               </div>
             </form>

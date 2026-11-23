@@ -10,6 +10,17 @@ export interface VerifiedSession {
   created_at?: string | null;
   teacher_id?: string | null;
   subject_code?: string | null;
+  is_delegated?: boolean;
+  delegation?: {
+    delegation_id: string;
+    type: string;
+    reason?: string;
+    from_user_id: string;
+    from_name: string;
+    to_user_id: string;
+    to_name: string;
+    is_proxy_for_me: boolean;
+  } | null;
 }
 
 export interface VerifiedSessionPage {

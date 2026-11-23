@@ -18,6 +18,7 @@ from __future__ import annotations
 import io
 import time
 import uuid
+from datetime import datetime, timezone
 import pytest
 from fastapi import HTTPException
 from PIL import Image
@@ -193,13 +194,16 @@ def test_execute_undo_compensating_transaction(db_session):
     stud = Student(usn=u_id, name="Test Alice", branch="CSE")
     db_session.add(stud)
 
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     sess = DbSession(
         session_id=s_id,
-        date="2026-11-14",
+        date=today_iso,
         subject="Computer Networks",
         teacher_id="faculty_cn",
         lifecycle_status="SCHEDULED",
-        created_at="2026-11-14T09:00:00Z",
+        created_at=now_iso,
     )
     db_session.add(sess)
 
@@ -263,13 +267,16 @@ def test_undo_rejected_on_concurrent_edit(db_session):
     stud = Student(usn=u_id, name="Test Bob", branch="CSE")
     db_session.add(stud)
 
+    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    today_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
     sess = DbSession(
         session_id=s_id,
-        date="2026-11-14",
+        date=today_iso,
         subject="Computer Networks",
         teacher_id="faculty_cn",
         lifecycle_status="SCHEDULED",
-        created_at="2026-11-14T09:00:00Z",
+        created_at=now_iso,
     )
     db_session.add(sess)
 

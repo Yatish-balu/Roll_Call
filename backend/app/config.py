@@ -68,7 +68,7 @@ CHAT_CONFIRM_EXPIRY_MINUTES: Final[int] = _env_int("CHAT_CONFIRM_EXPIRY_MINUTES"
 # ---------------------------------------------------------------------------
 # Access token TTL (N2)
 # ---------------------------------------------------------------------------
-ACCESS_TOKEN_TTL_MINUTES: Final[int] = _env_int("ACCESS_TOKEN_TTL_MINUTES", 480)
+ACCESS_TOKEN_TTL_MINUTES: Final[int] = _env_int("ACCESS_TOKEN_TTL_MINUTES", 15)
 
 __all__ = [
     "LOCK_HOURS",

@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.auth import Role, get_current_user, require_roles
 from app.auth.session_scope import resolve_session_scope
@@ -72,12 +72,16 @@ def _entry_to_response(entry: TimetableEntry, db: Session) -> TimetableEntryResp
     if entry.room:
         room_name = entry.room.name
 
-    if entry.batch_id:
+    if entry.batch:
+        batch_label = entry.batch.batch_label
+    elif entry.batch_id:
         batch = db.get(Batch, entry.batch_id)
         if batch is not None:
             batch_label = batch.batch_label
 
-    if entry.faculty_id:
+    if entry.faculty:
+        faculty_name = entry.faculty.email
+    elif entry.faculty_id:
         from app.db.models import User  # local import avoids a circular import
 
         user = db.get(User, entry.faculty_id)
@@ -201,6 +205,10 @@ def get_timetable_week(
         pattern=r"^\d{4}-\d{2}-\d{2}$",
         description="Any date inside the requested week (the Monday is used)",
     ),
+    include_all: bool = Query(
+        False,
+        description="Include all timetable slots for full department view",
+    ),
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
@@ -216,12 +224,29 @@ def get_timetable_week(
 
     entries: List[TimetableEntry] = []
     if timetable_ids:
-        stmt = select(TimetableEntry).where(TimetableEntry.timetable_id.in_(timetable_ids))
-        if current_user.role != Role.ADMIN:
+        stmt = (
+            select(TimetableEntry)
+            .where(TimetableEntry.timetable_id.in_(timetable_ids))
+            .options(
+                selectinload(TimetableEntry.subject),
+                selectinload(TimetableEntry.room),
+                selectinload(TimetableEntry.faculty),
+                selectinload(TimetableEntry.batch),
+            )
+        )
+        if current_user.role != Role.ADMIN and not include_all:
             codes = _mapped_subject_codes(db, current_user)
+            from app.db.models import ClassDelegation, SessionAllocation
+            del_entry_ids = select(SessionAllocation.timetable_entry_id).join(
+                ClassDelegation, ClassDelegation.session_id == SessionAllocation.session_id
+            ).where(
+                ClassDelegation.substitute_faculty_id == current_user.user_id,
+                ClassDelegation.status == "ACTIVE",
+            )
             stmt = stmt.where(
                 (TimetableEntry.faculty_id == current_user.user_id)
                 | (TimetableEntry.subject_code.in_(codes) if codes else TimetableEntry.faculty_id.is_(None))
+                | (TimetableEntry.entry_id.in_(del_entry_ids))
             )
         entries = list(db.execute(stmt).scalars().all())
 
@@ -274,7 +299,15 @@ def list_timetable_entries(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> List[Dict[str, Any]]:
-    stmt = select(TimetableEntry)
+    stmt = (
+        select(TimetableEntry)
+        .options(
+            selectinload(TimetableEntry.subject),
+            selectinload(TimetableEntry.room),
+            selectinload(TimetableEntry.faculty),
+            selectinload(TimetableEntry.batch),
+        )
+    )
     if timetable_id:
         stmt = stmt.where(TimetableEntry.timetable_id == timetable_id)
     if day_of_week:

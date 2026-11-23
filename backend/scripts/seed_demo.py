@@ -15,8 +15,18 @@ Dummy names only. Passwords from .env. Safe to re-run (resets only demo data).
 
 from __future__ import annotations
 
+import os
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Dict
+
+# Ensure backend directory is in sys.path when executed as a direct script
+_BACKEND_DIR = Path(__file__).resolve().parents[1]
+if str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
+
+import bcrypt
 
 from app.db import crud
 from app.db.connection import get_sync_session_factory
@@ -24,6 +34,16 @@ from app.db.connection import get_sync_session_factory
 
 def _utcnow_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _hash_password(plain: str) -> str:
+    """bcrypt-hash a demo password so the seeded users can actually log in."""
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
+
+def _demo_password(user_id: str, default: str) -> str:
+    """Password from the environment, falling back to a documented demo value."""
+    return os.getenv(f"SEED_PASSWORD_{user_id.upper()}", default)
 
 
 def seed_demo_data() -> Dict[str, Any]:
@@ -52,6 +72,10 @@ def seed_demo_data() -> Dict[str, Any]:
         for uid, name, email, role, pw in users:
             existing = db.get(User, uid)
             if existing:
+                # Repair legacy/plaintext seed rows so demo logins keep working.
+                stored = existing.hashed_password or ""
+                if not stored.startswith("$2"):
+                    existing.hashed_password = _hash_password(_demo_password(uid, pw))
                 created_users[uid] = existing
                 continue
             user = User(
@@ -59,13 +83,28 @@ def seed_demo_data() -> Dict[str, Any]:
                 name=name,
                 email=email,
                 role=role,
-                hashed_password=pw,  # In production this would be bcrypt-hashed
+                hashed_password=_hash_password(_demo_password(uid, pw)),
                 is_active=1,
                 created_at=_utcnow_iso(),
             )
             db.add(user)
             db.flush()
             created_users[uid] = user
+
+        # Migration-0002 sentinel owner for sessions that predate ownership.
+        # The demo legacy session references this row.
+        if not db.get(User, "legacy"):
+            db.add(
+                User(
+                    user_id="legacy",
+                    name="Legacy Import",
+                    email="legacy@rollcall.edu",
+                    role="ADMIN",
+                    hashed_password=None,
+                    is_active=0,
+                    created_at=_utcnow_iso(),
+                )
+            )
 
         db.commit()
 
@@ -101,7 +140,7 @@ def seed_demo_data() -> Dict[str, Any]:
         for uid, code in mappings:
             existing = crud.is_teacher_assigned_to_subject(db, user_id=uid, subject_code=code)
             if not existing:
-                db.add(FacultySubject(user_id=uid, subject_code=code, subject_name=code, semester=1, branch="CSE"))
+                db.add(FacultySubject(user_id=uid, subject_code=code, semester=1))
         db.commit()
 
         now = datetime.now(timezone.utc)

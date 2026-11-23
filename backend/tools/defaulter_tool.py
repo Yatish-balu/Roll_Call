@@ -18,7 +18,7 @@ import math
 from datetime import date
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.config import DEFAULTER_THRESHOLD_PERCENT, DEFAULTER_REQUIRED_PERCENT
@@ -91,6 +91,19 @@ def defaulters(
         }
     """
     user_subjects = assigned_subjects or []
+    is_admin = actor_role.upper() == "ADMIN"
+
+    # Non-admins are always scoped to their assigned subject codes. A caller
+    # with no mapping sees nothing rather than the whole institution.
+    if not is_admin and not user_subjects:
+        return {
+            "status": "success",
+            "threshold": threshold,
+            "required_percent": required_percent,
+            "defaulter_count": 0,
+            "total_students": 0,
+            "students": [],
+        }
 
     # Base query: join attendance with sessions for subject scoping
     q = (
@@ -100,7 +113,7 @@ def defaulters(
             Student.branch,
             func.count(Attendance.attendance_id).label("conducted"),
             func.sum(
-                func.case((Attendance.status == "PRESENT", 1), else_=0)
+                case((Attendance.status == "PRESENT", 1), else_=0)
             ).label("attended"),
         )
         .join(Attendance, Attendance.usn == Student.usn)
@@ -109,7 +122,7 @@ def defaulters(
     )
 
     conditions: List[Any] = []
-    if actor_role.upper() == "FACULTY" and user_subjects:
+    if not is_admin:
         conditions.append(DbSession.subject_code.in_(user_subjects))
     if subject_code:
         conditions.append(DbSession.subject_code == subject_code.upper())

@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 import {
@@ -6,15 +6,12 @@ import {
   fetchTimetableReference,
   fetchTimetableWeek,
   updateTimetableEntry,
+  bulkAssignMasterTimetable,
   type TimetableEntry,
   type TimetableReference,
   type TimetableWeek,
+  type MasterTimetableSlotInput,
 } from "@/services/api/timetable";
-import { useResource } from "@/hooks/useResource";
-import { invalidate } from "@/services/api/cache";
-
-const TIMETABLE_WEEK_KEY = "/api/v1/timetable/week";
-const TIMETABLE_REF_KEY = "/api/v1/timetable/reference";
 import {
   ACADEMIC_DAY_END,
   ACADEMIC_DAY_START,
@@ -23,6 +20,8 @@ import {
   todayIso,
   validateAcademicWindow,
 } from "@/lib/schedule";
+import { ExtraClassModal } from "@/features/sessions/components/ExtraClassModal";
+import { DelegateClassModal } from "@/features/sessions/components/DelegateClassModal";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
@@ -30,30 +29,75 @@ export function TimetableView() {
   const { session, canScheduleSessions, isAdmin } = useAuth();
   const today = todayIso();
 
-  const weekRes = useResource<TimetableWeek>(
-    TIMETABLE_WEEK_KEY,
-    () => fetchTimetableWeek()
-  );
-  const refRes = useResource<TimetableReference>(
-    TIMETABLE_REF_KEY,
-    () => fetchTimetableReference()
-  );
-
-  const week = weekRes.data ?? null;
-  const reference = refRes.data ?? null;
-  const isLoading = weekRes.isLoading && !weekRes.data;
-  const error = weekRes.error
-    ? weekRes.error instanceof Error
-      ? weekRes.error.message
-      : "The timetable could not be loaded."
-    : null;
-
+  const [week, setWeek] = useState<TimetableWeek | null>(null);
+  const [reference, setReference] = useState<TimetableReference | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [selectedDay, setSelectedDay] = useState<string>("Monday");
   const [viewType, setViewType] = useState<"day" | "grid">("day");
+  const [viewScope, setViewScope] = useState<"my" | "dept">("my");
+  const [isExtraModalOpen, setIsExtraModalOpen] = useState(false);
+  const [delegatingEntry, setDelegatingEntry] = useState<{
+    sessionId: string;
+    subjectCode: string;
+    subjectName: string;
+    date: string;
+    timeSlot: string;
+  } | null>(null);
 
-  const loadWeek = useCallback(async () => {
-    await weekRes.refresh();
-  }, [weekRes]);
+  // Master Timetable Upload (Admin only)
+  const [isMasterModalOpen, setIsMasterModalOpen] = useState(false);
+  const [masterJsonInput, setMasterJsonInput] = useState("");
+  const [isSubmittingMaster, setIsSubmittingMaster] = useState(false);
+  const [masterMessage, setMasterMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
+
+  const handleLoadSampleTemplate = () => {
+    const sample: MasterTimetableSlotInput[] = [
+      { day: "Monday", start_time: "10:00", end_time: "11:00", subject_code: "CN", room_id: "LH-101", session_type: "THEORY" },
+      { day: "Tuesday", start_time: "11:15", end_time: "12:15", subject_code: "DB-SYS", room_id: "LAB-1", session_type: "LAB" },
+      { day: "Wednesday", start_time: "12:15", end_time: "13:15", subject_code: "AI", room_id: "LH-201", session_type: "THEORY" },
+      { day: "Thursday", start_time: "09:00", end_time: "11:00", subject_code: "CN", room_id: "LAB-1", session_type: "LAB" },
+      { day: "Friday", start_time: "11:15", end_time: "12:15", subject_code: "DB-SYS", room_id: "LH-102", session_type: "THEORY" },
+      { day: "Saturday", start_time: "10:00", end_time: "11:00", subject_code: "AI", room_id: "CDS10-105", session_type: "THEORY" },
+    ];
+    setMasterJsonInput(JSON.stringify(sample, null, 2));
+    setMasterMessage(null);
+  };
+
+  const handleSubmitMasterTimetable = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setMasterMessage(null);
+    let parsedSlots: MasterTimetableSlotInput[] = [];
+    try {
+      parsedSlots = JSON.parse(masterJsonInput);
+      if (!Array.isArray(parsedSlots) || parsedSlots.length === 0) {
+        throw new Error("Input must be a non-empty JSON array of timetable slots.");
+      }
+    } catch (err: unknown) {
+      setMasterMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Invalid JSON format.",
+      });
+      return;
+    }
+
+    setIsSubmittingMaster(true);
+    try {
+      const res = await bulkAssignMasterTimetable(parsedSlots);
+      setMasterMessage({
+        type: "success",
+        text: `Success! Distributed ${res.processed_slots} slot(s) to ${res.teachers_updated?.length || 0} faculty member(s) across subjects [${res.subjects_found?.join(", ")}].`,
+      });
+      void loadWeek();
+    } catch (err: unknown) {
+      setMasterMessage({
+        type: "error",
+        text: err instanceof Error ? err.message : "Failed to assign master timetable slots.",
+      });
+    } finally {
+      setIsSubmittingMaster(false);
+    }
+  };
 
   // Entry editor
   const [isEditorOpen, setIsEditorOpen] = useState(false);
@@ -71,6 +115,28 @@ export function TimetableView() {
   });
   const [formError, setFormError] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+
+  const loadWeek = useCallback(async () => {
+    setIsLoading(true);
+    setError(null);
+    try {
+      const data = await fetchTimetableWeek({
+        include_all: viewScope === "dept" || isAdmin,
+      });
+      setWeek(data);
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "The timetable could not be loaded.");
+    } finally {
+      setIsLoading(false);
+    }
+  }, [viewScope, isAdmin]);
+
+  useEffect(() => {
+    void loadWeek();
+    fetchTimetableReference()
+      .then(setReference)
+      .catch(() => setReference(null));
+  }, [loadWeek]);
 
   const dayEntries = useMemo(() => {
     const day = week?.days.find((entry) => entry.day_of_week === selectedDay);
@@ -178,13 +244,7 @@ export function TimetableView() {
         await createTimetableEntry(payload);
       }
       setIsEditorOpen(false);
-      invalidate([
-        TIMETABLE_WEEK_KEY,
-        TIMETABLE_REF_KEY,
-        "/api/v1/sessions",
-        "calendar",
-        "dashboard",
-      ]);
+      await loadWeek();
       window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : "The class could not be saved.");
@@ -233,14 +293,41 @@ export function TimetableView() {
           </p>
         </div>
 
-        <div className="flex items-center gap-2 self-start sm:self-auto">
+        <div className="flex items-center gap-2 self-start sm:self-auto flex-wrap">
+          {/* My vs Department Switcher */}
+          <div className="inline-flex rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] p-1 shadow-2xs">
+            <button
+              type="button"
+              onClick={() => setViewScope("my")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                viewScope === "my"
+                  ? "bg-[#3F451F] text-[#EDE8D8]"
+                  : "text-[#77735F] hover:text-[#24251C]"
+              }`}
+            >
+              My Classes
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewScope("dept")}
+              className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                viewScope === "dept"
+                  ? "bg-[#3F451F] text-[#EDE8D8]"
+                  : "text-[#77735F] hover:text-[#24251C]"
+              }`}
+            >
+              Department View
+            </button>
+          </div>
+
+          {/* Day vs Grid */}
           <div className="inline-flex rounded-xl border border-[#E4DDCA] bg-[#FBF8F0] p-1 shadow-2xs">
             {(["day", "grid"] as const).map((mode) => (
               <button
                 key={mode}
                 type="button"
                 onClick={() => setViewType(mode)}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
                   viewType === mode
                     ? "bg-[#3F451F] text-[#EDE8D8]"
                     : "text-[#77735F] hover:text-[#24251C]"
@@ -250,23 +337,46 @@ export function TimetableView() {
               </button>
             ))}
           </div>
+
+          <button
+            type="button"
+            onClick={() => setIsExtraModalOpen(true)}
+            className="px-3 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white text-xs font-bold transition-colors cursor-pointer flex items-center space-x-1 shadow-2xs"
+            title="Quickly schedule an extra or makeup class"
+          >
+            <span>➕</span>
+            <span>Extra Class</span>
+          </button>
+
           <button
             type="button"
             onClick={() => void loadWeek()}
-            className="px-3.5 py-2 rounded-xl bg-[#FBF8F0] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
+            className="px-3 py-2 rounded-xl bg-[#FBF8F0] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
           >
             Refresh
           </button>
+
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={() => {
+                setMasterMessage(null);
+                if (!masterJsonInput) handleLoadSampleTemplate();
+                setIsMasterModalOpen(true);
+              }}
+              className="px-3 py-2 rounded-xl bg-[#3F451F] hover:bg-[#323719] text-[#EDE8D8] text-xs font-bold transition-colors cursor-pointer flex items-center space-x-1 shadow-2xs"
+              title="Upload master institutional timetable to automatically distribute to all faculty"
+            >
+              <span>📅</span>
+              <span>Master Timetable</span>
+            </button>
+          )}
           {canScheduleSessions && (
             <button
               type="button"
               onClick={() => openCreate(selectedDay)}
               disabled={!reference || reference.timetables.length === 0}
-              className={`px-3.5 py-2 rounded-xl text-xs font-bold transition-colors ${
-                !reference || reference.timetables.length === 0
-                  ? "bg-[#EDE8D8] text-[#77735F] border border-[#E4DDCA] cursor-not-allowed opacity-70"
-                  : "bg-[#6C5119] text-white hover:bg-[#594214] cursor-pointer shadow-2xs"
-              }`}
+              className="px-3 py-2 rounded-xl bg-[#6C5119] text-white text-xs font-bold hover:bg-[#594214] transition-colors disabled:opacity-50 cursor-pointer"
               title={
                 reference && reference.timetables.length === 0
                   ? "No timetable is configured on the server yet"
@@ -294,44 +404,20 @@ export function TimetableView() {
           <span>Loading the weekly schedule…</span>
         </div>
       ) : !week || !week.has_timetable ? (
-        <div className="card-crisp py-14 px-6 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl flex flex-col items-center justify-center">
-          <div className="w-12 h-12 rounded-full bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA] flex items-center justify-center mb-3">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-            </svg>
-          </div>
-          <p className="text-base font-bold text-[#24251C]">No timetable is configured</p>
-          <p className="text-xs text-[#77735F] mt-1.5 max-w-md mx-auto leading-relaxed">
+        <div className="py-16 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl">
+          <p className="font-bold text-[#24251C]">No timetable is configured</p>
+          <p className="text-xs text-[#77735F] mt-1 max-w-lg mx-auto px-4">
             {week?.message ||
               "The backend has no active timetable for your department yet. Once an administrator publishes a timetable, your weekly schedule appears here."}
           </p>
-          <button
-            type="button"
-            onClick={() => void loadWeek()}
-            className="mt-4 px-4 py-2 rounded-xl bg-[#EDE8D8] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer shadow-2xs"
-          >
-            Refresh Schedule
-          </button>
         </div>
       ) : week.total_entries === 0 ? (
-        <div className="card-crisp py-14 px-6 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl flex flex-col items-center justify-center">
-          <div className="w-12 h-12 rounded-full bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA] flex items-center justify-center mb-3">
-            <svg className="w-6 h-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-            </svg>
-          </div>
-          <p className="text-base font-bold text-[#24251C]">Your timetable has no classes yet</p>
-          <p className="text-xs text-[#77735F] mt-1.5 max-w-md mx-auto leading-relaxed">
+        <div className="py-16 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl">
+          <p className="font-bold text-[#24251C]">Your timetable has no classes yet</p>
+          <p className="text-xs text-[#77735F] mt-1 max-w-lg mx-auto px-4">
             {week.message ||
               "No timetable entries are visible for your account. Add a class slot to publish your teaching schedule."}
           </p>
-          <button
-            type="button"
-            onClick={() => void loadWeek()}
-            className="mt-4 px-4 py-2 rounded-xl bg-[#EDE8D8] border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#E4DDCA] transition-colors cursor-pointer shadow-2xs"
-          >
-            Refresh Schedule
-          </button>
         </div>
       ) : viewType === "day" ? (
         <div className="space-y-5">
@@ -437,18 +523,42 @@ export function TimetableView() {
                         </div>
                       </div>
 
-                      <div className="shrink-0 flex items-center gap-2">
+                      <div className="shrink-0 flex items-center gap-2 flex-wrap">
                         <Link
-                          to="/attendance"
-                          className="px-4 py-2.5 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all shadow-2xs"
+                          to={`/attendance?session=${encodeURIComponent(
+                            `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
+                              entry.period_number
+                            ).padStart(2, "0")}`
+                          )}`}
+                          className="px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all shadow-2xs flex items-center space-x-1"
                         >
-                          Take Attendance
+                          <span>🟢</span>
+                          <span>Attendance</span>
                         </Link>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setDelegatingEntry({
+                              sessionId: `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
+                                entry.period_number
+                              ).padStart(2, "0")}`,
+                              subjectCode: entry.subject_code,
+                              subjectName: entry.subject_name || entry.subject_code,
+                              date: today,
+                              timeSlot: `${entry.start_time} - ${entry.end_time}`,
+                            })
+                          }
+                          className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer flex items-center space-x-1"
+                          title="Delegate this class to a colleague"
+                        >
+                          <span>🤝</span>
+                          <span>Delegate</span>
+                        </button>
                         {canScheduleSessions && (
                           <button
                             type="button"
                             onClick={() => openEdit(entry)}
-                            className="px-3 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
+                            className="px-2.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
                           >
                             Edit
                           </button>
@@ -749,6 +859,111 @@ export function TimetableView() {
                   className="px-4 py-2 rounded-xl bg-[#6C5119] hover:bg-[#594214] text-white font-bold text-xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   {isSaving ? "Saving…" : editingEntry ? "Save changes" : "Add class"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+      {/* Extra Class Modal */}
+      <ExtraClassModal
+        isOpen={isExtraModalOpen}
+        onClose={() => setIsExtraModalOpen(false)}
+        onSuccess={() => void loadWeek()}
+      />
+
+      {/* Class Delegation Modal */}
+      {delegatingEntry && (
+        <DelegateClassModal
+          isOpen={Boolean(delegatingEntry)}
+          onClose={() => setDelegatingEntry(null)}
+          onSuccess={() => void loadWeek()}
+          sessionId={delegatingEntry.sessionId}
+          subjectCode={delegatingEntry.subjectCode}
+          subjectName={delegatingEntry.subjectName}
+          classDate={delegatingEntry.date}
+          timeSlot={delegatingEntry.timeSlot}
+        />
+      )}
+      {/* Master Timetable Ingestion Modal (Admin Only) */}
+      {isMasterModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between pb-3 border-b border-[#E4DDCA]">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-8 h-8 rounded-xl bg-[#3F451F] text-white flex items-center justify-center font-bold text-sm">
+                  📅
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-[#24251C]">Master Institutional Timetable Ingestion</h3>
+                  <p className="text-xs text-[#77735F]">Distribute weekly teaching schedules to all faculty at once</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsMasterModalOpen(false)}
+                className="text-[#77735F] hover:text-[#24251C] text-sm font-bold cursor-pointer"
+              >
+                ✕
+              </button>
+            </div>
+
+            {masterMessage && (
+              <div
+                className={`p-3 rounded-xl text-xs font-semibold ${
+                  masterMessage.type === "success"
+                    ? "bg-emerald-100 border border-emerald-300 text-emerald-900"
+                    : "bg-rose-100 border border-rose-300 text-rose-900"
+                }`}
+              >
+                {masterMessage.text}
+              </div>
+            )}
+
+            <form onSubmit={handleSubmitMasterTimetable} className="space-y-4">
+              <div className="flex items-center justify-between">
+                <label className="block text-xs font-bold text-[#24251C]">
+                  Timetable Slots JSON Array
+                </label>
+                <button
+                  type="button"
+                  onClick={handleLoadSampleTemplate}
+                  className="text-xs font-bold text-[#6C5119] hover:underline cursor-pointer"
+                >
+                  Load Example Template
+                </button>
+              </div>
+
+              <textarea
+                required
+                rows={12}
+                value={masterJsonInput}
+                onChange={(e) => setMasterJsonInput(e.target.value)}
+                placeholder='[&#10;  { "day": "Monday", "start_time": "10:00", "end_time": "11:00", "subject_code": "CN", "room_id": "LH-101", "session_type": "THEORY" }&#10;]'
+                className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[#6C5119]"
+              />
+
+              <div className="bg-[#EDE8D8]/50 p-3 rounded-xl border border-[#E4DDCA] text-xs text-[#77735F] space-y-1">
+                <p className="font-bold text-[#24251C]">💡 How Institutional Propagation Works:</p>
+                <p>
+                  Each slot's <code className="text-[#6C5119] font-bold">subject_code</code> is matched against the institutional Faculty-Subject assignments. Every teacher assigned to that subject automatically receives the slot in their personal timetable grid and today's schedule!
+                </p>
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-3 border-t border-[#E4DDCA]">
+                <button
+                  type="button"
+                  onClick={() => setIsMasterModalOpen(false)}
+                  className="px-4 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:bg-[#EDE8D8]/50 cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingMaster || !masterJsonInput.trim()}
+                  className="px-4 py-2 rounded-xl bg-[#3F451F] text-white text-xs font-bold hover:bg-[#323719] disabled:opacity-50 transition-all shadow-xs cursor-pointer"
+                >
+                  {isSubmittingMaster ? "Distributing Slots..." : "Propagate Master Timetable"}
                 </button>
               </div>
             </form>

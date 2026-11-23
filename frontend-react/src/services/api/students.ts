@@ -6,7 +6,7 @@ export interface Student {
   usn: string;
   name: string;
   branch: string;
-  semester?: number | null;
+  semester?: number | string | null;
   semester_id?: string | null;
   section?: string | null;
   section_id?: string | null;
@@ -15,6 +15,10 @@ export interface Student {
   roll_no?: string | null;
   department_id?: string | null;
   dept_id?: string | null;
+  phone?: string | null;
+  personal_email?: string | null;
+  parent_phone?: string | null;
+  proctor_id?: string | null;
 }
 
 export interface StudentPage {
@@ -92,6 +96,10 @@ export async function createStudent(data: StudentCreateParams): Promise<Student>
   return apiClient.post<Student>("/api/v1/students", data);
 }
 
+export async function bulkCreateStudents(students: StudentCreateParams[]): Promise<{ count: number; message: string }> {
+  return apiClient.post<{ count: number; message: string }>("/api/v1/students/bulk", { students });
+}
+
 export async function fetchStudentAttendanceRecords(usn: string): Promise<RawAttendanceRecord[]> {
   return apiClient.get<RawAttendanceRecord[]>(`/api/v1/attendance/students/${encodeURIComponent(usn)}`);
 }
@@ -162,4 +170,26 @@ export async function fetchStudentAttendanceSummary(usn: string): Promise<Studen
     health_band_label,
     ledger,
   };
+}
+
+export async function updateStudentProfile(
+  usn: string,
+  data: {
+    phone?: string;
+    personal_email?: string;
+    parent_phone?: string;
+    semester?: string;
+  }
+): Promise<Student> {
+  return apiClient.patch<Student>(`/api/v1/admin/students/${encodeURIComponent(usn)}`, data);
+}
+
+export async function assignProctor(
+  studentUsns: string[],
+  proctorUserId: string
+): Promise<{ updated: number; proctor_user_id: string }> {
+  return apiClient.post<{ updated: number; proctor_user_id: string }>(
+    "/api/v1/admin/students/assign-proctor",
+    { student_usns: studentUsns, proctor_user_id: proctorUserId }
+  );
 }

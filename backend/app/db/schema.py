@@ -58,11 +58,18 @@ CREATE INDEX IF NOT EXISTS idx_attendance_allocation ON attendance(allocation_id
 -- record an append-only audit entry for the change it performs.
 CREATE TABLE IF NOT EXISTS users (
     user_id TEXT PRIMARY KEY,
+    name TEXT,
     email TEXT NOT NULL UNIQUE,
     role TEXT NOT NULL,
     hashed_password TEXT,
     is_active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    password_reset_token TEXT,
+    password_reset_token_expires TEXT,
+    mfa_secret TEXT,
+    mfa_enabled INTEGER NOT NULL DEFAULT 0,
+    mfa_recovery_codes TEXT,
+    mfa_last_counter INTEGER
 );
 
 -- Descriptive profile (mirrors migration 0019). One row per user.

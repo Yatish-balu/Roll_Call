@@ -34,6 +34,9 @@ Interactive docs: `http://127.0.0.1:8000/docs`.
 | teacher_ml | FACULTY | teacher_ml_pw | ML subject |
 | teacher_db | FACULTY | teacher_db_pw | DB subject |
 
+Passwords are stored as bcrypt hashes. Override one without editing the
+script with `SEED_PASSWORD_<USER_ID>`, e.g. `SEED_PASSWORD_ADMIN_ROOT=...`.
+
 ## CORS
 
 The backend allows origins from `ALLOWED_ORIGINS` in `.env` (default `http://localhost:5173`).

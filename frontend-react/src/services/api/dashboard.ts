@@ -9,7 +9,7 @@ export interface DashboardData {
   sessions: VerifiedSessionPage | null;
   overallAnalytics: VerifiedSummaryReport | null;
   todayAnalytics: VerifiedSummaryReport | null;
-  teacherMappings: Array<{ teacher_id: string; subject_code: string }> | null;
+  teacherMappings: Array<{ teacher_id?: string; user_id?: string; subject_code: string }> | null;
 }
 
 export async function fetchDashboardData(

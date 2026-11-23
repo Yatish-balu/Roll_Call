@@ -612,6 +612,6 @@ def test_unhandled_exception_returns_clean_500_without_stack_trace(sec_client):
         assert res.status_code == 500
         # No internal stack traces, file paths, or secret phrases leaked
         data = res.json()
-        assert data["error"] == "InternalServerError"
+        assert data["error"]["code"] == "INTERNAL_SERVER_ERROR"
         assert "Simulated unexpected database failure" not in res.text
         assert "Traceback" not in res.text

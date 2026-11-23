@@ -1,5 +1,7 @@
 """Unit tests for Agentic AI Phase 0 Foundation (Provider, Registry, SSE Streaming)."""
 
+from unittest.mock import patch
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -104,8 +106,15 @@ def test_sse_streaming_task_endpoints():
         client = TestClient(app)
         headers = _auth_header("faculty_cn", "FACULTY")
 
-        # 1. Create task
-        res = client.post("/api/v1/agent/tasks", json={"prompt": "Create session for tomorrow"}, headers=headers)
+        # The task creation route runs the orchestrator as a background task.
+        # Tests must never call a live LLM provider, so the orchestration is
+        # stubbed out; this test covers task lifecycle and SSE replay only.
+        with patch(
+            "app.agent.orchestrator.AgentOrchestrator.execute_prompt",
+            return_value=None,
+        ):
+            # 1. Create task
+            res = client.post("/api/v1/agent/tasks", json={"prompt": "Create session for tomorrow"}, headers=headers)
         assert res.status_code == 201, res.text
         data = res.json()
         task_id = data["task_id"]

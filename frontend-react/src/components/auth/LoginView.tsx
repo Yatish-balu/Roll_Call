@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "@/hooks/useAuth";
 
@@ -14,10 +14,17 @@ export function LoginView() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
+  // Auto-expand admin elevation key input if an admin identifier is typed
+  useEffect(() => {
+    if (userId.toLowerCase().includes("admin")) {
+      setShowAdminKey(true);
+    }
+  }, [userId]);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!userId.trim()) {
-      setErrorMessage("Please enter your User ID.");
+      setErrorMessage("Please enter your User ID or email.");
       return;
     }
     setIsSubmitting(true);
@@ -32,9 +39,9 @@ export function LoginView() {
       navigate("/");
     } catch (err: unknown) {
       if (err instanceof Error) {
-        setErrorMessage(`Authentication failed: ${err.message}. Please verify your credentials.`);
+        setErrorMessage(`Authentication failed: ${err.message}. If logging in as Admin, please ensure the Admin Elevation Key is provided.`);
       } else {
-        setErrorMessage("Authentication failed. Invalid credentials or backend service is unreachable.");
+        setErrorMessage("Authentication failed. Invalid credentials. If logging in as Admin, please verify your Admin Elevation Key.");
       }
     } finally {
       setIsSubmitting(false);
@@ -73,14 +80,14 @@ export function LoginView() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label htmlFor="user_id" className="block text-xs font-semibold text-[#24251C] mb-1.5">
-              User ID
+              User ID or Email
             </label>
             <input
               id="user_id"
               type="text"
               value={userId}
               onChange={(e) => setUserId(e.target.value)}
-              placeholder="Enter your User ID"
+              placeholder="Enter User ID or Email"
               required
               className="w-full px-3.5 py-2.5 rounded-xl bg-white border border-[#E4DDCA] text-sm text-[#24251C] placeholder-[#77735F]/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119] transition-all"
             />

@@ -8,6 +8,17 @@ import {
 import { fetchMetaConfig } from "@/services/api/defaulters";
 import type { VerifiedSummaryReport } from "@/types/dashboard";
 
+export interface AcademicEventItem {
+  event_id: string;
+  title: string;
+  event_date: string;
+  end_date?: string | null;
+  event_type: "HOLIDAY" | "CIE" | "EXAM" | "ACADEMIC" | "MILESTONE" | "WORKSHOP";
+  description?: string | null;
+  target_dept?: string | null;
+  created_at?: string;
+}
+
 export interface CalendarDaySummary {
   date: string; // YYYY-MM-DD
   dayNumber: number;
@@ -22,6 +33,7 @@ export interface CalendarDaySummary {
   healthBandLabel: string;
   sessions: SessionItem[];
   allocations: SessionAllocation[];
+  events: AcademicEventItem[];
   /** True for the calendar day of "today" in the browser timezone. */
   isToday: boolean;
 }
@@ -31,6 +43,7 @@ export interface CalendarMonthData {
   month: number; // 0-indexed
   monthName: string;
   days: CalendarDaySummary[];
+  events: AcademicEventItem[];
   totalSessions: number;
 }
 
@@ -41,6 +54,27 @@ const MONTH_NAMES = [
 
 function isoDate(year: number, month: number, day: number): string {
   return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+export async function fetchAcademicEvents(params?: {
+  month?: string;
+  event_type?: string;
+  from_date?: string;
+  to_date?: string;
+}): Promise<{ events: AcademicEventItem[]; total: number }> {
+  const queryParams: Record<string, string | number | boolean | undefined | null> = {};
+  if (params?.month) queryParams.month = params.month;
+  if (params?.event_type) queryParams.event_type = params.event_type;
+  if (params?.from_date) queryParams.from_date = params.from_date;
+  if (params?.to_date) queryParams.to_date = params.to_date;
+  try {
+    return await apiClient.get<{ events: AcademicEventItem[]; total: number }>(
+      "/api/v1/calendar/events",
+      Object.keys(queryParams).length ? queryParams : undefined
+    );
+  } catch {
+    return { events: [], total: 0 };
+  }
 }
 
 export async function fetchDailyAttendanceSummary(date: string): Promise<VerifiedSummaryReport> {
@@ -88,7 +122,9 @@ export async function loadMonthCalendarData(
   const firstDay = isoDate(year, month, 1);
   const lastDay = isoDate(year, month, new Date(year, month + 1, 0).getDate());
 
-  const [sessionsRes, allocationsRes, meta] = await Promise.all([
+  const monthPrefix = `${year}-${String(month + 1).padStart(2, "0")}`;
+
+  const [sessionsRes, allocationsRes, meta, eventsRes] = await Promise.all([
     fetchSessions({ limit: 200, from_date: firstDay, to_date: lastDay }),
     fetchSessionAllocations({ from_date: firstDay, to_date: lastDay }).catch(() => ({
       items: [] as SessionAllocation[],
@@ -97,7 +133,16 @@ export async function loadMonthCalendarData(
     fetchMetaConfig().catch(() => ({
       attendance_bands: { green_above_percent: 85.0, yellow_from_percent: 70.0 },
     })),
+    fetchAcademicEvents({ month: monthPrefix }),
   ]);
+
+  const allEvents = eventsRes?.events || [];
+  const eventMap = new Map<string, AcademicEventItem[]>();
+  for (const ev of allEvents) {
+    const list = eventMap.get(ev.event_date) || [];
+    list.push(ev);
+    eventMap.set(ev.event_date, list);
+  }
 
   let allSessions = sessionsRes.items || [];
   if (subjectFilter && subjectFilter !== "ALL") {
@@ -138,6 +183,7 @@ export async function loadMonthCalendarData(
       (a.subject_code || a.subject || "").localeCompare(b.subject_code || b.subject || "")
     );
     const dayAllocations = allocationMap.get(dateStr) || [];
+    const dayEvents = eventMap.get(dateStr) || [];
 
     if (daySessions.length === 0) {
       days.push({
@@ -153,6 +199,7 @@ export async function loadMonthCalendarData(
         healthBandLabel: "No sessions",
         sessions: [],
         allocations: [],
+        events: dayEvents,
         isToday: dateStr === todayIso,
       });
       continue;
@@ -211,6 +258,7 @@ export async function loadMonthCalendarData(
       healthBandLabel,
       sessions: daySessions,
       allocations: dayAllocations,
+      events: dayEvents,
       isToday: dateStr === todayIso,
     });
   }
@@ -220,6 +268,7 @@ export async function loadMonthCalendarData(
     month,
     monthName: MONTH_NAMES[month],
     days,
+    events: allEvents,
     totalSessions: totalSessionsInMonth,
   };
 }

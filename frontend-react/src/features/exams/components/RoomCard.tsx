@@ -1,123 +1,104 @@
 import React from "react";
-import type { RoomSummary, RoomExamStatus } from "@/services/api/exams";
+import type { RoomSummaryItem, RoomStatus } from "@/services/api/exams";
 
-export interface RoomCardProps {
-  room: RoomSummary;
-  onClick?: (room: RoomSummary) => void;
-  className?: string;
+interface RoomCardProps {
+  room: RoomSummaryItem;
+  examId?: string;
+  onSelect?: (roomNo: string) => void;
+  onDownloadPdf?: (roomNo: string) => void;
+  onAdminOverride?: (roomNo: string) => void;
+  isAdmin?: boolean;
 }
 
-const STATUS_CONFIG: Record<
-  RoomExamStatus,
-  { label: string; badgeClass: string; dotClass: string; progressColor: string }
-> = {
-  SUBMITTED: {
-    label: "SUBMITTED",
-    badgeClass: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-950/50 dark:text-emerald-300 dark:border-emerald-800",
-    dotClass: "bg-emerald-500",
-    progressColor: "bg-emerald-600 dark:bg-emerald-500",
-  },
-  OPEN: {
-    label: "OPEN",
-    badgeClass: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-950/50 dark:text-amber-300 dark:border-amber-800",
-    dotClass: "bg-amber-500 animate-pulse",
-    progressColor: "bg-amber-600 dark:bg-amber-500",
-  },
-  SCHEDULED: {
-    label: "SCHEDULED",
-    badgeClass: "bg-[#EDE8D8] text-[#77735F] border-[#E4DDCA] dark:bg-[#1A1C15] dark:text-[#A9AE8C] dark:border-[#2C3022]",
-    dotClass: "bg-slate-400",
-    progressColor: "bg-[#72785E]",
-  },
-};
+export function RoomCard({
+  room,
+  onSelect,
+  onDownloadPdf,
+  onAdminOverride,
+  isAdmin = false,
+}: RoomCardProps) {
+  const getStatusBadge = (status: RoomStatus) => {
+    switch (status) {
+      case "SUBMITTED":
+        return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">Submitted ✅</span>;
+      case "OPEN":
+        return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Open ⏳</span>;
+      case "LATE_LOCKED":
+        return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-red-100 text-red-800">Late Locked 🔒</span>;
+      case "SCHEDULED":
+      default:
+        return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-gray-100 text-gray-700">Scheduled 🔒</span>;
+    }
+  };
 
-export const RoomCard: React.FC<RoomCardProps> = ({ room, onClick, className = "" }) => {
-  const percentage = room.total > 0 ? Math.round((room.present / room.total) * 100) : 0;
-  const config = STATUS_CONFIG[room.status] || STATUS_CONFIG.SCHEDULED;
+  const pct = room.total_students > 0
+    ? Math.round((room.present_count / room.total_students) * 100)
+    : 0;
 
   return (
-    <div
-      onClick={() => onClick && onClick(room)}
-      className={`bg-[#FBF8F0] dark:bg-[#181913] border border-[#E4DDCA] dark:border-[#2C3022] rounded-2xl p-5 shadow-sm hover:shadow-md transition-all duration-200 ${
-        onClick ? "cursor-pointer hover:border-[#3F451F]/40" : ""
-      } ${className}`}
-    >
-      {/* Top Header: Room Name & Status Badge */}
-      <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="font-mono text-xs font-bold text-[#6C5119] dark:text-[#D2A847] bg-[#EDE8D8] dark:bg-[#2C3117] px-2 py-0.5 rounded-md border border-[#E4DDCA] dark:border-[#2C3022]">
-              {room.room_id}
-            </span>
-            <h3 className="text-base font-bold text-[#24251C] dark:text-[#EDE8D8] truncate">
-              {room.room_name}
-            </h3>
-          </div>
-          {room.invigilator_name && (
-            <p className="text-xs text-[#77735F] dark:text-[#A9AE8C] mt-1 flex items-center gap-1.5 truncate">
-              <svg className="w-3.5 h-3.5 shrink-0 opacity-75" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-              </svg>
-              <span>Invigilator: <strong className="font-semibold text-[#24251C] dark:text-[#EDE8D8]">{room.invigilator_name}</strong></span>
-            </p>
-          )}
-        </div>
-
-        {/* Color-Coded Status Badge */}
-        <span
-          className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[10px] font-black uppercase tracking-wider border shrink-0 ${config.badgeClass}`}
-        >
-          <span className={`w-1.5 h-1.5 rounded-full ${config.dotClass}`} />
-          {config.label}
-        </span>
-      </div>
-
-      {/* Metric Counters: Present / Total & Percentage */}
-      <div className="mt-4 pt-3 border-t border-[#E4DDCA]/60 dark:border-[#2C3022] flex items-baseline justify-between">
+    <div className="bg-white rounded-2xl border border-gray-200/80 p-5 shadow-sm hover:shadow transition-shadow">
+      <div className="flex items-start justify-between mb-3">
         <div>
-          <span className="text-2xl font-black text-[#24251C] dark:text-[#EDE8D8] font-mono">
-            {room.present}
-          </span>
-          <span className="text-sm font-semibold text-[#77735F] dark:text-[#A9AE8C] ml-1">
-            / {room.total} Present
-          </span>
+          <h4 className="text-lg font-bold text-gray-900">{room.room_no}</h4>
+          <p className="text-xs text-gray-500">{room.block_name || "Main Block"}</p>
         </div>
-        <div className="text-right">
-          <span className="text-base font-bold text-[#3F451F] dark:text-[#D2A847]">
-            {percentage}%
-          </span>
-          <p className="text-[10px] uppercase font-bold tracking-wider text-[#77735F] dark:text-[#A9AE8C]">
-            Reported
-          </p>
-        </div>
+        {getStatusBadge(room.status)}
       </div>
 
-      {/* Progress Bar */}
-      <div className="mt-2.5">
-        <div className="h-2 w-full bg-[#EDE8D8] dark:bg-[#2C3117] rounded-full overflow-hidden">
+      <div className="space-y-2 mb-4">
+        <div className="flex justify-between text-xs text-gray-600">
+          <span>Invigilator:</span>
+          <span className="font-medium text-gray-900">{room.invigilator_name || room.invigilator_id || "Unassigned"}</span>
+        </div>
+        <div className="flex justify-between text-xs text-gray-600">
+          <span>Candidates:</span>
+          <span className="font-semibold text-gray-900">{room.present_count} / {room.total_students}</span>
+        </div>
+        {room.absent_count > 0 && (
+          <div className="flex justify-between text-xs text-red-600">
+            <span>Absentees:</span>
+            <span className="font-semibold">{room.absent_count}</span>
+          </div>
+        )}
+
+        <div className="w-full bg-gray-100 rounded-full h-2 mt-2 overflow-hidden">
           <div
-            className={`h-full rounded-full transition-all duration-500 ${config.progressColor}`}
-            style={{ width: `${Math.min(100, Math.max(0, percentage))}%` }}
+            className={`h-2 rounded-full transition-all duration-500 ${
+              room.status === "SUBMITTED" ? "bg-emerald-600" : "bg-[#3F451F]"
+            }`}
+            style={{ width: `${pct}%` }}
           />
         </div>
       </div>
 
-      {/* Footer Details */}
-      <div className="mt-3 flex items-center justify-between text-[11px] text-[#77735F] dark:text-[#A9AE8C]">
-        <span>Absentees: <strong className="text-rose-600 dark:text-rose-400 font-bold">{Math.max(0, room.total - room.present)}</strong></span>
-        {room.status === "SUBMITTED" ? (
-          <span className="text-emerald-700 dark:text-emerald-400 font-semibold flex items-center gap-1">
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-            </svg>
-            Form-B Locked
-          </span>
-        ) : room.status === "OPEN" ? (
-          <span className="text-amber-700 dark:text-amber-400 font-semibold">Active In-Progress</span>
-        ) : (
-          <span>Awaiting Session Start</span>
+      <div className="flex items-center gap-2 pt-2 border-t border-gray-100">
+        {onSelect && (
+          <button
+            onClick={() => onSelect(room.room_no)}
+            className="flex-1 py-1.5 px-3 rounded-xl bg-[#3F451F] text-white text-xs font-medium hover:bg-[#343919] transition-colors"
+          >
+            Form-B Roster
+          </button>
+        )}
+        {onDownloadPdf && (
+          <button
+            onClick={() => onDownloadPdf(room.room_no)}
+            title="Download Printable Blank Form-B Sign Sheet"
+            className="p-1.5 rounded-xl border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
+          >
+            📄 PDF
+          </button>
+        )}
+        {isAdmin && (room.status === "LATE_LOCKED" || room.status === "SUBMITTED") && onAdminOverride && (
+          <button
+            onClick={() => onAdminOverride(room.room_no)}
+            title="Admin Override / Unlock"
+            className="p-1.5 rounded-xl border border-amber-300 text-amber-700 hover:bg-amber-50 text-xs font-medium transition-colors"
+          >
+            🔓 Unlock
+          </button>
         )}
       </div>
     </div>
   );
-};
+}

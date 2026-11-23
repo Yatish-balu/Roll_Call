@@ -1,146 +1,93 @@
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useEffect, useState } from "react";
 
-export interface FormBTimerProps {
-  deadline: Date | string | number;
-  totalDurationSeconds?: number;
+interface FormBTimerProps {
+  cutoffAt?: string;
+  status: "SCHEDULED" | "OPEN" | "SUBMITTED" | "LATE_LOCKED";
   onExpire?: () => void;
-  className?: string;
 }
 
-export const FormBTimer: React.FC<FormBTimerProps> = ({
-  deadline,
-  totalDurationSeconds = 1800, // default 30 mins window
-  onExpire,
-  className = "",
-}) => {
-  const targetTime = useMemo(() => new Date(deadline).getTime(), [deadline]);
-  const [secondsRemaining, setSecondsRemaining] = useState<number>(() => {
-    return Math.max(0, Math.floor((new Date(deadline).getTime() - Date.now()) / 1000));
-  });
-
-  const expiredRef = useRef(false);
+export function FormBTimer({ cutoffAt, status, onExpire }: FormBTimerProps) {
+  const [timeLeft, setTimeLeft] = useState<{
+    minutes: number;
+    seconds: number;
+    isExpired: boolean;
+    percentLeft: number;
+  }>({ minutes: 0, seconds: 0, isExpired: false, percentLeft: 100 });
 
   useEffect(() => {
-    expiredRef.current = false;
+    if (!cutoffAt || status === "SUBMITTED" || status === "LATE_LOCKED") return;
 
-    const tick = () => {
+    const targetTime = new Date(cutoffAt).getTime();
+
+    const interval = setInterval(() => {
       const now = Date.now();
-      const diff = Math.max(0, Math.floor((targetTime - now) / 1000));
-      setSecondsRemaining(diff);
+      const diff = targetTime - now;
 
-      if (diff <= 0 && !expiredRef.current) {
-        expiredRef.current = true;
-        if (onExpire) {
-          onExpire();
-        }
+      if (diff <= 0) {
+        setTimeLeft({ minutes: 0, seconds: 0, isExpired: true, percentLeft: 0 });
+        clearInterval(interval);
+        if (onExpire) onExpire();
+      } else {
+        const minutes = Math.floor(diff / 60000);
+        const seconds = Math.floor((diff % 60000) / 1000);
+        // Assume default cutoff window is 30 mins
+        const totalDuration = 30 * 60 * 1000;
+        const percentLeft = Math.min(100, Math.max(0, (diff / totalDuration) * 100));
+        setTimeLeft({ minutes, seconds, isExpired: false, percentLeft });
       }
-    };
+    }, 1000);
 
-    tick();
-    const interval = setInterval(tick, 1000);
     return () => clearInterval(interval);
-  }, [targetTime, onExpire]);
+  }, [cutoffAt, status, onExpire]);
 
-  const isExpired = secondsRemaining <= 0;
-  // Danger threshold: under 5 minutes (300 seconds)
-  const isNearExpiry = secondsRemaining <= 300 && !isExpired;
+  if (status === "SUBMITTED") {
+    return (
+      <div className="flex items-center gap-2 rounded-xl bg-emerald-50 px-4 py-2.5 text-emerald-800 border border-emerald-200">
+        <svg className="w-5 h-5 text-emerald-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+        </svg>
+        <span className="text-sm font-semibold">Form-B Attendance Submitted & Locked</span>
+      </div>
+    );
+  }
 
-  // Calculate remaining progress %
-  const progressPercent = Math.min(
-    100,
-    Math.max(0, (secondsRemaining / totalDurationSeconds) * 100)
-  );
+  if (status === "LATE_LOCKED" || timeLeft.isExpired) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl bg-red-50 px-4 py-2.5 text-red-800 border border-red-200">
+        <svg className="w-5 h-5 text-red-600 shrink-0" fill="currentColor" viewBox="0 0 20 20">
+          <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+        </svg>
+        <span className="text-sm font-semibold">Form-B Cutoff Window Expired (Late-Locked)</span>
+      </div>
+    );
+  }
 
-  // Minutes and seconds formatting
-  const minutes = Math.floor(secondsRemaining / 60);
-  const seconds = secondsRemaining % 60;
-  const timeFormatted = `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+  const isUrgent = timeLeft.minutes < 5;
 
   return (
-    <div
-      className={`rounded-2xl p-4 border transition-all duration-300 ${
-        isExpired
-          ? "bg-rose-50 border-rose-300 dark:bg-rose-950/30 dark:border-rose-800 text-rose-900 dark:text-rose-200"
-          : isNearExpiry
-          ? "bg-red-50/90 border-red-300 dark:bg-red-950/40 dark:border-red-800 text-red-900 dark:text-red-200 shadow-sm animate-pulse"
-          : "bg-[#FBF8F0] border-[#E4DDCA] dark:bg-[#181913] dark:border-[#2C3022] text-[#24251C] dark:text-[#EDE8D8]"
-      } ${className}`}
-    >
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2.5">
-          <span
-            className={`w-3 h-3 rounded-full shrink-0 ${
-              isExpired
-                ? "bg-rose-600"
-                : isNearExpiry
-                ? "bg-red-500 animate-ping"
-                : "bg-amber-500"
-            }`}
-          />
-          <div>
-            <span className="text-[11px] font-black uppercase tracking-[0.14em] text-[#77735F] dark:text-[#A9AE8C] block">
-              Form-B Submission Window
-            </span>
-            <p className="text-sm sm:text-base font-extrabold tracking-tight font-mono">
-              {isExpired ? (
-                <span className="text-rose-700 dark:text-rose-400">
-                  FORM-B CLOSED (DEADLINE PASSED)
-                </span>
-              ) : (
-                <span
-                  className={
-                    isNearExpiry
-                      ? "text-red-600 dark:text-red-400 font-black text-lg"
-                      : "text-[#3F451F] dark:text-[#D2A847]"
-                  }
-                >
-                  FORM-B CLOSES IN: <strong className="underline underline-offset-2">{timeFormatted}</strong>
-                </span>
-              )}
-            </p>
-          </div>
-        </div>
-
-        {/* Progress pill indicator */}
-        <div className="text-right">
-          <span
-            className={`text-xs font-mono font-bold px-2 py-0.5 rounded-md border ${
-              isExpired
-                ? "bg-rose-100 border-rose-300 text-rose-800"
-                : isNearExpiry
-                ? "bg-red-100 border-red-300 text-red-800"
-                : "bg-[#EDE8D8] border-[#E4DDCA] text-[#6C5119] dark:bg-[#2C3117] dark:border-[#2C3022] dark:text-[#D2A847]"
-            }`}
-          >
-            {isExpired ? "0% TIME REMAINING" : `${Math.round(progressPercent)}% TIME LEFT`}
+    <div className={`rounded-xl border p-4 ${isUrgent ? "bg-amber-50 border-amber-300" : "bg-[#FBF8F0] border-[#3F451F]/15"}`}>
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <span className="text-lg">⏱️</span>
+          <span className="text-xs font-bold uppercase tracking-wider text-[#3F451F]/70">
+            Form-B Submission Window
           </span>
         </div>
+        <span className={`text-base font-mono font-bold ${isUrgent ? "text-amber-800" : "text-[#3F451F]"}`}>
+          {String(timeLeft.minutes).padStart(2, "0")}:{String(timeLeft.seconds).padStart(2, "0")} remaining
+        </span>
       </div>
-
-      {/* Progress Bar: turns red near expiry */}
-      <div className="mt-3">
-        <div className="h-2.5 w-full bg-[#EDE8D8] dark:bg-[#2C3117] rounded-full overflow-hidden">
-          <div
-            className={`h-full rounded-full transition-all duration-1000 ${
-              isExpired
-                ? "bg-rose-600"
-                : isNearExpiry
-                ? "bg-red-600"
-                : "bg-[#3F451F] dark:bg-[#D2A847]"
-            }`}
-            style={{ width: `${isExpired ? 0 : progressPercent}%` }}
-          />
-        </div>
+      <div className="w-full bg-[#EDE8D8] rounded-full h-2 overflow-hidden">
+        <div
+          className={`h-2 rounded-full transition-all duration-1000 ${
+            isUrgent ? "bg-amber-500" : "bg-[#3F451F]"
+          }`}
+          style={{ width: `${timeLeft.percentLeft}%` }}
+        />
       </div>
-
-      {isNearExpiry && (
-        <p className="text-[11px] font-bold text-red-700 dark:text-red-400 mt-2 flex items-center gap-1.5">
-          <svg className="w-4 h-4 shrink-0 text-red-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-          </svg>
-          Warning: Less than 5 minutes remaining to submit room absentee list!
-        </p>
-      )}
+      <p className="text-[11px] text-gray-500 mt-1.5">
+        Form-B must be submitted within cutoff time. After cutoff, room automatically locks.
+      </p>
     </div>
   );
-};
+}

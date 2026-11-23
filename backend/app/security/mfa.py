@@ -27,6 +27,19 @@ import struct
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional, Sequence, Tuple
+from pathlib import Path
+
+try:
+    from dotenv import load_dotenv
+
+    _repo_root = Path(__file__).resolve().parents[3]
+    _env_file = _repo_root / ".env"
+    if _env_file.exists():
+        load_dotenv(dotenv_path=_env_file)
+    else:
+        load_dotenv()
+except ImportError:
+    pass
 
 logger = logging.getLogger("rollcall.security.mfa")
 

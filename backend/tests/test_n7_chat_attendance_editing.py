@@ -108,6 +108,9 @@ def api(monkeypatch):
             )
         )
         db.add(Room(room_id="LH-101", name="Lecture Hall 101"))
+        # Sessions must be inside the N5 24-hour edit window for these
+        # authorization tests to exercise the propose/confirm paths.
+        fresh_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         for usn, name in (
             ("1MS21CS001", "Alice Smith"),
             ("1MS21CS002", "Bob Jones"),
@@ -122,7 +125,7 @@ def api(monkeypatch):
                 session_id="SESS-OWNED",
                 date="2020-01-01",
                 subject="Distributed Systems",
-                created_at="2020-01-01T09:00:00Z",
+                created_at=fresh_ts,
                 teacher_id="faculty_ds",
                 subject_code="DIST-SYS",
                 lifecycle_status="COMPLETED",
@@ -134,7 +137,7 @@ def api(monkeypatch):
                 session_id="SESS-LEGACY-ML",
                 date="2020-02-02",
                 subject="Machine Learning",
-                created_at="2020-02-02T09:00:00Z",
+                created_at=fresh_ts,
                 teacher_id="legacy",
                 subject_code="ML",
             )
@@ -145,7 +148,7 @@ def api(monkeypatch):
                 session_id="SESS-COORD",
                 date="2020-03-03",
                 subject="Computer Networks",
-                created_at="2020-03-03T09:00:00Z",
+                created_at=fresh_ts,
                 teacher_id=None,
                 subject_code=None,
                 coordinator_faculty_id="faculty_coord",
@@ -157,7 +160,7 @@ def api(monkeypatch):
                 session_id="SESS-FOREIGN",
                 date="2020-04-04",
                 subject="Machine Learning Lab",
-                created_at="2020-04-04T09:00:00Z",
+                created_at=fresh_ts,
                 teacher_id="faculty_ml",
                 subject_code="ML",
             )
