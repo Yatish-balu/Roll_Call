@@ -83,6 +83,16 @@ async def lifespan(app: FastAPI):
     from app.db.connection import verify_database_connectivity, get_sync_session_factory
     verify_database_connectivity()
 
+    # Warn if the Gemini API key is the development placeholder in production.
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    env = os.getenv("APP_ENV", "development").strip().lower()
+    if env == "production" and (not gemini_key or gemini_key.startswith("your_")):
+        logger.warning(
+            "Production environment detected but GEMINI_API_KEY is not set "
+            "(or uses the placeholder 'your_'). Please inject the key via a "
+            "secret‑manager or .env and restart the service."
+        )
+
     try:
         from app.routers.profile import _ensure_profile_table
         from app.routers.admin import _ensure_permission_requests_table

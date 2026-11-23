@@ -47,6 +47,7 @@ class LimitScope(str, Enum):
     MFA_VERIFY = "mfa_verify"
     UPLOAD = "upload"
     API = "api"
+    MODEL_DISCOVERY = "model_discovery"
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,9 @@ DEFAULT_POLICIES: Dict[LimitScope, LimitPolicy] = {
     LimitScope.MFA_VERIFY: LimitPolicy(limit=5, window_seconds=300, lockout_seconds=900, base_delay_seconds=0.0),
     LimitScope.UPLOAD: LimitPolicy(limit=20, window_seconds=600, lockout_seconds=300, base_delay_seconds=0.0),
     LimitScope.API: LimitPolicy(limit=120, window_seconds=60, lockout_seconds=0, base_delay_seconds=0.0),
+    # Model discovery endpoint: OpenAI‑compatible list, no auth required but
+    # we still want a per‑IP cap to prevent automated enumeration / cost‑probing.
+    LimitScope.MODEL_DISCOVERY: LimitPolicy(limit=60, window_seconds=60, lockout_seconds=0, base_delay_seconds=0.0),
 }
 
 
