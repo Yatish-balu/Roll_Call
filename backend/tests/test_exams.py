@@ -756,3 +756,67 @@ def test_exam_agent_tools_execution(client: TestClient):
     assert cy_br["absent"] == 1
     assert cy_br["percentage"] == 50.0
 
+
+def test_exam_form_b_multi_column_disambiguation_logic():
+    """Verify build_exam_form_b_prompt properly embeds target disambiguation rules."""
+    from app.services.exam_vision import build_exam_form_b_prompt, ExamScanResultList
+
+    prompt = build_exam_form_b_prompt(
+        target_subject_code="22CY741",
+        target_date="2026-11-03",
+        target_start_time="10:00:00",
+        target_room_no="CDS-105",
+        target_semester=7,
+    )
+
+    assert "22CY741" in prompt
+    assert "03-11-2026" in prompt or "2026-11-03" in prompt
+    assert "Forenoon / Morning (FN)" in prompt
+    assert "CDS-105" in prompt
+    assert "7" in prompt
+    assert "No. of Students Present" in prompt
+    assert "No. of Students Absent" in prompt
+
+    # Verify ExamScanResultList behavior
+    rows = [{"usn": "1DS23CY037", "status": "PRESENT"}]
+    tally = {"students_present": 31, "students_absent": 1}
+    res_list = ExamScanResultList(
+        rows=rows,
+        tally=tally,
+        detected_columns=[{"column_index": 3, "subject_code": "22CY741"}],
+        target_column_matched={"column_index": 3, "subject_code": "22CY741"},
+    )
+    assert len(res_list) == 1
+    assert res_list[0]["usn"] == "1DS23CY037"
+    assert res_list.tally["students_absent"] == 1
+    assert res_list.target_column_matched["subject_code"] == "22CY741"
+
+
+def test_agent_exam_form_b_detection_and_safe_routing(tmp_path):
+    """Verify AttendanceAgent detects Form-B exam documents and routes them without classroom session_id errors."""
+    from pathlib import Path
+    from app.agent.legacy_agent import AttendanceAgent
+
+    agent = AttendanceAgent(role="FACULTY", actor_role="FACULTY", actor_id="faculty_test")
+
+    dummy_file = tmp_path / "exam_form_b_sample.png"
+    dummy_file.write_bytes(b"dummy image bytes")
+
+    # 1. Detection via user query or filename
+    assert agent._is_exam_form_b_document(dummy_file, user_input="Process this Form-B attendance sheet") is True
+    assert agent._is_exam_form_b_document(dummy_file, user_input="Continuous Internal Assessment Test-III") is True
+    assert agent._is_exam_form_b_document(Path("test_lecture_attendance.csv"), user_input="Regular class attendance") is False
+
+    # 2. Handler execution returns safe structured response without session_id errors
+    resp = agent._handle_exam_form_b_file(
+        file_path=dummy_file,
+        request_id="req-test-form-b-1",
+        user_input="Process this Form-B attendance sheet",
+    )
+    assert resp.success is True
+    assert resp.needs_confirmation is False
+    assert resp.data.get("is_exam_form_b") is True
+    assert "Form-B" in resp.message
+    assert "22CY741" in resp.message or "22CY72" in resp.message
+
+

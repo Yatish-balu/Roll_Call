@@ -1117,6 +1117,24 @@ export function AssistantView() {
               : m
           )
         );
+        if (!card.sessionId || !card.sessionId.trim()) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === msgId && m.confirmationCard
+                ? {
+                    ...m,
+                    confirmationCard: {
+                      ...m.confirmationCard,
+                      status: "rejected",
+                      responseMessage: "Attendance proposal dismissed.",
+                    },
+                  }
+                : m
+            )
+          );
+          return;
+        }
+
         try {
           const res = await confirmAgentRecords({
             session_id: card.sessionId,
@@ -1263,6 +1281,25 @@ export function AssistantView() {
       }
 
       // Legacy OCR file confirmation path
+      if (!card.sessionId || !card.sessionId.trim()) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msgId && m.confirmationCard
+              ? {
+                  ...m,
+                  confirmationCard: {
+                    ...m.confirmationCard,
+                    status: "error",
+                    responseMessage:
+                      "A lecture session ID is required to commit classroom attendance. If this is an exam sheet, please open the Exam Form-B module (/exams).",
+                  },
+                }
+              : m
+          )
+        );
+        return;
+      }
+
       try {
         const res = await confirmAgentRecords({
           session_id: card.sessionId,

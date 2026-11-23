@@ -681,12 +681,39 @@ async def scan_form_b_photo(
         except OSError:
             pass
 
-    extracted_rows = scan_form_b_image(contents)
+    # Disambiguate multi-exam Form-B column using subject code, exam date, start time, and room
+    exam_obj = assignment.exam
+    try:
+        import inspect
+        sig = inspect.signature(scan_form_b_image)
+        has_kwargs = any(
+            p.kind in (inspect.Parameter.VAR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            or p.name == "target_subject_code"
+            for p in sig.parameters.values()
+        )
+        if has_kwargs:
+            extracted_rows = scan_form_b_image(
+                contents,
+                target_subject_code=getattr(exam_obj, "subject_code", None),
+                target_date=getattr(exam_obj, "date", None),
+                target_start_time=getattr(exam_obj, "start_time", None),
+                target_room_no=room_no,
+                target_semester=getattr(exam_obj, "semester", None),
+            )
+        else:
+            extracted_rows = scan_form_b_image(contents)
+    except Exception as scan_err:
+        logger.warning("Targeted scan_form_b_image call failed, falling back to default: %s", scan_err)
+        extracted_rows = scan_form_b_image(contents)
+
     if not extracted_rows:
         return {
             "message": "AI vision could not identify students automatically or API key missing. Please mark manually.",
             "matched_count": 0,
             "extracted_rows": [],
+            "tally": {},
+            "detected_columns": [],
+            "target_column_matched": {},
         }
 
     now_iso = _utcnow_iso()
@@ -723,15 +750,24 @@ async def scan_form_b_photo(
             "room_no": room_no.strip().upper(),
             "matched_count": matched_count,
             "room_status": assignment.status,
+            "subject_code": getattr(exam_obj, "subject_code", None),
         },
     )
 
     db.commit()
 
+    tally = getattr(extracted_rows, "tally", None) or {}
+    detected_cols = getattr(extracted_rows, "detected_columns", None) or []
+    target_matched = getattr(extracted_rows, "target_column_matched", None) or {}
+    subject_label = f" for subject '{exam_obj.subject_code}'" if getattr(exam_obj, "subject_code", None) else ""
+
     return {
-        "message": f"AI Scan completed. Matched and updated {matched_count} students.",
+        "message": f"AI Scan completed{subject_label}. Matched and updated {matched_count} students.",
         "matched_count": matched_count,
         "extracted_rows": extracted_rows,
+        "tally": tally,
+        "detected_columns": detected_cols,
+        "target_column_matched": target_matched,
     }
 
 
