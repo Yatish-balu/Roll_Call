@@ -98,6 +98,14 @@ def get_seed_configuration() -> List[Dict[str, Optional[str]]]:
             "role": "FACULTY",
             "subjects": ["CN"],
         },
+        {
+            "user_id": os.getenv("SEED_FACULTY_AI_USER_ID", "faculty_ai"),
+            "name": os.getenv("SEED_FACULTY_AI_NAME", "Faculty AI"),
+            "email": os.getenv("SEED_FACULTY_AI_EMAIL", "1ds24cy035@dsce.edu.in"),
+            "password": os.getenv("SEED_FACULTY_AI_PASSWORD", "FacultyPass_AI_2026 !"),
+            "role": "FACULTY",
+            "subjects": ["AI", "ACS", "ECS"],
+        },
     ]
 
 

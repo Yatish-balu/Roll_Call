@@ -16,6 +16,7 @@ import { SettingsView } from "@/features/settings";
 import { MyProfileView } from "@/features/settings/MyProfileView";
 import { DefaultersView } from "@/features/defaulters";
 import { CalendarView } from "@/features/calendar";
+import { ExamControlView, InvigilatorFormBView } from "@/features/exams";
 
 export function App() {
   return (
@@ -106,6 +107,26 @@ export function App() {
               <AppShell title="Rooms & Facilities">
                 <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Rooms & Facilities Management">
                   <RoomsView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/exams"
+            element={
+              <AppShell title="Exam Cell">
+                <ProtectedRoute allowedRoles={["ADMIN"]} pageTitle="Exam Cell Administration">
+                  <ExamControlView />
+                </ProtectedRoute>
+              </AppShell>
+            }
+          />
+          <Route
+            path="/invigilation"
+            element={
+              <AppShell title="My Invigilation">
+                <ProtectedRoute allowedRoles={["FACULTY", "ADMIN"]} pageTitle="Invigilator Form-B">
+                  <InvigilatorFormBView />
                 </ProtectedRoute>
               </AppShell>
             }

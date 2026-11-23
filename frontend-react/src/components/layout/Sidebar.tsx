@@ -97,6 +97,16 @@ const ICONS = {
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9 12h6m-6 4h6m-9 4h6m-6-4h6m-6-5h6a2 2 0 012-2v-2a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
     </svg>
   ),
+  exam: (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+    </svg>
+  ),
+  invigilation: (
+    <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-3 7h3m-3 4h3m-6-4h.01M9 16h.01" />
+    </svg>
+  ),
   logout: (
     <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
@@ -128,7 +138,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   const navigate = useNavigate();
   const pathname = location.pathname;
   const { isOnline } = useBackendHealth();
-  const { logout, session, isAdmin } = useAuth();
+  const { logout, session, isAdmin, isFaculty } = useAuth();
   const [collapsed, setCollapsed] = usePreference("sidebarCollapsed");
 
   const isLinkActive = useCallback(
@@ -140,15 +150,26 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
   );
 
   const groups = useMemo<NavGroup[]>(() => {
+    const coreItems: NavItem[] = [
+      { name: "Dashboard", href: "/", icon: ICONS.home },
+      { name: "Attendance", href: "/attendance", icon: ICONS.attendance },
+      { name: "Timetable", href: "/timetable", icon: ICONS.timetable },
+      { name: "Sessions", href: "/sessions", icon: ICONS.sessions },
+      { name: "Students", href: "/students", icon: ICONS.students },
+    ];
+
+    if (isFaculty || isAdmin) {
+      coreItems.push({
+        name: "My Invigilation",
+        href: "/invigilation",
+        icon: ICONS.invigilation,
+        badge: "Exam",
+      });
+    }
+
     const core: NavGroup = {
       label: "Core Teaching",
-      items: [
-        { name: "Dashboard", href: "/", icon: ICONS.home },
-        { name: "Attendance", href: "/attendance", icon: ICONS.attendance },
-        { name: "Timetable", href: "/timetable", icon: ICONS.timetable },
-        { name: "Sessions", href: "/sessions", icon: ICONS.sessions },
-        { name: "Students", href: "/students", icon: ICONS.students },
-      ],
+      items: coreItems,
     };
 
     const intelligence: NavGroup = {
@@ -175,6 +196,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
       groups.push({
         label: "Administration",
         items: [
+          { name: "Exam Cell", href: "/exams", icon: ICONS.exam, badge: "Admin" },
           { name: "Faculty & Depts", href: "/faculty", icon: ICONS.building, badge: "Admin" },
           { name: "Rooms", href: "/rooms", icon: ICONS.room, badge: "Admin" },
           { name: "Audit Logs", href: "/audit", icon: ICONS.audit, badge: "Admin" },
@@ -183,7 +205,7 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     }
 
     return groups;
-  }, [isAdmin]);
+  }, [isAdmin, isFaculty]);
 
   const formatDisplayName = (name?: string | null, userId?: string | null) => {
     if (name && name.trim()) return name.trim();
