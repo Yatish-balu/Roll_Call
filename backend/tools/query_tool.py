@@ -674,6 +674,24 @@ def query_student_attendance(
         ro_db.close()
 
 
+def _get_table_columns(ro_db: _ReadOnlyDB, table_name: str) -> Set[str]:
+    """Inspect table column names safely across SQLite and PostgreSQL/SQLAlchemy."""
+    if ro_db.mode == "sqlalchemy":
+        try:
+            from sqlalchemy import inspect
+            bind = ro_db.conn.get_bind() if hasattr(ro_db.conn, "get_bind") else ro_db.conn
+            insp = inspect(bind)
+            return {c["name"] for c in insp.get_columns(table_name)}
+        except Exception:
+            return {"usn", "name", "branch", "dept_id", "semester_id", "section_id"}
+    else:
+        try:
+            cursor_cols = ro_db.execute(f"PRAGMA table_info({table_name})")
+            return {r[1] for r in (cursor_cols.fetchall() if hasattr(cursor_cols, "fetchall") else list(cursor_cols))}
+        except Exception:
+            return {"usn", "name", "branch"}
+
+
 def query_students(
     usn: Optional[str] = None,
     branch: Optional[str] = None,
@@ -722,11 +740,7 @@ def query_students(
         params.append(f"%{name.strip()}%")
     ro_db = _get_readonly_conn(db_target)
     try:
-        try:
-            cursor_cols = ro_db.execute("PRAGMA table_info(students)")
-            col_names = {r[1] for r in (cursor_cols.fetchall() if hasattr(cursor_cols, "fetchall") else list(cursor_cols))}
-        except Exception:
-            col_names = {"usn", "name", "branch"}
+        col_names = _get_table_columns(ro_db, "students")
 
         if semester is not None and "semester_id" in col_names:
             sem_str = str(semester).strip().upper()

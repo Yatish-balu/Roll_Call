@@ -96,16 +96,24 @@ def _is_cancellation_input(clean: str) -> bool:
 # ---------------------------------------------------------------------------
 
 COMMON_TYPO_MAP = {
+    # Attendance & statuses
     "attendence": "attendance",
     "atendance": "attendance",
     "attandance": "attendance",
     "attendace": "attendance",
+    "attenadnce": "attendance",
+    "attendece": "attendance",
     "presnt": "present",
     "persent": "present",
     "prsnt": "present",
     "abscent": "absent",
     "absnt": "absent",
     "abset": "absent",
+    "absentees": "absentees",
+    "absentee": "absentees",
+    "absente": "absentees",
+    "absents": "absentees",
+    # Teacher & faculty
     "techer": "teacher",
     "techers": "teachers",
     "taecher": "teacher",
@@ -114,28 +122,80 @@ COMMON_TYPO_MAP = {
     "substitue": "substitute",
     "substitut": "substitute",
     "subsitute": "substitute",
+    # Timetable & schedule
     "timtable": "timetable",
     "time table": "timetable",
     "timetbl": "timetable",
+    "timetabel": "timetable",
+    "timetabl": "timetable",
+    "tmtbl": "timetable",
     "schedual": "schedule",
     "schedul": "schedule",
     "skedule": "schedule",
+    "scheduel": "schedule",
+    "scheldule": "schedule",
+    "schdule": "schedule",
+    # Defaulters
     "defalters": "defaulters",
     "defaluters": "defaulters",
     "defaulter": "defaulters",
+    "defaultrs": "defaulters",
+    "defauters": "defaulters",
     "shortge": "shortage",
+    # Calendar & Holidays
     "calender": "calendar",
     "calander": "calendar",
+    "celendar": "calendar",
+    "calendr": "calendar",
+    "holidays": "holidays",
+    "holiday": "holidays",
+    "holidyas": "holidays",
+    "holdays": "holidays",
+    "hoilday": "holidays",
+    "hoildays": "holidays",
+    "goverment": "government",
+    "governmnt": "government",
+    "govt": "government",
+    "gov": "government",
+    # Rooms & vacancies
     "vacnt": "vacant",
     "vacent": "vacant",
+    "vaccant": "vacant",
+    "vacany": "vacant",
     "clasroom": "classroom",
     "clasrooms": "classrooms",
     "roms": "rooms",
+    # Sessions
     "sesion": "session",
     "sesions": "sessions",
     "sesson": "session",
+    # Students & semesters
     "studnt": "student",
     "studnts": "students",
+    "studnets": "students",
+    "stduents": "students",
+    "studetns": "students",
+    "stuents": "students",
+    "stidents": "students",
+    "rostor": "roster",
+    "rostr": "roster",
+    "namelist": "roster",
+    "dem": "semester",
+    "sem": "semester",
+    "semister": "semester",
+    "semeater": "semester",
+    "semster": "semester",
+    "sems": "semester",
+    "semseter": "semester",
+    "semestor": "semester",
+    # Department
+    "departmnt": "department",
+    "deparment": "department",
+    "deprtment": "department",
+    "dprtmnt": "department",
+    "dept": "department",
+    "dep": "department",
+    # Summaries & reviews
     "sumary": "summary",
     "sumery": "summary",
     "unrevewed": "unreviewed",
@@ -149,7 +209,21 @@ COMMON_TYPO_MAP = {
 
 def normalize_typos(text: str) -> str:
     """Normalize common typos in user prompt into authoritative vocabulary."""
-    tokens = text.split()
+    cleaned = text or ""
+    # Normalize semester number expressions: e.g. "5th dem" -> "5th semester", "dem 5" -> "semester 5"
+    cleaned = re.sub(
+        r"\b(\d+)(?:st|nd|rd|th)?\s*(?:dem|sem|semister|semeater|semster|sems|semseter|semestor)\b",
+        r"\1th semester",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"\b(?:dem|semister|semeater|semster|sems|semseter|semestor)\s*(\d+)\b",
+        r"semester \1",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    tokens = cleaned.split()
     normalized = []
     for tok in tokens:
         clean_tok = re.sub(r"[^\w-]", "", tok.lower())
@@ -1081,9 +1155,9 @@ class AttendanceAgent:
         if self._is_create_session_intent(clean):
             return self._handle_create_session_intent(input_str, req_id)
 
-        # 10. Database question / query request (absentees, session stats, student USN, etc.)
-        if self._is_query_intent(input_str):
-            return self._handle_query_intent(input_str, req_id)
+        # 10. Database question / query request (absentees, session stats, student USN, department, etc.)
+        if self._is_query_intent(input_str) or self._is_query_intent(normalized_input):
+            return self._handle_query_intent(normalized_input, req_id)
 
         # 11. General open-ended or LLM intent
         return self._handle_general_intent(input_str, req_id)
@@ -1692,59 +1766,81 @@ class AttendanceAgent:
         t_start = time.time()
         events: List[Dict[str, Any]] = []
 
-        # 1. Attempt dynamic Vision LLM extraction with advanced preprocessing if key present
+        # 1. Extract the document's *actual* content and ask Gemini to structure it.
+        #    Never fall back to a hardcoded event list: that fabricated data was
+        #    reported to users as if it came from their uploaded calendar.
         suffix = file_path.suffix.lower()
+        prompt = (
+            "You are an academic scheduling expert. Analyze the supplied Calendar of Events document.\n"
+            "Extract ONLY events that are actually present in the document.\n"
+            "Return a strict JSON array of objects with keys:\n"
+            "- 'title': string (name of event)\n"
+            "- 'event_date': string (YYYY-MM-DD format)\n"
+            "- 'end_date': string or null (YYYY-MM-DD format)\n"
+            "- 'event_type': string ('HOLIDAY', 'CIE', 'EXAM', 'ACADEMIC', 'MILESTONE', or 'WORKSHOP')\n"
+            "- 'description': string (brief summary)\n"
+            "If the document contains no identifiable events, return an empty array [].\n"
+            "Return ONLY valid JSON array."
+        )
+        contents: List[Any] = []
         if suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp"):
             try:
-                from google import genai
-                from PIL import Image
-                api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
-                if api_key and not api_key.startswith("your_"):
-                    client = create_vision_client(api_key)
-                    img = self._preprocess_image_for_vision(file_path)
-                    prompt = (
-                        "You are an academic scheduling expert. Analyze this Calendar of Events document.\n"
-                        "Extract all institutional events, holidays, CIE tests, workshops, and exam schedules.\n"
-                        "Return a strict JSON array of objects with keys:\n"
-                        "- 'title': string (name of event)\n"
-                        "- 'event_date': string (YYYY-MM-DD format)\n"
-                        "- 'end_date': string or null (YYYY-MM-DD format)\n"
-                        "- 'event_type': string ('HOLIDAY', 'CIE', 'EXAM', 'ACADEMIC', 'MILESTONE', or 'WORKSHOP')\n"
-                        "- 'description': string (brief summary)\n"
-                        "Return ONLY valid JSON array."
-                    )
-                    for m in ("gemini-3.5-flash-lite", "gemini-flash-lite-latest"):
-                        try:
-                            res = client.models.generate_content(model=m, contents=[prompt, img])
-                            text = (res.text or "").strip()
-                            if "```json" in text:
-                                text = text.split("```json")[1].split("```")[0].strip()
-                            elif "```" in text:
-                                text = text.split("```")[1].split("```")[0].strip()
-                            parsed = json.loads(text)
-                            if isinstance(parsed, list) and len(parsed) > 0:
-                                events = parsed
-                                break
-                        except Exception:
-                            continue
+                contents = [prompt, self._preprocess_image_for_vision(file_path)]
             except Exception as exc:
-                logger.debug("Vision extraction for calendar events failed: %s", exc)
+                logger.debug("Calendar image preprocessing failed: %s", exc)
+        elif suffix == ".pdf":
+            from app.services.document_extraction import extract_text_from_pdf
 
-        # 2. Resilient local institutional events fallback for offline / no-API-key operation
+            document_text = extract_text_from_pdf(str(file_path))
+            if document_text:
+                contents = [prompt + "\n\nDocument text:\n" + document_text]
+            else:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=(
+                        "I could not read any text from this PDF. If it is a scanned "
+                        "calendar, upload a clear photo of each page so the vision "
+                        "model can read it, or paste the event list into the chat."
+                    ),
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+
+        api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        if contents and api_key and not api_key.startswith("your_"):
+            try:
+                client = create_vision_client(api_key)
+                for model_name in ("gemini-3.5-flash-lite", "gemini-flash-lite-latest"):
+                    try:
+                        res = client.models.generate_content(model=model_name, contents=contents)
+                        text = (res.text or "").strip()
+                        if "```json" in text:
+                            text = text.split("```json")[1].split("```")[0].strip()
+                        elif "```" in text:
+                            text = text.split("```")[1].split("```")[0].strip()
+                        parsed = json.loads(text)
+                        if isinstance(parsed, list):
+                            events = [e for e in parsed if isinstance(e, dict) and e.get("event_date")]
+                            if events:
+                                break
+                    except Exception:
+                        continue
+            except Exception as exc:
+                logger.debug("Calendar extraction failed: %s", exc)
+
         if not events:
-            events = [
-                {"title": "Commencement of Classes (Odd Semester)", "event_date": "2026-08-24", "end_date": None, "event_type": "ACADEMIC", "description": "Classes commence for B.E. 3rd, 5th, and 7th semesters"},
-                {"title": "Mahatma Gandhi Jayanti", "event_date": "2026-10-02", "end_date": None, "event_type": "HOLIDAY", "description": "National Holiday - Institutional Holiday"},
-                {"title": "Continuous Internal Evaluation - I (CIE-1)", "event_date": "2026-10-15", "end_date": "2026-10-17", "event_type": "CIE", "description": "First internal assessment test across departments"},
-                {"title": "Vijayadashami / Dasara", "event_date": "2026-10-20", "end_date": None, "event_type": "HOLIDAY", "description": "State Holiday - Institutional Holiday"},
-                {"title": "Kannada Rajyotsava", "event_date": "2026-11-01", "end_date": None, "event_type": "HOLIDAY", "description": "State Formation Day - Institutional Holiday"},
-                {"title": "Technical Symposium & Cyber Workshop", "event_date": "2026-11-14", "end_date": None, "event_type": "WORKSHOP", "description": "Annual technical presentation and cybersecurity laboratory workshop"},
-                {"title": "Continuous Internal Evaluation - II (CIE-2)", "event_date": "2026-11-19", "end_date": "2026-11-21", "event_type": "CIE", "description": "Second internal assessment tests across all subjects"},
-                {"title": "Continuous Internal Evaluation - III / Lab IA", "event_date": "2026-12-10", "end_date": "2026-12-12", "event_type": "CIE", "description": "Final internal assessment and practical lab evaluations"},
-                {"title": "Last Working Day of Semester", "event_date": "2026-12-24", "end_date": None, "event_type": "MILESTONE", "description": "Academic term ends. Final attendance condonation submission."},
-                {"title": "Semester End Practical Examinations", "event_date": "2026-12-28", "end_date": "2027-01-05", "event_type": "EXAM", "description": "Autonomous practical examination sessions"},
-                {"title": "Semester End Theory Examinations (SEE)", "event_date": "2027-01-08", "end_date": "2027-01-25", "event_type": "EXAM", "description": "Autonomous theory examination sessions"},
-            ]
+            return AgentResponse(
+                request_id=request_id,
+                message=(
+                    "I could not identify calendar events in this file, so nothing was saved. "
+                    "Please upload a clearer Calendar of Events PDF/photo or type the events "
+                    "you want added to the academic calendar."
+                ),
+                success=False,
+                needs_confirmation=False,
+                tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+            )
 
         # 3. Persist to database (academic_events table)
         saved_count = 0
@@ -2231,53 +2327,6 @@ class AttendanceAgent:
         t_start = time.time()
         is_admin = str(self.actor_role).upper() == "ADMIN" or self.actor_id == "admin_root"
 
-        # Canonical Master Timetable for 5th Semester Cyber Security (DSCE CDS10-105)
-        all_sem5_slots: List[Dict[str, Any]] = [
-            # MON
-            {"day": "MON", "period": "2", "start_time": "10:00", "end_time": "11:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY51", "subject_name": "Software Engineering", "faculty": "Mangala L (ML)", "faculty_id": "mangala"},
-            {"day": "MON", "period": "3", "start_time": "11:15", "end_time": "12:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22ESK57", "subject_name": "Environment Studies", "faculty": "Dr. Sowmya S (SS)", "faculty_id": "sowmya"},
-            {"day": "MON", "period": "4", "start_time": "12:15", "end_time": "13:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22ESK57", "subject_name": "Environment Studies", "faculty": "Dr. Sowmya S (SS)", "faculty_id": "sowmya"},
-            {"day": "MON", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "room": "LAB-3", "subject_code": "22CY52", "subject_name": "Computer Networks & Security Lab", "faculty": "Dr. Pallavi Kulkarni (PB) + RKP + VD", "faculty_id": "pallavi"},
-            {"day": "MON", "period": "7", "start_time": "16:00", "end_time": "17:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "NCMC", "subject_name": "Non-Credit Mandatory Course", "faculty": "Faculty", "faculty_id": "pallavi"},
-
-            # TUE
-            {"day": "TUE", "period": "1", "start_time": "09:00", "end_time": "10:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY53", "subject_name": "Essential of Cyber Security", "faculty": "Mathews Kuruvila (MK)", "faculty_id": "mathews"},
-            {"day": "TUE", "period": "2", "start_time": "10:00", "end_time": "11:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22RMK56", "subject_name": "Research Methodology & IPR", "faculty": "Nida Afreen Rizvi (NAR)", "faculty_id": "nida_afreen"},
-            {"day": "TUE", "period": "3", "start_time": "11:15", "end_time": "12:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY52", "subject_name": "Computer Networks & Security", "faculty": "Dr. Pallavi Kulkarni (PB)", "faculty_id": "pallavi"},
-            {"day": "TUE", "period": "4", "start_time": "12:15", "end_time": "13:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY51", "subject_name": "Software Engineering", "faculty": "Mangala L (ML)", "faculty_id": "mangala"},
-            {"day": "TUE", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "room": "LAB-1", "subject_code": "22CYL54", "subject_name": "Adv. Cyber Security Lab", "faculty": "Dr. Deepthi V S (DVS) + VHC", "faculty_id": "deepthi"},
-            {"day": "TUE", "period": "7", "start_time": "16:00", "end_time": "17:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "NCMC", "subject_name": "Non-Credit Mandatory Course", "faculty": "Faculty", "faculty_id": "pallavi"},
-
-            # WED
-            {"day": "WED", "period": "1", "start_time": "09:00", "end_time": "10:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY551", "subject_name": "AI in Cyber Security", "faculty": "Padmavathi S (PS)", "faculty_id": "padmavathi"},
-            {"day": "WED", "period": "2", "start_time": "10:00", "end_time": "11:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY51", "subject_name": "Software Engineering", "faculty": "Mangala L (ML)", "faculty_id": "mangala"},
-            {"day": "WED", "period": "3", "start_time": "11:15", "end_time": "12:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY53", "subject_name": "Essential of Cyber Security", "faculty": "Mathews Kuruvila (MK)", "faculty_id": "mathews"},
-            {"day": "WED", "period": "4", "start_time": "12:15", "end_time": "13:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY52", "subject_name": "Computer Networks & Security", "faculty": "Dr. Pallavi Kulkarni (PB)", "faculty_id": "pallavi"},
-            {"day": "WED", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "room": "LAB-2", "subject_code": "22CY53", "subject_name": "Essential Cyber Security Lab", "faculty": "Mathews Kuruvila (MK) + VD + DVS + VHC", "faculty_id": "mathews"},
-            {"day": "WED", "period": "7", "start_time": "16:00", "end_time": "17:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "NCMC", "subject_name": "Non-Credit Mandatory Course", "faculty": "Faculty", "faculty_id": "pallavi"},
-
-            # THU
-            {"day": "THU", "period": "1-2", "start_time": "09:00", "end_time": "11:00", "type": "LAB", "room": "LAB-1", "subject_code": "22CY52", "subject_name": "Computer Networks & Security Lab", "faculty": "Dr. Pallavi Kulkarni (PB) + NAR + DVS", "faculty_id": "pallavi"},
-            {"day": "THU", "period": "3", "start_time": "11:15", "end_time": "12:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22RMK56", "subject_name": "Research Methodology & IPR", "faculty": "Nida Afreen Rizvi (NAR)", "faculty_id": "nida_afreen"},
-            {"day": "THU", "period": "4", "start_time": "12:15", "end_time": "13:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY551", "subject_name": "AI in Cyber Security", "faculty": "Padmavathi S (PS)", "faculty_id": "padmavathi"},
-            {"day": "THU", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "LAB", "room": "LAB-3", "subject_code": "22CYL54", "subject_name": "Adv. Cyber Security Lab", "faculty": "Dr. Deepthi V S (DVS) + ML + VHC", "faculty_id": "deepthi"},
-            {"day": "THU", "period": "7", "start_time": "16:00", "end_time": "17:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "NCMC", "subject_name": "Non-Credit Mandatory Course", "faculty": "Faculty", "faculty_id": "pallavi"},
-
-            # FRI
-            {"day": "FRI", "period": "1", "start_time": "09:00", "end_time": "10:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22RMK56", "subject_name": "Research Methodology & IPR", "faculty": "Nida Afreen Rizvi (NAR)", "faculty_id": "nida_afreen"},
-            {"day": "FRI", "period": "2", "start_time": "10:00", "end_time": "11:00", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY551", "subject_name": "AI in Cyber Security", "faculty": "Padmavathi S (PS)", "faculty_id": "padmavathi"},
-            {"day": "FRI", "period": "3", "start_time": "11:15", "end_time": "12:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY52", "subject_name": "Computer Networks & Security", "faculty": "Dr. Pallavi Kulkarni (PB)", "faculty_id": "pallavi"},
-            {"day": "FRI", "period": "4", "start_time": "12:15", "end_time": "13:15", "type": "LECTURE", "room": "CDS10-105", "subject_code": "22CY53", "subject_name": "Essential of Cyber Security", "faculty": "Veena Dhavalgi (VD)", "faculty_id": "veena_dhavalgi"},
-            {"day": "FRI", "period": "5-6", "start_time": "14:00", "end_time": "16:00", "type": "TUTORIAL", "room": "CDS10-105", "subject_code": "22CY551", "subject_name": "Tutorial (AI)", "faculty": "Padmavathi S (PS)", "faculty_id": "padmavathi"},
-
-            # SAT
-            {"day": "SAT", "period": "1", "start_time": "09:00", "end_time": "10:00", "type": "TUTORIAL", "room": "CDS10-105", "subject_code": "22CY51", "subject_name": "Tutorial (SE)", "faculty": "Mangala L (ML)", "faculty_id": "mangala"},
-            {"day": "SAT", "period": "2", "start_time": "10:00", "end_time": "11:00", "type": "TUTORIAL", "room": "CDS10-105", "subject_code": "22CY52", "subject_name": "Tutorial (CN)", "faculty": "Dr. Pallavi Kulkarni (PB)", "faculty_id": "pallavi"},
-            {"day": "SAT", "period": "3-4", "start_time": "11:15", "end_time": "13:15", "type": "MEETING", "room": "CDS10-105", "subject_code": "PROCTOR", "subject_name": "Proctor Meeting", "faculty": "Faculty Proctors", "faculty_id": "pallavi"},
-            {"day": "SAT", "period": "5", "start_time": "14:00", "end_time": "15:00", "type": "TUTORIAL", "room": "CDS10-105", "subject_code": "22RMK56", "subject_name": "Tutorial (RM)", "faculty": "Nida Afreen Rizvi (NAR)", "faculty_id": "nida_afreen"},
-            {"day": "SAT", "period": "6", "start_time": "15:00", "end_time": "16:00", "type": "TUTORIAL", "room": "CDS10-105", "subject_code": "22CY53", "subject_name": "Tutorial (ECS)", "faculty": "Mathews Kuruvila (MK)", "faculty_id": "mathews"},
-        ]
-
         # 1. Attempt dynamic Vision LLM extraction with auto-oriented image
         slots: List[Dict[str, Any]] = []
         suffix = file_path.suffix.lower()
@@ -2321,9 +2370,20 @@ class AttendanceAgent:
             except Exception as exc:
                 logger.debug("Vision extraction for timetable failed: %s", exc)
 
-        # 2. Resilient institutional fallback if vision was unavailable or incomplete
-        if not slots or len(slots) < 5:
-            slots = all_sem5_slots
+        # 2. Never invent a timetable. If the document could not be read, say so
+        #    rather than registering a canned schedule as if it came from the file.
+        if not slots:
+            return AgentResponse(
+                request_id=request_id,
+                message=(
+                    "I could not identify timetable slots in this file, so nothing was saved. "
+                    "Please upload a clearer timetable image or PDF, or type the schedule "
+                    "you want registered."
+                ),
+                success=False,
+                needs_confirmation=False,
+                tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+            )
 
         # 3. Always synchronize the complete departmental timetable institutional records
         synced_count = self._sync_institutional_timetable("ALL", "Department Timetable", slots)
@@ -2673,10 +2733,94 @@ class AttendanceAgent:
                 self.db_target.rollback()
             return 0
 
+    def _handle_department_query(self, request_id: str) -> AgentResponse:
+        """Handle inquiries about teacher's assigned department, institution, and designation."""
+        from sqlalchemy import text
+        db = self.db_target
+        prof_row = None
+        if db and hasattr(db, "execute"):
+            try:
+                prof_row = db.execute(
+                    text("SELECT full_name, designation, branch FROM user_profiles WHERE user_id = :uid"),
+                    {"uid": self.actor_id}
+                ).fetchone()
+            except Exception:
+                pass
+
+        full_name = (prof_row[0] if prof_row and prof_row[0] else self.actor_name) or self.actor_id
+        designation = prof_row[1] if prof_row and prof_row[1] else "Faculty Member"
+        branch_code = prof_row[2] if prof_row and prof_row[2] else None
+
+        dept_name = None
+        dept_code = branch_code
+
+        if db and hasattr(db, "execute") and self.assigned_subjects:
+            try:
+                placeholders = ",".join(f":s{i}" for i in range(len(self.assigned_subjects)))
+                params = {f"s{i}": s for i, s in enumerate(self.assigned_subjects)}
+                q = f"""
+                    SELECT DISTINCT d.name, d.code, d.dept_id
+                    FROM subjects s
+                    JOIN departments d ON s.dept_id = d.dept_id
+                    WHERE s.subject_code IN ({placeholders})
+                """
+                res = db.execute(text(q), params).fetchone()
+                if res:
+                    dept_name = res[0]
+                    dept_code = res[1] or res[2]
+            except Exception:
+                pass
+
+        if not dept_name and db and hasattr(db, "execute") and branch_code:
+            try:
+                res = db.execute(
+                    text("SELECT name, code FROM departments WHERE code = :bc OR dept_id = :bc"),
+                    {"bc": branch_code}
+                ).fetchone()
+                if res:
+                    dept_name = res[0]
+                    dept_code = res[1] or branch_code
+            except Exception:
+                pass
+
+        if not dept_name:
+            dept_name = "Department of Computer Science & Engineering (Cyber Security)"
+            dept_code = dept_code or "CY"
+
+        subs_display = ", ".join(self.assigned_subjects) if self.assigned_subjects else "General Academic Duties"
+
+        msg = (
+            f"Department Profile for {full_name}:\n\n"
+            f"• Department: {dept_name} ({dept_code})\n"
+            f"• Institution: Dayananda Sagar College of Engineering (DSCE)\n"
+            f"• Designation: {designation}\n"
+            f"• Assigned Teaching Subjects: {subs_display}"
+        )
+        return AgentResponse(
+            request_id=request_id,
+            message=msg,
+            success=True,
+            needs_confirmation=False,
+            data=[{
+                "user_id": self.actor_id,
+                "name": full_name,
+                "department": dept_name,
+                "department_code": dept_code,
+                "designation": designation,
+                "subjects": self.assigned_subjects,
+            }],
+            tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+        )
+
     def _handle_query_intent(self, text: str, request_id: str) -> AgentResponse:
         """Handle database query requests safely without hallucinating numbers."""
-        clean = text.lower()
+        norm_text = normalize_typos(text)
+        clean = norm_text.lower()
         db = self.db_target
+
+        # Department inquiry
+        if any(w in clean for w in ["department", "dept"]) and any(w in clean for w in ["work", "belong", "which", "my", "what", "where", "in which", "am i"]):
+            return self._handle_department_query(request_id)
 
         # 1. Absentees query
         if "absent" in clean or "absentees" in clean:
@@ -2742,6 +2886,34 @@ class AttendanceAgent:
                     db_target=db,
                 )
                 if not res.found:
+                    from app.db.models import Session as DbSession
+                    from sqlalchemy import select
+                    sess_row = None
+                    if db and hasattr(db, "execute"):
+                        try:
+                            sess_row = db.execute(select(DbSession).where(DbSession.session_id == sess_id)).scalars().first()
+                        except Exception:
+                            sess_row = None
+                    if sess_row is not None:
+                        fac_name = f"assigned to {sess_row.teacher_id}" if sess_row.teacher_id else "scheduled"
+                        sub_name = sess_row.subject or sess_row.subject_code or "Scheduled Class"
+                        return AgentResponse(
+                            request_id=request_id,
+                            message=(
+                                f"Session {sess_row.session_id} ({sub_name}, Date: {sess_row.date}, {fac_name}) "
+                                f"is registered in the institutional timetable, but no attendance records have been marked or uploaded yet."
+                            ),
+                            success=True,
+                            needs_confirmation=False,
+                            data=[{
+                                "session_id": sess_row.session_id,
+                                "subject": sub_name,
+                                "date": str(sess_row.date),
+                                "teacher_id": sess_row.teacher_id,
+                                "attendance_count": 0,
+                            }],
+                            tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                        )
                     return AgentResponse(
                         request_id=request_id,
                         message=NO_DATA_MESSAGE,
@@ -2760,9 +2932,9 @@ class AttendanceAgent:
                 )
 
         # 3. Student query
-        usn_match = re.search(r"\b\d[A-Z]{2}\d{2}[A-Z]{2}\d{3}\b", text, re.IGNORECASE)
-        sem_match = re.search(r"\b([1-8])(?:st|nd|rd|th)?\s*(?:sem|semester)\b|\b(?:sem|semester)\s*([1-8])\b", text, re.IGNORECASE)
-        branch_match = re.search(r"\b(CY|CSE|ECE|ME|CV|AIML|ISE)\b", text, re.IGNORECASE)
+        usn_match = re.search(r"\b\d[A-Z]{2}\d{2}[A-Z]{2}\d{3}\b", norm_text, re.IGNORECASE)
+        sem_match = re.search(r"\b([1-8])(?:st|nd|rd|th)?\s*(?:sem|semester)\b|\b(?:sem|semester)\s*([1-8])\b", norm_text, re.IGNORECASE)
+        branch_match = re.search(r"\b(CY|CSE|ECE|ME|CV|AIML|ISE)\b", norm_text, re.IGNORECASE)
         target_sem = int(sem_match.group(1) or sem_match.group(2)) if sem_match else None
         target_branch = branch_match.group(1).upper() if branch_match else None
         is_count_query = any(w in clean for w in ["total", "count", "how many", "number of", "no.of", "no of"])
@@ -2931,8 +3103,14 @@ class AttendanceAgent:
 
     @staticmethod
     def _is_query_intent(text: str) -> bool:
-        keywords = ["how many", "who", "absent", "present", "session", "student", "records", "database", "query", "find", "sem", "semester"]
-        return any(k in text.lower() for k in keywords)
+        norm = normalize_typos(text).lower()
+        keywords = [
+            "how many", "who", "absent", "absentees", "present", "session",
+            "student", "students", "records", "database", "query", "find",
+            "sem", "semester", "dem", "dept", "department", "where do i work",
+            "which department", "roster", "usn"
+        ]
+        return any(k in norm for k in keywords)
 
     @staticmethod
     def _is_export_intent(text: str) -> bool:
@@ -3800,90 +3978,72 @@ class AttendanceAgent:
     def _is_calendar_intent(clean: str) -> bool:
         """Detect intent to sync, add, upload to, or view institutional academic calendar of events."""
         clean_norm = (clean or "").lower().replace("calender", "calendar")
-        has_calendar = any(w in clean_norm for w in ["calendar", "calendar of events", "academic calendar", "events", "holiday", "cie schedule", "exam schedule", "milestones"])
-        has_action = any(w in clean_norm for w in ["upload", "sync", "add", "show", "view", "get", "update", "register", "events", "list"])
+        has_calendar = any(w in clean_norm for w in ["calendar", "calendar of events", "academic calendar", "events", "holiday", "holidays", "cie schedule", "exam schedule", "milestones"])
+        has_action = any(w in clean_norm for w in ["upload", "sync", "add", "show", "view", "get", "update", "register", "events", "list", "what", "which", "are", "tell", "upcoming"]) or "holiday" in clean_norm
         return has_calendar and has_action
 
     def _handle_calendar_intent(self, text: str, request_id: str) -> AgentResponse:
+        """Report only the events actually stored in the academic calendar."""
         t_start = time.time()
-        import datetime
         from app.db.models import AcademicEvent
         from sqlalchemy import select
 
-        default_events = [
-            {"event_id": "EVT-20260824-01", "title": "Commencement of Classes (Odd Semester)", "event_date": "2026-08-24", "end_date": None, "event_type": "ACADEMIC", "description": "Classes commence for 3rd, 5th, and 7th semester B.E."},
-            {"event_id": "EVT-20261002-01", "title": "Mahatma Gandhi Jayanti", "event_date": "2026-10-02", "end_date": None, "event_type": "HOLIDAY", "description": "National Holiday - Institutional Holiday"},
-            {"event_id": "EVT-20261015-01", "title": "Continuous Internal Evaluation - I (CIE-1)", "event_date": "2026-10-15", "end_date": "2026-10-17", "event_type": "CIE", "description": "First internal assessment tests for all departments"},
-            {"event_id": "EVT-20261020-01", "title": "Vijayadashami / Dasara", "event_date": "2026-10-20", "end_date": None, "event_type": "HOLIDAY", "description": "State Holiday - Institutional Holiday"},
-            {"event_id": "EVT-20261101-01", "title": "Kannada Rajyotsava", "event_date": "2026-11-01", "end_date": None, "event_type": "HOLIDAY", "description": "State Formation Day - Institutional Holiday"},
-            {"event_id": "EVT-20261114-01", "title": "Technical Symposium & Cyber Workshop", "event_date": "2026-11-14", "end_date": None, "event_type": "WORKSHOP", "description": "Annual student departmental technical presentations & lab workshops"},
-            {"event_id": "EVT-20261119-01", "title": "Continuous Internal Evaluation - II (CIE-2)", "event_date": "2026-11-19", "end_date": "2026-11-21", "event_type": "CIE", "description": "Second internal assessment tests across all subjects"},
-            {"event_id": "EVT-20261210-01", "title": "Continuous Internal Evaluation - III / Lab IA", "event_date": "2026-12-10", "end_date": "2026-12-12", "event_type": "CIE", "description": "Final internal assessment and practical lab evaluations"},
-            {"event_id": "EVT-20261224-01", "title": "Last Working Day of Semester", "event_date": "2026-12-24", "end_date": None, "event_type": "MILESTONE", "description": "Academic term ends. Final attendance condonation submission."},
-            {"event_id": "EVT-20261228-01", "title": "Semester End Practical Examinations", "event_date": "2026-12-28", "end_date": "2027-01-05", "event_type": "EXAM", "description": "Autonomous practical examination sessions"},
-            {"event_id": "EVT-20270108-01", "title": "Semester End Theory Examinations (SEE)", "event_date": "2027-01-08", "end_date": "2027-01-25", "event_type": "EXAM", "description": "Autonomous theory examination sessions"},
-        ]
-
-        synced_count = 0
+        events: List[Dict[str, Any]] = []
         if self.db_target:
             try:
-                db_session = self.db_target
-                for ev_data in default_events:
-                    existing = db_session.execute(
-                        select(AcademicEvent).where(
-                            AcademicEvent.event_date == ev_data["event_date"],
-                            AcademicEvent.title == ev_data["title"],
-                        )
-                    ).scalars().first()
-                    if not existing:
-                        ev = AcademicEvent(
-                            event_id=ev_data["event_id"],
-                            title=ev_data["title"],
-                            event_date=ev_data["event_date"],
-                            end_date=ev_data["end_date"],
-                            event_type=ev_data["event_type"],
-                            description=ev_data["description"],
-                            target_dept="ALL",
-                        )
-                        db_session.add(ev)
-                        synced_count += 1
-                db_session.commit()
+                rows = self.db_target.execute(
+                    select(AcademicEvent).order_by(AcademicEvent.event_date.asc())
+                ).scalars().all()
+                for row in rows:
+                    events.append({
+                        "event_id": row.event_id,
+                        "title": row.title,
+                        "event_date": row.event_date,
+                        "end_date": row.end_date,
+                        "event_type": row.event_type,
+                        "description": row.description,
+                    })
             except Exception as exc:
-                logger.error("Failed to sync calendar events: %s", exc)
+                logger.error("Failed to read academic calendar events: %s", exc)
 
         self.tool_logger.log(
             request_id=request_id,
-            tool_name="sync_calendar_events",
-            arguments={"synced_count": synced_count, "total_events": len(default_events)},
+            tool_name="read_calendar_events",
+            arguments={"total_events": len(events)},
             success=True,
-            result_summary=f"Synchronized {len(default_events)} academic calendar events",
+            result_summary=f"Read {len(events)} calendar events from the database",
             duration_seconds=round(time.time() - t_start, 4),
         )
 
-        msg = (
-            f"📅 **Academic Calendar Synchronized & Live!**\n\n"
-            f"Successfully registered **{len(default_events)} academic events** into the institutional calendar database:\n\n"
-            f"🗓️ **Key Semester Milestones & Events:**\n"
-            f"• **2026-08-24:** Commencement of Classes (`ACADEMIC`)\n"
-            f"• **2026-10-02:** 🚩 Mahatma Gandhi Jayanti (`HOLIDAY`)\n"
-            f"• **2026-10-15 – 10-17:** 🎓 Continuous Internal Evaluation - I (`CIE`)\n"
-            f"• **2026-10-20:** 🚩 Vijayadashami / Dasara (`HOLIDAY`)\n"
-            f"• **2026-11-01:** 🚩 Kannada Rajyotsava (`HOLIDAY`)\n"
-            f"• **2026-11-14:** 📌 Technical Symposium & Cyber Workshop (`WORKSHOP`)\n"
-            f"• **2026-11-19 – 11-21:** 🎓 Continuous Internal Evaluation - II (`CIE`)\n"
-            f"• **2026-12-10 – 12-12:** 🎓 Final Lab IA / CIE-3 (`CIE`)\n"
-            f"• **2026-12-24:** 🏁 Last Working Day of Semester (`MILESTONE`)\n"
-            f"• **2026-12-28 – 2027-01-05:** 📝 Practical Lab Examinations (`EXAM`)\n"
-            f"• **2027-01-08 – 2027-01-25:** 📝 Semester End Theory Examinations (`EXAM`)\n\n"
-            f"✅ **Saved to database.** All events are now live on your **Calendar** page (`/calendar`)."
-        )
+        if not events:
+            return AgentResponse(
+                request_id=request_id,
+                message=(
+                    "There are no academic calendar events stored yet. Upload a "
+                    "Calendar of Events PDF or photo and I will extract and save "
+                    "the events from that document."
+                ),
+                success=True,
+                needs_confirmation=False,
+                data=[],
+                tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+            )
+
+        lines = ["📅 **Academic Calendar (from the institutional database):**", ""]
+        for event in events:
+            end = f" – {event['end_date']}" if event.get("end_date") else ""
+            lines.append(
+                f"• **{event['event_date']}{end}:** {event.get('title')} "
+                f"(`{event.get('event_type') or 'ACADEMIC'}`)"
+            )
+        lines.append("\n✅ Open the **Calendar** page (`/calendar`) for the month view.")
 
         return AgentResponse(
             request_id=request_id,
-            message=msg,
+            message="\n".join(lines),
             success=True,
             needs_confirmation=False,
-            data=default_events,
+            data=events,
             tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
         )
 
