@@ -40,6 +40,7 @@ from app.agent.tools.db_agent_tools import (
     query_student_attendance_record,
     create_attendance_session,
     update_user_profile,
+    create_faculty_user,
 )
 from app.agent.tools.chat_edit_tools import CHAT_ATTENDANCE_EDIT_TOOL
 
@@ -100,5 +101,6 @@ __all__ = [
     "query_student_attendance_record",
     "create_attendance_session",
     "update_user_profile",
+    "create_faculty_user",
 ]
 

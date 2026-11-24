@@ -608,6 +608,28 @@ class ToolRegistry:
             )
         )
 
+        # 9. create_faculty_user
+        from app.agent.tools import create_faculty_user
+        self.register(
+            ToolDefinition(
+                name="create_faculty_user",
+                description="Create a new faculty/teacher or staff user account in the system with login credentials. Admin only.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "user_id": {"type": "string", "description": "Unique username / user_id for the faculty member (e.g. 'dr_ramesh')."},
+                        "name": {"type": "string", "description": "Full name of the faculty member (e.g. 'Dr. Ramesh Kumar')."},
+                        "email": {"type": "string", "description": "Institutional email address."},
+                        "password": {"type": "string", "description": "Initial password (minimum 6 characters)."},
+                        "branch": {"type": "string", "description": "Branch code (e.g. 'CSE', 'CY')."},
+                        "designation": {"type": "string", "description": "Designation (e.g. 'Assistant Professor')."},
+                    },
+                    "required": ["user_id", "name", "email", "password"],
+                },
+                handler=lambda **kw: create_faculty_user(**kw),
+            )
+        )
+
 
 # ============================================================================
 # Core Agent Implementation

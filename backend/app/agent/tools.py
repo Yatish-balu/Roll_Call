@@ -484,3 +484,145 @@ def update_user_profile(
         logger.error("Failed to update profile for %s: %s", actor_id, exc)
         return {"status": "error", "message": str(exc)}
 
+
+def create_faculty_user(
+    db: Optional[Session] = None,
+    user_id: str = "",
+    name: str = "",
+    email: str = "",
+    password: str = "",
+    branch: Optional[str] = None,
+    designation: Optional[str] = None,
+    department: Optional[str] = None,
+    role: str = "FACULTY",
+    actor_id: str = "anonymous",
+    actor_role: str = "ADMIN",
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Create a new faculty/teacher account in the system (Admin only).
+
+    Args:
+        user_id: Unique identifier for the faculty member (e.g. 'dr_ramesh').
+        name: Full name of the faculty member (e.g. 'Dr. Ramesh Kumar').
+        email: Registered institutional email address.
+        password: Initial login password (minimum 6 characters).
+        branch: Optional engineering department/branch (e.g. 'CSE', 'CY').
+        designation: Optional title (e.g. 'Assistant Professor', 'Professor').
+        department: Optional department name.
+        role: Account role, default 'FACULTY'.
+    """
+    if actor_role != "ADMIN":
+        return {
+            "status": "error",
+            "message": "Permission denied: Only an authenticated ADMIN can create user accounts.",
+        }
+
+    clean_uid = (user_id or "").strip()
+    clean_name = (name or "").strip()
+    clean_email = (email or "").strip().lower()
+    clean_pw = (password or "").strip()
+
+    if not clean_uid or not clean_name or not clean_email or not clean_pw:
+        return {
+            "status": "error",
+            "message": "Missing required fields: user_id, name, email, and password are all required.",
+        }
+
+    if len(clean_pw) < 6:
+        return {
+            "status": "error",
+            "message": "Password must be at least 6 characters long.",
+        }
+
+    if db is None:
+        from app.db.connection import get_sync_session_factory
+        db = get_sync_session_factory()()
+
+    import bcrypt
+    from app.db.models import User as DbUser
+    from app.routers.profile import _ensure_profile_table
+
+    try:
+        _ensure_profile_table(db)
+
+        # Check existing user
+        existing = db.execute(
+            select(DbUser).where(
+                (DbUser.user_id == clean_uid) | (func.lower(DbUser.email) == clean_email)
+            )
+        ).scalar_one_or_none()
+        if existing is not None:
+            return {
+                "status": "error",
+                "message": f"A user with ID '{clean_uid}' or email '{clean_email}' already exists.",
+            }
+
+        hashed_pw = bcrypt.hashpw(clean_pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        assigned_role = role.upper() if role else "FACULTY"
+        user_dict = crud.create_user(
+            db,
+            user_id=clean_uid,
+            email=clean_email,
+            role=assigned_role,
+            hashed_password=hashed_pw,
+            is_active=1,
+            created_at=now_iso,
+        )
+
+        db_user = db.get(DbUser, clean_uid)
+        if db_user is not None:
+            db_user.name = clean_name
+
+        # Create user profile entry
+        db.execute(
+            text("""
+                INSERT INTO user_profiles (user_id, full_name, branch, designation, updated_at)
+                VALUES (:uid, :fname, :branch, :desig, :ts)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    full_name = EXCLUDED.full_name,
+                    branch = EXCLUDED.branch,
+                    designation = EXCLUDED.designation,
+                    updated_at = EXCLUDED.updated_at
+            """),
+            {
+                "uid": clean_uid,
+                "fname": clean_name,
+                "branch": branch.strip() if branch else "",
+                "desig": designation.strip() if designation else "Faculty",
+                "ts": now_iso,
+            },
+        )
+
+        try:
+            crud.create_audit_entry(
+                db,
+                actor_id=actor_id,
+                action="TEACHER_CREATED_VIA_AI",
+                entity_type="USER",
+                entity_id=clean_uid,
+                actor_role=actor_role,
+                new_value=clean_name,
+            )
+        except Exception as audit_err:
+            logger.warning("Audit log write skipped: %s", audit_err)
+
+        db.commit()
+
+        return {
+            "status": "success",
+            "user_id": clean_uid,
+            "name": clean_name,
+            "email": clean_email,
+            "role": assigned_role,
+            "branch": branch or "Not specified",
+            "designation": designation or "Faculty",
+            "message": f"Successfully created {assigned_role} user '{clean_name}' (ID: {clean_uid}, Email: {clean_email}).",
+        }
+    except Exception as exc:
+        db.rollback()
+        logger.error("Failed to create user %s: %s", clean_uid, exc)
+        return {"status": "error", "message": str(exc)}
+
+

@@ -299,6 +299,30 @@ def register_default_tools(reg: ToolRegistry) -> None:
         )
     )
 
+    reg.register(
+        ToolDefinition(
+            name="create_faculty_user",
+            description="Create a new faculty/teacher or staff account in the system with login credentials. Admin only.",
+            capability_family="admin",
+            risk_tier=RiskTier.LOW_RISK_WRITE,
+            allowed_roles={"ADMIN"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "Unique username / user_id for the faculty member (e.g. 'dr_ramesh')."},
+                    "name": {"type": "string", "description": "Full legal name of the faculty member (e.g. 'Dr. Ramesh Kumar')."},
+                    "email": {"type": "string", "description": "Institutional email address."},
+                    "password": {"type": "string", "description": "Initial login password (minimum 6 characters)."},
+                    "branch": {"type": "string", "description": "Branch code (e.g. 'CSE', 'CY', 'ISE')."},
+                    "designation": {"type": "string", "description": "Job designation (e.g. 'Assistant Professor', 'Professor')."},
+                    "department": {"type": "string", "description": "Department name."},
+                },
+                "required": ["user_id", "name", "email", "password"],
+            },
+            handler=tools.create_faculty_user,
+        )
+    )
+
     # Register Exam AI Tools
     try:
         from app.agent.tools.exam_tools import (
