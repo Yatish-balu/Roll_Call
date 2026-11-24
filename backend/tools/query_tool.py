@@ -679,8 +679,10 @@ def _get_table_columns(ro_db: _ReadOnlyDB, table_name: str) -> Set[str]:
     if ro_db.mode == "sqlalchemy":
         try:
             from sqlalchemy import inspect
-            bind = ro_db.conn.get_bind() if hasattr(ro_db.conn, "get_bind") else ro_db.conn
-            insp = inspect(bind)
+            # Inspect the supplied Session/Connection itself. Opening a fresh
+            # connection through get_bind() can roll back uncommitted rows on
+            # an in-memory SQLite fixture, making the data disappear mid-query.
+            insp = inspect(ro_db.conn)
             return {c["name"] for c in insp.get_columns(table_name)}
         except Exception:
             return {"usn", "name", "branch", "dept_id", "semester_id", "section_id"}
@@ -730,13 +732,13 @@ def query_students(
         params.extend(visible)
 
     if usn:
-        conditions.append("usn = ?")
+        conditions.append("UPPER(usn) = UPPER(?)")
         params.append(usn.strip())
     if branch:
-        conditions.append("branch = ?")
+        conditions.append("UPPER(branch) = UPPER(?)")
         params.append(branch.strip())
     if name:
-        conditions.append("name LIKE ?")
+        conditions.append("LOWER(name) LIKE LOWER(?)")
         params.append(f"%{name.strip()}%")
     ro_db = _get_readonly_conn(db_target)
     try:

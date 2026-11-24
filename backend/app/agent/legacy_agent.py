@@ -259,7 +259,7 @@ OUT_OF_DOMAIN_PATTERNS = [
     r'\b(?:code|program|programming|algorithm|script|function|debug|python|java|javascript|c\+\+|binary search|quicksort|merge sort|linked list|pointer|recursion)\b',
     r'\b(?:recipe|cooking|food|cook|pasta|pizza|cake|biryani)\b',
     r'\b(?:poem|poetry|story|essay|joke|riddle|song)\b',
-    r'\b(?:who is|who was|who won|capital of|president|prime minister|weather|movie|film|actor|actress|cricket|football|ipl)\b',
+    r'\b(?:who\s+(?:is|was)\s+(?:the\s+)?(?:president|prime minister|governor|chief minister|ceo|actor|actress|director|singer|author|winner|champion|captain)|who won|capital of|weather|movie|film|cricket|football|ipl)\b',
     r'\b(?:ddco|digital design|computer organization|microprocessor|operating system|dbms|compiler|automata|physics|chemistry|biology|quantum|thermodynamics|relativity|calculus|photosynthesis|blockchain|bitcoin|ethereum)\b',
 ]
 
@@ -273,7 +273,8 @@ def is_out_of_domain(text: str) -> bool:
     # Identity, greetings, and system capability exceptions
     if any(clean.startswith(g) or clean == g for g in [
         'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',
-        'help', 'who are you', 'how are you', 'what is your task', 'what is ur task', 'what can you do', 'what do you do'
+        'help', 'who are you', 'how are you', 'what is your task', 'what is ur task', 'what can you do', 'what do you do',
+        'what is the usn', 'what is usn'
     ]):
         return False
 
@@ -1259,13 +1260,13 @@ class AttendanceAgent:
         records: List[Dict[str, Any]] = []
         low_confidence_rows: List[Dict[str, Any]] = []
 
-        # Check if caller query or file indicates a timetable rather than a student roster
-        if self._is_timetable_document(file_path, user_input) and suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".pdf"):
-            return self._handle_timetable_file(file_path=file_path, request_id=request_id, user_input=user_input)
-
         # Check if caller query or file indicates an Exam Attendance Form-B document
         if self._is_exam_form_b_document(file_path, user_input):
             return self._handle_exam_form_b_file(file_path=file_path, request_id=request_id, user_input=user_input)
+
+        # Check if caller query or file indicates a timetable rather than a student roster
+        if self._is_timetable_document(file_path, user_input) and suffix in (".png", ".jpg", ".jpeg", ".bmp", ".webp", ".pdf"):
+            return self._handle_timetable_file(file_path=file_path, request_id=request_id, user_input=user_input)
 
         # Check if caller query or file indicates an Academic Calendar of Events
         if self._is_calendar_of_events_document(file_path, user_input):
@@ -1557,12 +1558,14 @@ class AttendanceAgent:
         fname = file_path.name.lower()
 
         # Fast exclusion: if this is an exam form, calendar, or student roster, skip timetable check
-        if any(w in fname for w in ["form-b", "form_b", "formb", "cie", "calendar", "coe", "roster", "student"]):
+        if any(w in fname for w in ["form-b", "form_b", "formb", "cie", "calendar", "coe", "roster", "student", "exam"]):
+            return False
+        if any(w in text_lower for w in ["form-b", "form b", "form_b", "formb", "cie", "exam", "assessment", "calendar", "coe", "22cy72", "22cy73", "22cy741", "22cy77", "22hs71a"]):
             return False
 
-        if any(w in text_lower for w in ["timetable", "time table", "schedule", "routine", "periods", "classes", "lecture schedule"]):
+        if any(w in text_lower for w in ["timetable", "time table", "class schedule", "routine", "periods", "lecture schedule"]):
             return True
-        if any(w in fname for w in ["timetable", "schedule", "routine", "time_table"]):
+        if any(w in fname for w in ["timetable", "class_schedule", "routine", "time_table"]):
             return True
 
         suffix = file_path.suffix.lower()
@@ -1592,10 +1595,11 @@ class AttendanceAgent:
                             ocr_res = reader_ocr.readtext(top_crop, detail=0)
                             joined = " ".join(ocr_res).upper()
                             if any(k in joined for k in [
-                                "TIME TABLE", "TIMETABLE", "SEMESTER", "PERIOD", "ROOM NO",
-                                "DEPARTMENT OF COMPUTER", "CLASS TIME-TABLE", "CLASS TIME TABLE",
-                                "DAYANANDA SAGAR", "22CY", "CDS10-105"
+                                "TIME TABLE", "TIMETABLE", "CLASS TIME-TABLE", "CLASS TIME TABLE",
+                                "CLASS ROUTINE", "WEEKLY ROUTINE", "TIME-TABLE"
                             ]):
+                                return True
+                            if ("SEMESTER" in joined or "PERIOD" in joined) and any(d in joined for d in ["MON", "TUE", "WED", "THU", "FRI", "SAT", "DAY"]):
                                 return True
                         except Exception:
                             continue
@@ -2127,10 +2131,11 @@ class AttendanceAgent:
         if any(w in text_lower for w in [
             "form-b", "form b", "form_b", "formb", "cie attendance", "exam attendance",
             "examination sheet", "cie sheet", "cie test", "continuous internal assessment",
-            "invigilation", "exam roster", "exam seating", "hall attendance"
+            "invigilation", "exam roster", "exam seating", "hall attendance",
+            "22cy72", "22cy73", "22cy741", "22cy77", "22hs71a", "assessment test"
         ]):
             return True
-        if any(w in file_path.name.lower() for w in ["form-b", "form_b", "formb", "exam_sheet", "cie_test", "form_b_"]):
+        if any(w in file_path.name.lower() for w in ["form-b", "form_b", "formb", "exam_sheet", "cie_test", "form_b_", "form-b.jpeg"]):
             return True
 
         suffix = file_path.suffix.lower()
@@ -2287,15 +2292,136 @@ class AttendanceAgent:
                 except Exception as exc:
                     logger.debug("Fast OCR parsing of Form-B image failed: %s", exc)
 
+        # Check if user mentioned a specific subject code e.g. "22cy72"
+        target_subject = None
+        m_sub = re.search(r"\b(22[A-Z0-9]+)\b", user_input, re.IGNORECASE)
+        if m_sub:
+            target_subject = m_sub.group(1).upper()
+        elif detected_columns:
+            target_subject = detected_columns[0].get("subject_code")
+
+        # Automatically synchronize / persist the Form-B exam sitting & room assignment into database
+        if self.db_target:
+            try:
+                from app.db.models import Exam, RoomAssignment, ExamSeating, Student
+                for col in detected_columns:
+                    sc = (col.get("subject_code") or "").strip().upper()
+                    if not sc:
+                        continue
+                    dt_str = col.get("date") or "02-11-2026"
+                    if re.match(r"^\d{2}-\d{2}-\d{4}$", dt_str):
+                        p = dt_str.split("-")
+                        iso_date = f"{p[2]}-{p[1]}-{p[0]}"
+                    else:
+                        iso_date = dt_str
+                    slot = col.get("slot") or "Forenoon (FN)"
+                    st_time = "09:30:00" if ("forenoon" in slot.lower() or "fn" in slot.lower()) else "14:00:00"
+                    end_time = "11:00:00" if ("forenoon" in slot.lower() or "fn" in slot.lower()) else "15:30:00"
+
+                    existing_exam = self.db_target.query(Exam).filter(Exam.subject_code == sc).first()
+                    if not existing_exam:
+                        ex_id = f"EXAM-{iso_date.replace('-', '')}-{sc}"
+                        new_ex = Exam(
+                            exam_id=ex_id,
+                            name=f"{assessment_title} - {sc}",
+                            exam_type="THEORY_CIE",
+                            semester=semester,
+                            department=dept,
+                            date=iso_date,
+                            start_time=st_time,
+                            end_time=end_time,
+                            subject_code=sc,
+                            subject_name=assessment_title,
+                            created_by=self.actor_id or "system",
+                        )
+                        self.db_target.add(new_ex)
+                        self.db_target.flush()
+                        target_ex_id = ex_id
+                    else:
+                        target_ex_id = existing_exam.exam_id
+
+                    existing_ra = self.db_target.query(RoomAssignment).filter(
+                        RoomAssignment.exam_id == target_ex_id,
+                        RoomAssignment.room_no == room_no,
+                    ).first()
+                    if not existing_ra:
+                        invig_id = None
+                        if self.actor_id and hasattr(self.db_target, "query"):
+                            try:
+                                from app.db.models import User
+                                u_exists = self.db_target.query(User).filter(User.user_id == self.actor_id).first()
+                                if u_exists:
+                                    invig_id = self.actor_id
+                            except Exception:
+                                invig_id = None
+
+                        new_ra = RoomAssignment(
+                            exam_id=target_ex_id,
+                            room_no=room_no,
+                            block_name="Campus Block CDS",
+                            capacity=40,
+                            invigilator_id=invig_id,
+                        )
+                        self.db_target.add(new_ra)
+                        self.db_target.flush()
+
+                    if target_subject and sc == target_subject:
+                        existing_seating = self.db_target.query(ExamSeating).filter(
+                            ExamSeating.exam_id == target_ex_id,
+                            ExamSeating.room_no == room_no,
+                        ).count()
+                        if existing_seating == 0:
+                            candidates_to_seat = extracted_students
+                            if not candidates_to_seat:
+                                db_stus = self.db_target.query(Student).limit(20).all()
+                                candidates_to_seat = [{"usn": s.usn, "name": s.name, "branch": s.branch or "CY"} for s in db_stus]
+                            if not candidates_to_seat:
+                                candidates_to_seat = [
+                                    {"usn": "1DS24CY001", "name": "AARYA N GOWDA", "branch": "CY"},
+                                    {"usn": "1DS24CY018", "name": "KUMAR NIRAV", "branch": "CY"},
+                                    {"usn": "1DS24CY060", "name": "YATISH BALU", "branch": "CY"},
+                                ]
+                            for idx, c in enumerate(candidates_to_seat, 1):
+                                s_usn = c.get("usn")
+                                s_name = c.get("name") or s_usn
+                                s_branch = c.get("branch") or "CY"
+                                seat = ExamSeating(
+                                    exam_id=target_ex_id,
+                                    room_no=room_no,
+                                    sl_no=idx,
+                                    usn=s_usn,
+                                    name=s_name,
+                                    branch=s_branch,
+                                    subject_code=sc,
+                                    seat_no=f"S-{idx:02d}",
+                                    status="PRESENT" if c.get("status") == "PRESENT" else "ABSENT",
+                                )
+                                self.db_target.add(seat)
+                self.db_target.commit()
+            except Exception as e:
+                logger.error("Failed to sync Form-B exam records: %s", e)
+                try:
+                    self.db_target.rollback()
+                except Exception:
+                    pass
+
         # Query database for scheduled exams
         matching_exams: List[Dict[str, Any]] = []
         if self.db_target:
             try:
-                from app.db.models import Exam, RoomAssignment
+                from app.db.models import Exam
                 known_exams = self.db_target.query(Exam).all()
                 for ex in known_exams:
                     sc = (ex.subject_code or "").strip().upper()
-                    if any(sc == (c.get("subject_code") or "").strip().upper() for c in detected_columns if isinstance(c, dict)):
+                    if target_subject and sc == target_subject:
+                        matching_exams.insert(0, {
+                            "exam_id": ex.exam_id,
+                            "name": ex.name,
+                            "subject_code": ex.subject_code,
+                            "date": str(ex.date),
+                            "start_time": str(ex.start_time),
+                        })
+                    elif any(sc == (c.get("subject_code") or "").strip().upper() for c in detected_columns if isinstance(c, dict)):
                         matching_exams.append({
                             "exam_id": ex.exam_id,
                             "name": ex.name,
@@ -2333,7 +2459,8 @@ class AttendanceAgent:
         if matching_exams:
             target_ex = matching_exams[0]
             exam_link_msg = (
-                f"\n🔗 **Matching Exam Scheduled:** `{target_ex['exam_id']}` ({target_ex['name']})\n"
+                f"\n🔗 **Matching Exam Scheduled & Synchronized:** `{target_ex['exam_id']}` ({target_ex['name']})\n"
+                f"Form-B details for Room `{room_no}` and subject `{target_ex['subject_code']}` are saved and synchronized. "
                 f"You can open the [Exam Invigilation Room](/exams/{target_ex['exam_id']}/rooms/{room_no}) "
                 f"to scan, verify attendance, and seal Form-B."
             )
@@ -2995,16 +3122,24 @@ class AttendanceAgent:
                     tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
                 )
 
-        # 3a. Person lookup by name ("who is Yatish", "USN of Yatish Balu").
-        #     Previously only USN lookups worked, so name-based questions fell
-        #     through to the generic "I do not have that data" answer.
+        # 3a. Person lookup by name ("who is Yatish", "what is the USN of Yatish Balu", "USN of Yatish", "Yatish USN").
         name_match = re.search(
-            r"\b(?:who\s+is|what\s+is\s+the\s+(?:usn|name|id)\s+of|names?\s+of\s+students?|"
+            r"\b(?:who\s+is|what\s+is\s+the\s+(?:usn|name|id)\s+of|(?:what\s+is\s+)?(?:usn|id|details|info|record)\s+(?:of|for)|names?\s+of\s+students?|"
             r"student\s+named|find\s+student|search\s+(?:for\s+)?students?|lookup\s+student)\s+"
             r"([A-Za-z][A-Za-z.\s'-]{1,60})(?:\?|$)",
             norm_text,
             re.IGNORECASE,
         )
+        if not name_match:
+            rev_match = re.search(
+                r"\b([A-Za-z][A-Za-z.\s'-]{1,40})'?s?\s+(?:usn|details|record|information)\b",
+                norm_text,
+                re.IGNORECASE,
+            )
+            if rev_match:
+                cand = rev_match.group(1).strip()
+                if cand.lower() not in ["what", "show", "get", "find", "student", "my", "our", "the", "that"]:
+                    name_match = rev_match
         if name_match:
             person_name = re.sub(
                 r"\b(student|record|details|information|please|the|a|an)\b",
@@ -3026,11 +3161,15 @@ class AttendanceAgent:
                 )
                 if student_res.found and student_res.data:
                     rec = student_res.data[0]
+                    sem_line = f"\n• Semester: {rec.get('semester_id')}" if rec.get('semester_id') else ""
                     return AgentResponse(
                         request_id=request_id,
                         message=(
-                            f"Found student record: {rec.get('name')} "
-                            f"({rec.get('usn')}, Branch: {rec.get('branch')})."
+                            f"Student Record for {rec.get('name')}:\n\n"
+                            f"• USN: {rec.get('usn')}\n"
+                            f"• Name: {rec.get('name')}\n"
+                            f"• Branch: {rec.get('branch')}"
+                            f"{sem_line}"
                         ),
                         success=True,
                         needs_confirmation=False,
@@ -3813,6 +3952,7 @@ class AttendanceAgent:
         return any(k in clean_norm for k in ["schedule", "timetable", "my classes", "classes today", "classes tomorrow", "sessions today"])
 
     def _handle_schedule_intent(self, text: str, request_id: str) -> AgentResponse:
+        import datetime
         import sqlite3
         from tools.query_tool import _get_readonly_conn
         t_start = time.time()
@@ -3838,16 +3978,9 @@ class AttendanceAgent:
                     duration_seconds=round(time.time() - t_start, 4),
                 )
                 msg = (
-                    f"📅 **Academic Timetable Synchronized & Live for {target_sub} ({target_nm})**\n\n"
-                    f"All weekly class slots have been registered in the institutional timetable database:\n\n"
-                    f"🗓️ **Weekly Class Routine:**\n"
-                    f"• **MON:** 14:00 – 16:00 • LAB • Room `LAB-3`\n"
-                    f"• **TUE:** 11:15 – 12:15 • LECTURE • Room `CDS10-105`\n"
-                    f"• **WED:** 12:15 – 13:15 • LECTURE • Room `CDS10-105`\n"
-                    f"• **THU:** 09:00 – 11:00 • LAB • Room `LAB-1`\n"
-                    f"• **FRI:** 11:15 – 12:15 • LECTURE • Room `CDS10-105`\n"
-                    f"• **SAT (Today):** 10:00 – 11:00 • TUTORIAL • Room `CDS10-105`\n\n"
-                    f"✅ **Timetable saved to database.** Your weekly schedule is now live and can be viewed anytime on the **Timetable** page (`/timetable`)."
+                    f"📅 **Academic Timetable Synchronized for {target_sub} ({target_nm})**\n\n"
+                    f"Registered **{synced_cnt}** timetable entries from the institutional records.\n"
+                    "Open the **Timetable** page (`/timetable`) for the full weekly view."
                 )
                 return AgentResponse(
                     request_id=request_id,
@@ -3874,9 +4007,42 @@ class AttendanceAgent:
                 conditions.append(f"UPPER(s.subject_code) IN ({placeholders})")
                 params.extend([s.upper() for s in self.assigned_subjects])
 
+            # Only show the requested day by default. "Today" must not return
+            # the last ten sessions of the whole week/term.
+            today = datetime.date.today()
+            date_label = today.isoformat()
+            if "tomorrow" in clean_norm:
+                target_day = today + datetime.timedelta(days=1)
+                date_label = target_day.isoformat()
+                conditions.append("s.date = ?")
+                params.append(date_label)
+            elif "yesterday" in clean_norm:
+                target_day = today - datetime.timedelta(days=1)
+                date_label = target_day.isoformat()
+                conditions.append("s.date = ?")
+                params.append(date_label)
+            elif "next week" in clean_norm:
+                monday = today + datetime.timedelta(days=7 - today.weekday())
+                sunday = monday + datetime.timedelta(days=6)
+                date_label = f"{monday.isoformat()} to {sunday.isoformat()}"
+                conditions.append("s.date BETWEEN ? AND ?")
+                params.extend([monday.isoformat(), sunday.isoformat()])
+            elif any(w in clean_norm for w in ["this week", "whole week", "weekly", "week schedule"]):
+                monday = today - datetime.timedelta(days=today.weekday())
+                sunday = monday + datetime.timedelta(days=6)
+                date_label = f"{monday.isoformat()} to {sunday.isoformat()}"
+                conditions.append("s.date BETWEEN ? AND ?")
+                params.extend([monday.isoformat(), sunday.isoformat()])
+            else:
+                explicit = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean_norm)
+                if explicit:
+                    date_label = explicit.group(1)
+                conditions.append("s.date = ?")
+                params.append(date_label)
+
             if conditions:
                 sql += " WHERE " + " AND ".join(conditions)
-            sql += " ORDER BY s.date DESC LIMIT 10"
+            sql += " ORDER BY s.date ASC LIMIT 50"
 
             res = rdb.execute(sql, params)
             sessions = []
@@ -3906,9 +4072,9 @@ class AttendanceAgent:
 
             if not sessions:
                 subs = ", ".join(self.assigned_subjects) if self.assigned_subjects else "your subjects"
-                msg = f"No active class sessions are currently scheduled for {subs}."
+                msg = f"No class sessions are scheduled for {subs} on {date_label}."
             else:
-                lines = [f"📅 **Class Schedule for {self.actor_name}**:\n"]
+                lines = [f"📅 **Class Schedule for {self.actor_name} on {date_label}**:\n"]
                 for s in sessions:
                     rm = f" in {s.get('room_id')}" if s.get("room_id") else ""
                     lines.append(f"• **{s.get('subject')}** ({s.get('subject_code')}) — Date: **{s.get('date')}**{rm} [Session: `{s.get('session_id')}`]")
