@@ -314,6 +314,30 @@ def extract_rows_from_pdf(path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     return _build_rows(refined)
 
 
+def extract_text_from_pdf(path: str, max_chars: int = 24000) -> str:
+    """Return the readable text of a PDF, or an empty string.
+
+    Used for document classification (calendar vs timetable vs roster) and for
+    extracting structured events from a Calendar of Events PDF. Never invent
+    content when the PDF is scanned/image-only.
+    """
+    try:
+        import pdfplumber  # type: ignore
+
+        with pdfplumber.open(path) as pdf:
+            text = "\n".join((page.extract_text() or "") for page in pdf.pages)
+    except Exception:
+        try:
+            from pypdf import PdfReader  # type: ignore
+
+            reader = PdfReader(path)
+            text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        except Exception:
+            return ""
+
+    return text.strip()[:max_chars]
+
+
 def extract_rows_from_csv(path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Extract attendance rows from a CSV document (used for consistency)."""
     with open(path, "r", encoding="utf-8-sig", newline="") as handle:

@@ -237,6 +237,59 @@ def normalize_typos(text: str) -> str:
     return " ".join(normalized)
 
 
+OUT_OF_DOMAIN_REFUSAL = (
+    "I am RollCall AI, specialized exclusively for institutional attendance, classroom scheduling, "
+    "and student roster management. I cannot assist with topics outside of attendance and class operations. "
+    "How can I help you with your attendance or schedule today?"
+)
+
+IN_DOMAIN_STEMS = {
+    'attend', 'absent', 'present', 'defaulter', 'shortage',
+    'session', 'schedul', 'timetab', 'period', 'slot',
+    'room', 'classroom', 'hall', 'vacan',
+    'student', 'usn', 'roster', 'sem', 'semester', 'branch',
+    'calendar', 'holiday', 'event', 'cie',
+    'depart', 'dept', 'faculty', 'teacher', 'substitut', 'proxy', 'handover', 'delegat',
+    'ledger', 'audit', 'unreview', 'pend',
+    'profile', 'designat',
+}
+
+OUT_OF_DOMAIN_PATTERNS = [
+    r'\b(?:explain|xplain|describe|teach|tell me about|what is|what are|define|how to code|how does|how do)\b',
+    r'\b(?:code|program|programming|algorithm|script|function|debug|python|java|javascript|c\+\+|binary search|quicksort|merge sort|linked list|pointer|recursion)\b',
+    r'\b(?:recipe|cooking|food|cook|pasta|pizza|cake|biryani)\b',
+    r'\b(?:poem|poetry|story|essay|joke|riddle|song)\b',
+    r'\b(?:who is|who was|who won|capital of|president|prime minister|weather|movie|film|actor|actress|cricket|football|ipl)\b',
+    r'\b(?:ddco|digital design|computer organization|microprocessor|operating system|dbms|compiler|automata|physics|chemistry|biology|quantum|thermodynamics|relativity|calculus|photosynthesis|blockchain|bitcoin|ethereum)\b',
+]
+
+
+def is_out_of_domain(text: str) -> bool:
+    """Strictly identify if a user query falls outside institutional attendance & timetable boundaries."""
+    clean = (text or "").lower().strip()
+    if not clean:
+        return False
+
+    # Identity, greetings, and system capability exceptions
+    if any(clean.startswith(g) or clean == g for g in [
+        'hi', 'hello', 'hey', 'good morning', 'good afternoon', 'good evening',
+        'help', 'who are you', 'how are you', 'what is your task', 'what is ur task', 'what can you do', 'what do you do'
+    ]):
+        return False
+
+    has_ood = any(re.search(pat, clean) for pat in OUT_OF_DOMAIN_PATTERNS)
+    has_in_domain = any(stem in clean for stem in IN_DOMAIN_STEMS)
+
+    # If it matches programming or non-institutional topics, even if 'class' is used (e.g. 'class in c++'), it's OOD
+    coding_or_subject_ood = bool(re.search(r'\b(?:c\+\+|python|java|javascript|ddco|quantum|physics|chemistry|recipe|poem|joke|weather)\b', clean))
+    if coding_or_subject_ood:
+        strong_in_domain = any(s in clean for s in ['attend', 'schedul', 'timetab', 'session', 'defaulter', 'vacan'])
+        if not strong_in_domain:
+            return True
+
+    if has_ood and not has_in_domain:
+        return True
+    return False
 
 
 # ============================================================================
@@ -1070,6 +1123,17 @@ class AttendanceAgent:
                     data=[],
                     tool_calls=[l.to_dict() for l in self.get_logs(req_id)],
                 )
+
+        # Strict Domain Boundary Guardrail: immediately reject out-of-domain queries
+        if self._is_out_of_domain(input_str) or self._is_out_of_domain(normalized_input):
+            return AgentResponse(
+                request_id=req_id,
+                message=OUT_OF_DOMAIN_REFUSAL,
+                success=True,
+                needs_confirmation=False,
+                data=[],
+                tool_calls=[l.to_dict() for l in self.get_logs(req_id)],
+            )
 
 
         # Check for unrecorded metrics not present in database schema (scores, gpa, grades, etc.)
@@ -2931,6 +2995,80 @@ class AttendanceAgent:
                     tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
                 )
 
+        # 3a. Person lookup by name ("who is Yatish", "USN of Yatish Balu").
+        #     Previously only USN lookups worked, so name-based questions fell
+        #     through to the generic "I do not have that data" answer.
+        name_match = re.search(
+            r"\b(?:who\s+is|what\s+is\s+the\s+(?:usn|name|id)\s+of|names?\s+of\s+students?|"
+            r"student\s+named|find\s+student|search\s+(?:for\s+)?students?|lookup\s+student)\s+"
+            r"([A-Za-z][A-Za-z.\s'-]{1,60})(?:\?|$)",
+            norm_text,
+            re.IGNORECASE,
+        )
+        if name_match:
+            person_name = re.sub(
+                r"\b(student|record|details|information|please|the|a|an)\b",
+                " ",
+                name_match.group(1),
+                flags=re.IGNORECASE,
+            ).strip(" .'\"-")
+            person_name = re.sub(r"\s+", " ", person_name)
+            if person_name and len(person_name) >= 3:
+                # Called directly: ToolRegistry.execute() reserves `name` for
+                # the tool name, so it cannot carry a student-name filter.
+                from tools.query_tool import query_tool
+
+                student_res = query_tool(
+                    query_type="students",
+                    name=person_name,
+                    db_target=db,
+                    scope=self.scope,
+                )
+                if student_res.found and student_res.data:
+                    rec = student_res.data[0]
+                    return AgentResponse(
+                        request_id=request_id,
+                        message=(
+                            f"Found student record: {rec.get('name')} "
+                            f"({rec.get('usn')}, Branch: {rec.get('branch')})."
+                        ),
+                        success=True,
+                        needs_confirmation=False,
+                        data=student_res.data,
+                        tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                    )
+
+                # Also check the institutional user directory (faculty/admin).
+                if db is not None and hasattr(db, "query"):
+                    try:
+                        from sqlalchemy import func
+
+                        from app.db.models import User
+
+                        user_row = (
+                            db.query(User)
+                            .filter(func.lower(User.name).like(f"%{person_name.lower()}%"))
+                            .first()
+                        )
+                        if user_row is not None:
+                            return AgentResponse(
+                                request_id=request_id,
+                                message=(
+                                    f"{user_row.name} is a {str(user_row.role).upper()} "
+                                    f"account (User ID: {user_row.user_id})."
+                                ),
+                                success=True,
+                                needs_confirmation=False,
+                                data=[{
+                                    "user_id": user_row.user_id,
+                                    "name": user_row.name,
+                                    "role": str(user_row.role),
+                                }],
+                                tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                            )
+                    except Exception:
+                        pass
+
         # 3. Student query
         usn_match = re.search(r"\b\d[A-Z]{2}\d{2}[A-Z]{2}\d{3}\b", norm_text, re.IGNORECASE)
         sem_match = re.search(r"\b([1-8])(?:st|nd|rd|th)?\s*(?:sem|semester)\b|\b(?:sem|semester)\s*([1-8])\b", norm_text, re.IGNORECASE)
@@ -4273,6 +4411,11 @@ class AttendanceAgent:
         return " ".join(word.capitalize() for word in match.group(1).split())
 
     @staticmethod
+    def _is_out_of_domain(clean: str) -> bool:
+        """Strictly identify if a user query falls outside institutional attendance & timetable boundaries."""
+        return is_out_of_domain(clean)
+
+    @staticmethod
     def _is_create_session_intent(clean: str) -> bool:
         """Detect intent to create, add, or schedule a new class session."""
         create_verbs = ["create", "add", "new", "schedule", "start", "setup", "set up"]
@@ -4367,7 +4510,8 @@ class AttendanceAgent:
                 from app.agent.provider import GeminiProvider
                 provider = GeminiProvider(api_key=api_key)
                 sys_inst = (
-                    f"You are RollCall AI, an intelligent, professional attendance and academic assistant for higher education.\n"
+                    f"You are RollCall AI, specialized exclusively for institutional attendance, classroom scheduling, "
+                    f"and student roster management at Dayananda Sagar College of Engineering (DSCE).\n"
                     f"LIVE REAL-TIME SYSTEM CLOCK:\n"
                     f"- Today's Day & Date: {now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')}\n"
                     f"- Current Local Time: {now_dt.strftime('%I:%M %p')} (IST)\n\n"
@@ -4375,8 +4519,14 @@ class AttendanceAgent:
                     f"- Name: {self.actor_name}\n"
                     f"- User ID: {self.actor_id} | Role: {self.actor_role}\n"
                     f"- Assigned Subjects: {subs_str}\n\n"
-                    "CONVERSATIONAL & FORMATTING RULES:\n"
-                    "1. Respond directly, naturally, and politely to the user's inquiry.\n"
+                    f"STRICT DOMAIN BOUNDARY & OUT-OF-DOMAIN REFUSAL POLICY (ZERO TOLERANCE):\n"
+                    f"You are ONLY an institutional attendance, timetable, classroom scheduling, and student roster assistant.\n"
+                    f"You MUST NEVER explain general academic concepts (such as DDCO, digital electronics, computer organization, operating systems, algorithms, etc.), write code, write poems/stories, answer general trivia, recipes, politics, entertainment, or anything outside institutional attendance and timetable management.\n"
+                    f"If the user asks ANY out-of-domain question (such as 'explain what is ddco', 'explain quantum computing', 'recipe for pasta', 'write a poem', etc.), you MUST IMMEDIATELY AND STRICTLY return ONLY this exact refusal response:\n"
+                    f"'{OUT_OF_DOMAIN_REFUSAL}'\n"
+                    f"Never provide any explanation, definition, or summary of the out-of-domain topic.\n\n"
+                    "CONVERSATIONAL & FORMATTING RULES FOR IN-DOMAIN QUERIES:\n"
+                    "1. Respond directly, naturally, and politely to the user's institutional inquiry.\n"
                     "2. Do NOT use markdown asterisks (**) or markdown header symbols (###) in your reply.\n"
                     "3. Present answers with crisp, clear paragraphs or clean bullet points.\n"
                     "4. If answering about today, date, or schedule, strictly reference the live system clock above.\n"

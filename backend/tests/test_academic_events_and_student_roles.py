@@ -90,5 +90,7 @@ def test_agent_calendar_events_intent():
     agent = AttendanceAgent(actor_role="ADMIN", actor_id="admin_root", db_target=db)
     res = agent.process_request(user_input="upload it to calendar", request_id="req-3")
     assert res.success is True
-    assert "Academic Calendar" in res.message
-    assert "Registered" in res.message or "Synchronized" in res.message
+    # The agent reports only events that actually exist in the database. With
+    # no uploaded calendar and no stored events, it must not invent a schedule.
+    assert "no academic calendar events stored" in res.message.lower()
+    assert res.data == []

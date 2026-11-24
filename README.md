@@ -117,8 +117,8 @@ The Form-B module is hardened against academic fraud, tampering, and denial-of-s
 | **Strict 45-Min Cutoff Window** | Auto-transition to `LATE_LOCKED` | Form-B must be submitted within 45 minutes of exam start. Unsubmitted sheets are locked to prevent post-exam grade tampering. |
 | **Append-Only Tamper-Proof Audit Lock** | Cryptographic SHA-256 Hash Chain | Every attendance mark modification, scan, and submission generates an append-only audit entry. Submitting permanently seals the record (`SUBMITTED`). |
 | **Admin Override Protocol** | Constant-time HMAC Admin Key | Once a room is `SUBMITTED` or `LATE_LOCKED`, invigilators cannot edit it. Unlocking strictly requires administrator override (`admin-override`) with audit logging. |
-| **3-Strike Login Rate Limiter** | Database/Redis Sliding Limiter | Max **3 consecutive failed logins** triggers an instant **60-second lockout** with `Retry-After: 60` HTTP 429 response. Protects against brute-force attacks. |
-| **Zero OTP Client Leakage** | Headless-Only Test Isolation | One-Time Passwords are never sent in API JSON responses or rendered in the frontend UI. Delivered strictly via authenticated email channels. |
+| **3-Attempt Login Rate Limiter** | Database/Redis Sliding Limiter | Max **3 failed logins per minute** triggers a temporary **60-second block** with `Retry-After: 60` HTTP 429. No permanent account lockout. Passwords are compared exactly - whitespace/punctuation variants are rejected. |
+| **OTP Password Reset** | Headless email delivery | `POST /password/forgot` mails a 6-digit OTP (10-minute TTL); `verify-otp` consumes it once and returns a reset token or sets a new bcrypt password and revokes all sessions. In development only, the code is echoed to aid testing - production never returns it. |
 | **Centralized Profile Governance** | Backend RBAC Restriction | Faculty names and usernames are locked centrally. Neither teachers nor the AI assistant can alter user identities; only `ADMIN` can update faculty names. |
 | **Magic-Byte & Upload Gatekeeper** | Binary header validation | Verifies uploaded files via magic bytes (`%PDF`, `\xFF\xD8\xFF`, `\x89PNG`) and optical quality gates (Laplacian variance sharpness $\ge 15.0$). |
 | **Cross-Device Chat Isolation** | Server-backed DB thread persistence | Real-time chat sync across multiple devices and browsers with concurrency locks and per-account isolation. |
@@ -275,7 +275,25 @@ GEMINI_API_KEY=your-gemini-api-key
 SEC_LOGIN_LIMIT=3
 SEC_LOGIN_WINDOW_SECONDS=60
 SEC_LOGIN_LOCKOUT_SECONDS=60
+
+# Seed credentials are required (no hardcoded defaults in source)
+SEED_ADMIN_PASSWORD=...
+SEED_FACULTY_1_PASSWORD=...
+SEED_FACULTY_2_PASSWORD=...
+SEED_FACULTY_3_PASSWORD=...
+SEED_PASSWORD_ADMIN_ROOT=...
+SEED_PASSWORD_TEACHER_CN=...
+SEED_PASSWORD_TEACHER_ML=...
+SEED_PASSWORD_TEACHER_DB=...
+
+# Vision OCR & photo quality gate
+VISION_TIMEOUT_MS=20000
+IMAGE_QUALITY_MAX_BRIGHTNESS=250.0
+ENABLE_LEGACY_API_PREFIX=true
 ```
+
+> Seeding fails fast when the `SEED_*` variables are missing. See
+> `docs/SECURITY_OPERATIONS.md` §8 for the secret-rotation runbook.
 
 ### 2. Run Backend & Frontend
 
@@ -294,9 +312,15 @@ npm run dev
 
 ```bash
 cd Roll_Call/backend
-# Execute the full Form-B and security test suite
-pytest tests/test_exams.py tests/test_password_reset_otp.py tests/test_auth.py tests/test_agent.py
+# Execute the full Form-B and security test suite (960 tests)
+pytest tests -q
 ```
+
+Recent fixes worth knowing:
+- Tab switches no longer refetch all data (persistent shell + 60s GET cache).
+- Analytics and exam summaries use single scoped queries instead of N+1 loops; `docs/database-query-reduction.md`.
+- Vision calls are time-bounded and overexposed sharp photos are auto-normalised; `docs/image-upload-performance.md`.
+- Natural-language session dates understand weekdays ("on friday") and extract subject/instructor/room from chat prompts.
 
 ---
 

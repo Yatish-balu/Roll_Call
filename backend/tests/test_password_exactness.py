@@ -61,6 +61,12 @@ def test_exact_password_succeeds(client):
     assert _login(client, EXACT_PASSWORD).status_code == 200
 
 
+def test_a_bcrypt_hash_is_not_a_password(client):
+    # Pasting the stored hash into the password field must never authenticate.
+    stored_hash = bcrypt.hashpw(EXACT_PASSWORD.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    assert _login(client, stored_hash).status_code == 401
+
+
 @pytest.mark.parametrize(
     "variant",
     [

@@ -51,3 +51,48 @@ def test_orchestrator_refusal_response_handling():
     assert res.final_response == expected_refusal
     assert res.steps_executed == 1
 
+
+def test_attendance_agent_strict_domain_restriction():
+    """Verify AttendanceAgent strictly refuses out-of-domain queries like DDCO explanations."""
+    from app.agent.legacy_agent import AttendanceAgent, OUT_OF_DOMAIN_REFUSAL
+    from app.security.ai_policy import TRUSTED_INTERNAL
+
+    agent = AttendanceAgent(
+        actor_role=TRUSTED_INTERNAL,
+        actor_name="Nida Afreen Rizvi",
+        actor_id="faculty_rm",
+        assigned_subjects=["22RMK56", "RM"],
+    )
+
+    out_of_domain_queries = [
+        "xplain me what is ddco and basics",
+        "explain what is quantum computing",
+        "what is ddco",
+        "ddco basics",
+        "how to write binary search in python",
+        "recipe for pasta",
+        "write a poem about trees",
+        "who is the prime minister of india",
+        "tell me a joke",
+        "explain operating systems",
+    ]
+
+    for q in out_of_domain_queries:
+        resp = agent.process_request(user_input=q, request_id=f"test_{q[:10]}")
+        assert resp.success is True
+        assert resp.message == OUT_OF_DOMAIN_REFUSAL, f"Expected refusal for '{q}', got '{resp.message}'"
+
+    # Verify in-domain queries are NOT blocked by domain restriction
+    in_domain_queries = [
+        "show my schedule for today",
+        "what is your task",
+        "who are you",
+        "how are you",
+        "find vacant classrooms",
+        "list defaulters (<75%)",
+    ]
+    for q in in_domain_queries:
+        resp = agent.process_request(user_input=q, request_id=f"test_{q[:10]}")
+        assert resp.message != OUT_OF_DOMAIN_REFUSAL, f"In-domain query '{q}' was wrongly refused"
+
+

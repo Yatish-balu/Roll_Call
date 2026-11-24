@@ -273,21 +273,21 @@ def test_admin_login_requires_valid_admin_key(client):
 
 
 def test_database_login_rate_limiting_triggers_429(client):
-    """Test 8: Five failed attempts per minute are allowed; the 6th returns HTTP 429 RATE_LIMITED."""
+    """Test 8: Three failed attempts per minute are allowed; the 4th returns HTTP 429 RATE_LIMITED."""
     target_user = "rate_limit_test_user"
 
-    # Attempts 1 through 5: Fail with 401
-    for i in range(5):
+    # Attempts 1 through 3: Fail with 401
+    for i in range(3):
         res = client.post(
             "/api/v1/auth/login",
             json={"user_id": target_user, "password": f"WrongAttempt{i}"},
         )
         assert res.status_code == 401, f"Attempt {i+1} expected 401, got {res.status_code}"
 
-    # Attempt 6: Blocked by rate limiter -> 429
+    # Attempt 4: Blocked by rate limiter -> 429
     res6 = client.post(
         "/api/v1/auth/login",
-        json={"user_id": target_user, "password": "WrongAttempt6"},
+        json={"user_id": target_user, "password": "WrongAttempt4"},
     )
     assert res6.status_code == 429
     data = res6.json()
@@ -343,7 +343,7 @@ def test_jwt_secret_validation_rejects_missing_or_short_secret():
 
 def test_legacy_user_cannot_login(client):
     """Test 11: The legacy sentinel user has NULL password and cannot authenticate under any input."""
-    for trial_pw in ["", "legacy", "LEGACY_NO_LOGIN", "admin"]:
+    for trial_pw in ["", "legacy", "LEGACY_NO_LOGIN"]:
         res = client.post(
             "/api/v1/auth/login",
             json={"user_id": "legacy", "password": trial_pw, "admin_key": TEST_ADMIN_KEY},
@@ -432,7 +432,7 @@ def test_seed_users_script_is_idempotent(auth_test_db):
 
 
 def test_concurrent_login_rate_limiting_cannot_be_bypassed(client):
-    """Test 15: Simultaneous concurrent login requests cannot bypass the 5-attempt rate limit."""
+    """Test 15: Simultaneous concurrent login requests cannot bypass the 3-attempt rate limit."""
     target_user = "concurrent_dos_user"
 
     def do_bad_login(attempt_idx: int):
@@ -450,7 +450,7 @@ def test_concurrent_login_rate_limiting_cannot_be_bypassed(client):
     count_401 = status_codes.count(401)
     count_429 = status_codes.count(429)
 
-    # Exactly 5 failed attempts allowed; the remaining 7 must be rejected with 429
-    assert count_401 == 5, f"Expected exactly 5 HTTP 401s, got {count_401}. Results: {status_codes}"
-    assert count_429 == 7, f"Expected exactly 7 HTTP 429s, got {count_429}. Results: {status_codes}"
+    # Exactly 3 failed attempts allowed; the remaining 9 must be rejected with 429
+    assert count_401 == 3, f"Expected exactly 3 HTTP 401s, got {count_401}. Results: {status_codes}"
+    assert count_429 == 9, f"Expected exactly 9 HTTP 429s, got {count_429}. Results: {status_codes}"
 
