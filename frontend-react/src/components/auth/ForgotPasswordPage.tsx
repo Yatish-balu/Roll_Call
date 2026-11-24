@@ -38,7 +38,6 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
-  const [devOtp, setDevOtp] = useState<string | null>(navState.otp || null);
 
   // Resend OTP countdown (60 seconds)
   const [resendSeconds, setResendSeconds] = useState(0);
@@ -150,9 +149,6 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
       setInfoMessage(
         res.message || `A 6-digit OTP has been sent to the email address registered with ${cleanId}.`
       );
-      if (res.otp) {
-        setDevOtp(res.otp);
-      }
       setResendSeconds(60);
       setStep("otp");
     } catch (err: unknown) {
@@ -337,24 +333,7 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({
           </div>
         )}
 
-        {/* Development Environment OTP Helper Badge */}
-        {devOtp && (step === "otp" || step === "password") && (
-          <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-300 text-amber-900 text-xs flex items-center justify-between shadow-2xs">
-            <span className="flex items-center gap-1.5 font-medium">
-              <span>⚡</span>
-              <span>Dev Mailbox Code: <strong>{devOtp}</strong></span>
-            </span>
-            {step === "otp" && (
-              <button
-                type="button"
-                onClick={() => setOtpCode(devOtp)}
-                className="px-2 py-0.5 rounded-md bg-amber-200 hover:bg-amber-300 text-amber-950 font-bold text-[11px] transition-colors cursor-pointer"
-              >
-                Auto-fill
-              </button>
-            )}
-          </div>
-        )}
+
 
         {/* ========================================================================= */}
         {/* STEP 1: REQUEST OTP                                                       */}

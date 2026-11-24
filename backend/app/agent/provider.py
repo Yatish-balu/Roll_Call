@@ -89,13 +89,16 @@ class GeminiProvider(LLMProvider):
 
     FALLBACK_MODELS = [
         "gemini-3.5-flash-lite",
-        "gemini-flash-lite-latest",
-        "gemini-3.8-flash",
-        "gemini-3.5-flash",
+        "gemini-3.6-flash",
     ]
 
     def __init__(self, api_key: Optional[str] = None, model_name: str = "gemini-3.5-flash-lite"):
-        self.api_key = (api_key or os.getenv("GEMINI_API_KEY") or "").strip()
+        key = (api_key or os.getenv("GEMINI_API_KEY") or "").strip()
+        if not key:
+            from dotenv import load_dotenv
+            load_dotenv()
+            key = (os.getenv("GEMINI_API_KEY") or "").strip()
+        self.api_key = key
         self.model_name = model_name
         self._client = None
 

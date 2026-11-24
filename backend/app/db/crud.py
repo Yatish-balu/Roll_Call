@@ -2376,6 +2376,7 @@ def list_teacher_subject_mappings(
 
 
 _AUDIT_ROLE_SUPPORT_CACHE: "WeakKeyDictionary[Any, bool]" = WeakKeyDictionary()
+_AUDIT_CHAIN_SUPPORT_CACHE: "WeakKeyDictionary[Any, bool]" = WeakKeyDictionary()
 
 
 def _audit_log_supports_actor_role(target: Union[sqlite3.Connection, Session]) -> bool:
@@ -2433,6 +2434,9 @@ def _audit_log_supports_chain(target: Union[sqlite3.Connection, Session]) -> boo
             bind = target.get_bind()
             if bind is None:
                 return False
+            cached = _AUDIT_CHAIN_SUPPORT_CACHE.get(bind)
+            if cached is not None:
+                return cached
             if bind.dialect.name == "sqlite":
                 rows = target.execute(text("PRAGMA table_info(audit_log)")).fetchall()
                 columns = {row[1] for row in rows}
@@ -2444,6 +2448,9 @@ def _audit_log_supports_chain(target: Union[sqlite3.Connection, Session]) -> boo
                     )
                 ).fetchall()
                 columns = {row[0] for row in rows}
+            supported = {"chain_id", "prev_hash", "row_hash"}.issubset(columns)
+            _AUDIT_CHAIN_SUPPORT_CACHE[bind] = supported
+            return supported
         else:
             columns = {
                 row[1] for row in target.execute("PRAGMA table_info(audit_log)").fetchall()
@@ -2669,6 +2676,73 @@ def create_audit_entry(
         "reason": reason,
         "timestamp": ts,
     }
+
+
+def create_audit_entries_batch(
+    target: Union[sqlite3.Connection, Session, str] = DEFAULT_DB_PATH,
+    entries: Optional[List[Dict[str, Any]]] = None,
+) -> int:
+    """Create multiple append-only audit log entries in one efficient operation."""
+    if not entries:
+        return 0
+    if not isinstance(target, Session):
+        for entry in entries:
+            create_audit_entry(target, **entry)
+        return len(entries)
+
+    supports_role = _audit_log_supports_actor_role(target)
+    supports_chain = _audit_log_supports_chain(target)
+    secret = get_chain_secret() if supports_chain else None
+
+    chain_id = DEFAULT_CHAIN_ID if secret is not None else None
+    current_hash = _audit_chain_prev_hash(target, chain_id) if chain_id is not None else None
+
+    all_values = []
+    last_row_hash = None
+    last_ts = _utcnow_iso()
+
+    for item in entries:
+        clean_actor = str(item.get("actor_id", "")).strip()
+        clean_act = str(item.get("action", "")).strip().upper()
+        ts = item.get("timestamp") or _utcnow_iso()
+        last_ts = ts
+        actor_role = item.get("actor_role")
+        clean_role = str(actor_role).strip().upper() if actor_role else None
+
+        values: Dict[str, Any] = {
+            "actor_id": clean_actor,
+            "action": clean_act,
+            "session_id": str(item.get("session_id", "")).strip() if item.get("session_id") else None,
+            "usn": str(item.get("usn", "")).strip().upper() if item.get("usn") else None,
+            "entity_type": str(item.get("entity_type", "")).strip(),
+            "entity_id": str(item.get("entity_id", "")).strip(),
+            "old_value": item.get("old_value"),
+            "new_value": item.get("new_value"),
+            "reason": str(item.get("reason", "")).strip() if item.get("reason") else None,
+            "timestamp": ts,
+        }
+        if supports_role:
+            values["actor_role"] = clean_role
+
+        if secret is not None and chain_id is not None:
+            values["chain_id"] = chain_id
+            values["prev_hash"] = current_hash
+            row_hash = compute_row_hash(
+                {**values, "chain_id": chain_id, "prev_hash": current_hash}, secret
+            )
+            values["row_hash"] = row_hash
+            current_hash = row_hash
+            last_row_hash = row_hash
+
+        all_values.append(values)
+
+    if all_values:
+        target.execute(sa_insert(AuditLog.__table__), all_values)
+        target.flush()
+        if chain_id is not None and last_row_hash:
+            _audit_chain_advance_head(target, chain_id, str(last_row_hash), None, last_ts)
+
+    return len(all_values)
 
 
 def list_audit_entries(

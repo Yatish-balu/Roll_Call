@@ -554,7 +554,13 @@ def replace_attendance(
         # Staged edits protect their attendance row: refuse instead of losing them.
         db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    except HTTPException:
+        db.rollback()
+        raise
     except Exception as exc:
+        # Unexpected failures (e.g. an audit backend outage) are server errors,
+        # not a bad request. Roll back the attendance write and let the global
+        # handler return a generic 500 without leaking the exception message.
         db.rollback()
         logger.error("Failed to replace attendance: %s", exc)
         raise

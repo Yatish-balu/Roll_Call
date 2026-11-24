@@ -33,6 +33,7 @@ from app.schemas.session import (
     SessionCreate,
     SessionPageResponse,
     SessionResponse,
+    SessionUpdate,
 )
 from app.services.attendance_edit import update_attendance
 
@@ -130,10 +131,21 @@ def list_sessions(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
-    # Auto-initialize today's sessions from timetable so teachers see upcoming classes immediately
+    # Session initialisation is a multi-query write transaction. Only run it
+    # when the requested day has no sessions at all - a page refresh should not
+    # re-run the timetable import and commit for every list request.
     try:
+        from sqlalchemy import select
+
+        from app.db.models import Session as DbSession
+
         init_date = dt.date.fromisoformat(date) if date else dt.date.today()
-        initialize_sessions_for_date(db, init_date)
+        if not db.execute(
+            select(DbSession.session_id)
+            .where(DbSession.date == init_date.isoformat())
+            .limit(1)
+        ).first():
+            initialize_sessions_for_date(db, init_date)
     except Exception as exc:
         logger.debug("Automatic session initialisation skipped: %s", exc)
 
@@ -757,6 +769,59 @@ def get_session_by_id(
     _attach_lock_fields(session, caller_role, now_iso)
     _annotate_delegations(db, [session], current_user)
     return session
+
+
+@router.patch(
+    "/{session_id}",
+    response_model=SessionResponse,
+    summary="Update session details",
+    description="Update a session's date, subject, or assigned details.",
+)
+@router.put(
+    "/{session_id}",
+    response_model=SessionResponse,
+    summary="Update session details (PUT)",
+)
+def update_session_by_id(
+    session_id: str,
+    payload: SessionUpdate,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.FACULTY)),
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    from app.db.models import Session as DbSession
+    clean_id = session_id.strip()
+    session_row = db.get(DbSession, clean_id)
+    if not session_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session with ID '{clean_id}' not found.",
+        )
+    # Check permissions: owner or admin
+    if current_user.role != Role.ADMIN and session_row.teacher_id != current_user.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden: You can only edit sessions you own.",
+        )
+    if payload.date:
+        session_row.date = payload.date
+    if payload.subject:
+        session_row.subject = payload.subject
+
+    db.commit()
+    db.refresh(session_row)
+    session_dict = crud.get_session(db, session_id=clean_id)
+    if not session_dict:
+        session_dict = {
+            "session_id": session_row.session_id,
+            "date": session_row.date,
+            "subject": session_row.subject,
+            "teacher_id": session_row.teacher_id,
+            "subject_code": getattr(session_row, "subject_code", None),
+        }
+    now_iso = datetime.now(timezone.utc).isoformat()
+    caller_role = str(current_user.role.value if hasattr(current_user.role, "value") else current_user.role).upper()
+    _attach_lock_fields(session_dict, caller_role, now_iso)
+    return session_dict
 
 
 def _utcnow_iso() -> str:

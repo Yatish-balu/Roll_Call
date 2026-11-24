@@ -289,6 +289,45 @@ def write_attendance_audit(
     if not clean_actor:
         raise ValueError("An actor identity is required to audit an attendance change.")
 
+    ts_now = _utcnow_iso()
+    if len(changes) == 1:
+        change = changes[0]
+        entity_id = change.attendance_id or f"{session_id}:{change.usn}"
+        crud.create_audit_entry(
+            db,
+            actor_id=clean_actor,
+            actor_role=actor_role,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            session_id=session_id,
+            usn=change.usn,
+            old_value=change.old_status,
+            new_value=change.new_status,
+            reason=reason,
+            timestamp=ts_now,
+        )
+        return 1
+
+    entries = [
+        {
+            "actor_id": clean_actor,
+            "actor_role": actor_role,
+            "action": action,
+            "entity_type": entity_type,
+            "entity_id": change.attendance_id or f"{session_id}:{change.usn}",
+            "session_id": session_id,
+            "usn": change.usn,
+            "old_value": change.old_status,
+            "new_value": change.new_status,
+            "reason": reason,
+            "timestamp": ts_now,
+        }
+        for change in changes
+    ]
+    if hasattr(crud, "create_audit_entries_batch"):
+        return crud.create_audit_entries_batch(db, entries=entries)
+
     written = 0
     for change in changes:
         entity_id = change.attendance_id or f"{session_id}:{change.usn}"
@@ -304,7 +343,7 @@ def write_attendance_audit(
             old_value=change.old_status,
             new_value=change.new_status,
             reason=reason,
-            timestamp=_utcnow_iso(),
+            timestamp=ts_now,
         )
         written += 1
     return written

@@ -7,10 +7,15 @@ import logging
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user
-from app.auth.session_scope import resolve_data_scope, resolve_session_scope
+from app.auth.session_scope import (
+    resolve_data_scope,
+    resolve_session_scope,
+    session_scope_condition,
+)
 from app.db import crud
 from app.dependencies import get_db
 from app.schemas.analytics import (
@@ -38,6 +43,51 @@ def _validate_iso_date(date_str: str) -> str:
             detail=f"Invalid ISO date '{date_str}'. Expected valid calendar date in YYYY-MM-DD format.",
         )
     return cleaned
+
+
+def _attendance_records_in_scope(
+    db: Session,
+    scope,
+    session_date: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Load all attendance rows a caller may see in ONE joined query.
+
+    The previous implementation looped over every session and called
+    ``get_session_attendance_details`` for each one (1 + N full joins). For a
+    dashboard with a year of sessions that meant hundreds of queries per view.
+    """
+    from app.db.models import Attendance, Room, Session as DbSession, Student
+
+    stmt = (
+        select(
+            Attendance.session_id,
+            DbSession.date.label("session_date"),
+            DbSession.subject,
+            Attendance.usn,
+            Student.name.label("student_name"),
+            Student.branch,
+            Attendance.room_id,
+            Room.name.label("room_name"),
+            Attendance.status,
+            Attendance.source,
+            Attendance.confidence,
+        )
+        .join(DbSession, Attendance.session_id == DbSession.session_id)
+        .join(Student, Attendance.usn == Student.usn)
+        .join(Room, Attendance.room_id == Room.room_id)
+    )
+    if not scope.unrestricted:
+        stmt = stmt.where(
+            session_scope_condition(
+                scope.user_id,
+                sorted(scope.subject_codes),
+                sorted(scope.delegated_session_ids),
+            )
+        )
+    if session_date is not None:
+        stmt = stmt.where(DbSession.date == session_date)
+
+    return [dict(row._mapping) for row in db.execute(stmt.order_by(Student.name.asc())).all()]
 
 
 # ==============================================================================
@@ -102,33 +152,9 @@ def get_date_summary(
     db: Session = Depends(get_db),
 ) -> SummaryReportResponse:
     clean_date = _validate_iso_date(date)
-    sessions = crud.get_sessions_by_date(db, date=clean_date)
     scope = resolve_session_scope(db, current_user)
-    sessions = [s for s in sessions if scope.allows(s)]
-
-    if not sessions:
-        # Gracefully handle dates with no sessions
-        return SummaryReportResponse(
-            room_wise=[],
-            branch_wise=[],
-            overall=OverallSummary(
-                present=0,
-                absent=0,
-                pending=0,
-                unreviewed=0,
-                unresolved=0,
-                confirmed=0,
-                total=0,
-                percentage=0.0,
-                confirmed_percentage=0.0,
-            ),
-            date=clean_date,
-        )
-
-    all_records: List[Dict[str, Any]] = []
-    for sess in sessions:
-        recs = crud.get_session_attendance_details(db, session_id=sess["session_id"])
-        all_records.extend(recs)
+    # One scoped join instead of one query per session on that date.
+    all_records = _attendance_records_in_scope(db, scope, session_date=clean_date)
 
     report = summary_tool(all_records)
 
@@ -281,13 +307,9 @@ def get_overall_overview(
     current_user: AuthenticatedUser = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> SummaryReportResponse:
-    sessions = crud.get_all_sessions(db)
     scope = resolve_session_scope(db, current_user)
-    sessions = [s for s in sessions if scope.allows(s)]
-    all_records: List[Dict[str, Any]] = []
-    for sess in sessions:
-        recs = crud.get_session_attendance_details(db, session_id=sess["session_id"])
-        all_records.extend(recs)
+    # A single scoped join replaces the previous N+1 per-session queries.
+    all_records = _attendance_records_in_scope(db, scope)
 
     report = summary_tool(all_records)
 

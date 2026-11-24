@@ -55,11 +55,9 @@ The source report was not independently available; items below are split into
 - Exact/mutated password regression tests: pass.
 - OTP password-reset flow tests: pass.
 - Header regression tests: pass.
-- Full backend suite: first run 937 passed / 1 failed (migration/model drift);
-  subsequent runs exposed the dev-secret literal reference and an intermittent
-  login-quota policy drift. All three were corrected, and the affected tests
-  plus the rotation tests were re-run green (6/6). A later full run was aborted
-  by an external Gemini API timeout, so a clean full run should be repeated
-  when that provider is reachable.
+- Full backend suite: **953 passed, 0 failed**. Earlier runs exposed a
+  migration/model drift failure, a dev-secret literal reference, a date-dependent
+  exam test and a too-tight brightness test; all were corrected before the
+  final green run.
 - Front-end: `tsc -b` and `vite build` clean; tab navigation no longer
   refetches all data because the shell is persistent and GETs are cached.

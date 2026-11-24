@@ -413,22 +413,26 @@ def update_user_profile(
 
     try:
         updated_fields = []
+        actor_role = str(kwargs.get("actor_role") or "").upper()
         if clean_name:
-            # Update users table
-            db.execute(
-                text("UPDATE users SET name = :n WHERE user_id = :uid"),
-                {"n": clean_name, "uid": actor_id},
-            )
-            # Update or insert into user_profiles table
-            upsert_sql = text("""
-                INSERT INTO user_profiles (user_id, full_name, updated_at)
-                VALUES (:uid, :n, :ts)
-                ON CONFLICT(user_id) DO UPDATE SET
-                    full_name = EXCLUDED.full_name,
-                    updated_at = EXCLUDED.updated_at
-            """)
-            db.execute(upsert_sql, {"uid": actor_id, "n": clean_name, "ts": now_iso})
-            updated_fields.append(f"Name set to '{clean_name}'")
+            if actor_role != "ADMIN":
+                logger.warning("Teacher %s attempted to update full_name but only ADMIN is allowed.", actor_id)
+            else:
+                # Update users table
+                db.execute(
+                    text("UPDATE users SET name = :n WHERE user_id = :uid"),
+                    {"n": clean_name, "uid": actor_id},
+                )
+                # Update or insert into user_profiles table
+                upsert_sql = text("""
+                    INSERT INTO user_profiles (user_id, full_name, updated_at)
+                    VALUES (:uid, :n, :ts)
+                    ON CONFLICT(user_id) DO UPDATE SET
+                        full_name = EXCLUDED.full_name,
+                        updated_at = EXCLUDED.updated_at
+                """)
+                db.execute(upsert_sql, {"uid": actor_id, "n": clean_name, "ts": now_iso})
+                updated_fields.append(f"Name set to '{clean_name}'")
 
         if email:
             clean_email = email.strip()

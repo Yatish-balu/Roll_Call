@@ -22,7 +22,7 @@ import {
   type UserChatThreadSummary,
   type UserChatMessageItem,
 } from "@/services/api/agent";
-import { AnimatedAiMascot } from "@/features/dashboard/components/AnimatedAiMascot";
+
 
 /** Roster formats accepted by the backend upload endpoint. */
 const SUPPORTED_UPLOAD_EXTENSIONS = [".pdf", ".xlsx", ".xls", ".csv", ".txt"];
@@ -101,13 +101,17 @@ interface ChatMessage {
   } | null;
 }
 
-const QUICK_PROMPTS = [
-  "Summarize today's overall attendance",
-  "List students with attendance below 75%",
-  "Which sessions have pending unreviewed attendance?",
-  "Check my exam invigilation duties",
-  "Show attendance statistics for Computer Science (CSE)",
-];
+function getRealtimeQuickPrompts(): string[] {
+  const day = new Date().toLocaleDateString("en-US", { weekday: "long" });
+  return [
+    `Show my class schedule for ${day}`,
+    "Summarize today's overall attendance",
+    "Find vacant classrooms right now",
+    "Which sessions have pending unreviewed attendance?",
+    "List students with attendance below 75%",
+    "Show attendance statistics for Computer Science (CSE)",
+  ];
+}
 
 let messageSeq = 0;
 function nextMsgId(prefix: string): string {
@@ -156,9 +160,9 @@ function getContextualActions(m: ChatMessage): ContextAction[] {
   // 2. Profile View (e.g. "Faculty Profile for...")
   if (lower.includes("faculty profile for") || lower.includes("profile for")) {
     return [
-      { label: "✏️ Change Name to Yatish Balu", prompt: "change my name in my profile to Yatish Balu", variant: "primary" },
       { label: "📱 Update Mobile", prompt: "update my mobile number in my profile to 9876543210" },
       { label: "📅 Show Today's Schedule", prompt: "Show my class schedule for today" },
+      { label: "📊 Today's Attendance", prompt: "Summarize today's overall attendance" },
     ];
   }
 
@@ -208,12 +212,28 @@ function getContextualActions(m: ChatMessage): ContextAction[] {
     ];
   }
 
+  // 5b. Assistant Intro / Role / Task Overview
+  if (
+    lower.includes("rollcall ai") ||
+    lower.includes("intelligent attendance assistant") ||
+    lower.includes("what i can do") ||
+    lower.includes("my core task")
+  ) {
+    return [
+      { label: "📅 Today's Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "🚪 Find Vacant Rooms", prompt: "Find vacant classrooms right now" },
+      { label: "📊 Today's Attendance", prompt: "Summarize today's overall attendance" },
+      { label: "⚠️ Check Defaulters", prompt: "List students with attendance below 75%" },
+    ];
+  }
+
   // 6. Defaulters List
   if (
-    lower.includes("defaulter") ||
-    lower.includes("<75%") ||
-    lower.includes("attendance shortage") ||
-    lower.includes("below 75")
+    (lower.includes("defaulter") ||
+      lower.includes("attendance shortage") ||
+      lower.includes("below 75%")) &&
+    !lower.includes("you can ask me") &&
+    !lower.includes("what i can do")
   ) {
     return [
       { label: "📊 Branch Attendance Breakdown", prompt: "Show attendance statistics for Computer Science (CSE)", variant: "primary" },
@@ -438,6 +458,7 @@ export function AssistantView() {
   const [inputQuery, setInputQuery] = useState("");
   const [isProcessing, setIsProcessing] = useState(false);
   const [agentStatus, setAgentStatus] = useState<AgentStatus | null>(null);
+  const isSwitchingThreadRef = useRef(false);
 
   // Synchronize threads on user identity change (strict per-account isolation)
   useEffect(() => {
@@ -479,6 +500,7 @@ export function AssistantView() {
           const target = (storedActive && combined.find((t) => t.thread_id === storedActive)) || combined[0];
           setCurrentThreadId(target.thread_id);
           setCurrentThreadTitle(target.title);
+          window.localStorage.setItem(`rollcall_active_thread_${userId}`, target.thread_id);
 
           try {
             const detail = await fetchChatThread(target.thread_id);
@@ -572,7 +594,8 @@ export function AssistantView() {
       }
     }
 
-    // Skip network sync for pristine initial welcome
+    // Skip network sync when switching threads or on pristine initial welcome
+    if (isSwitchingThreadRef.current) return;
     if (messages.length <= 1 && messages[0]?.id === "welcome") return;
     if (!userId || !currentThreadId) return;
 
@@ -617,10 +640,10 @@ export function AssistantView() {
           console.warn("Background chat thread sync skipped", err);
           setThreads(getLocalChatThreads(userId));
         });
-    }, 1200);
+    }, 400);
 
     return () => clearTimeout(timer);
-  }, [messages, userId, currentThreadId, currentThreadTitle]);
+  }, [messages, userId, currentThreadId]);
 
   // Load available sessions for context selector
   useEffect(() => {
@@ -638,18 +661,48 @@ export function AssistantView() {
     };
   }, []);
 
+  const refreshThreads = useCallback(async () => {
+    if (!userId) return;
+    try {
+      setIsLoadingThreads(true);
+      const userThreads = await fetchUserChatThreads();
+      const localList = getLocalChatThreads(userId);
+      const map = new Map<string, UserChatThreadSummary>();
+      (userThreads || []).forEach((t) => map.set(t.thread_id, t));
+      localList.forEach((t) => {
+        if (!map.has(t.thread_id)) map.set(t.thread_id, t);
+      });
+      setThreads(Array.from(map.values()));
+    } catch {
+      setThreads(getLocalChatThreads(userId));
+    } finally {
+      setIsLoadingThreads(false);
+    }
+  }, [userId]);
+
   const handleNewChat = useCallback(() => {
+    isSwitchingThreadRef.current = true;
     const newId = `thread_${Date.now()}`;
     setCurrentThreadId(newId);
     setCurrentThreadTitle("New Conversation");
+    if (userId) {
+      window.localStorage.setItem(`rollcall_active_thread_${userId}`, newId);
+    }
     setMessages([defaultWelcomeMessage()]);
     setIsRecentDrawerOpen(false);
-  }, []);
+    setTimeout(() => {
+      isSwitchingThreadRef.current = false;
+    }, 100);
+  }, [userId]);
 
   const handleSelectThread = useCallback(async (thread: UserChatThreadSummary) => {
+    isSwitchingThreadRef.current = true;
     setIsRecentDrawerOpen(false);
     setCurrentThreadId(thread.thread_id);
     setCurrentThreadTitle(thread.title);
+    if (userId) {
+      window.localStorage.setItem(`rollcall_active_thread_${userId}`, thread.thread_id);
+    }
 
     try {
       const detail = await fetchChatThread(thread.thread_id);
@@ -672,6 +725,10 @@ export function AssistantView() {
         }
       }
       setMessages([defaultWelcomeMessage()]);
+    } finally {
+      setTimeout(() => {
+        isSwitchingThreadRef.current = false;
+      }, 100);
     }
   }, [userId]);
 
@@ -1642,7 +1699,10 @@ export function AssistantView() {
           {/* Recent Chats Tab / Button */}
           <button
             type="button"
-            onClick={() => setIsRecentDrawerOpen(true)}
+            onClick={() => {
+              setIsRecentDrawerOpen(true);
+              void refreshThreads();
+            }}
             className="px-3 py-1.5 rounded-xl text-xs font-bold text-[#24251C] bg-[#F2EDE0] hover:bg-[#E4DDCA] border border-[#E4DDCA] transition-all cursor-pointer flex items-center gap-1.5 shadow-2xs"
             title="Browse recent conversations saved to your account"
           >
@@ -2230,9 +2290,9 @@ export function AssistantView() {
         })}
 
         {isProcessing && (
-          <div className="flex items-center gap-3 text-xs text-[#77735F] bg-[#F2EDE0] p-4 rounded-2xl w-fit border border-[#E4DDCA]">
-            <AnimatedAiMascot isThinking={true} className="h-10" />
-            <span>Analyzing attendance records...</span>
+          <div className="flex items-center gap-3 text-xs text-[#77735F] bg-[#F2EDE0] px-4 py-3 rounded-2xl w-fit border border-[#E4DDCA]">
+            <div className="w-4 h-4 border-2 border-[#3F451F] border-t-transparent rounded-full animate-spin shrink-0" />
+            <span className="font-semibold text-[#24251C]">Processing request...</span>
           </div>
         )}
 
@@ -2284,7 +2344,7 @@ export function AssistantView() {
 
       {/* Quick Prompts */}
       <div className="py-2 flex items-center gap-2 overflow-x-auto text-xs no-scrollbar">
-        {QUICK_PROMPTS.map((prompt) => (
+        {getRealtimeQuickPrompts().map((prompt) => (
           <button
             key={prompt}
             onClick={() => void handleSendMessage(prompt)}

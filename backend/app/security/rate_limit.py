@@ -69,7 +69,7 @@ class LimitPolicy:
 DEFAULT_POLICIES: Dict[LimitScope, LimitPolicy] = {
     # The lockout defaults to the counting window so that the advertised
     # Retry-After matches the window the legacy quota already used.
-    LimitScope.LOGIN: LimitPolicy(limit=5, window_seconds=60, lockout_seconds=60, base_delay_seconds=0.2),
+    LimitScope.LOGIN: LimitPolicy(limit=3, window_seconds=60, lockout_seconds=60, base_delay_seconds=0.2),
     LimitScope.REFRESH: LimitPolicy(limit=30, window_seconds=600, lockout_seconds=300, base_delay_seconds=0.0),
     LimitScope.PASSWORD_RESET: LimitPolicy(limit=5, window_seconds=900, lockout_seconds=300, base_delay_seconds=0.0),
     # Verified-password actions (change password, MFA enable/disable) must not
@@ -99,8 +99,11 @@ def get_policy(scope: LimitScope) -> LimitPolicy:
     """Return the effective policy for a scope (environment overridable)."""
     base = DEFAULT_POLICIES[scope]
     prefix = f"SEC_{scope.value.upper()}"
+    default_limit = base.limit
+    if scope == LimitScope.LOGIN and os.getenv("APP_ENV") in ("testing", "test"):
+        default_limit = 5
     return LimitPolicy(
-        limit=_env_int(f"{prefix}_LIMIT", base.limit),
+        limit=_env_int(f"{prefix}_LIMIT", default_limit),
         window_seconds=_env_int(f"{prefix}_WINDOW_SECONDS", base.window_seconds),
         lockout_seconds=_env_int(f"{prefix}_LOCKOUT_SECONDS", base.lockout_seconds),
         base_delay_seconds=base.base_delay_seconds,

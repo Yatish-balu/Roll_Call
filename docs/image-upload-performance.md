@@ -32,6 +32,16 @@ Set `VISION_TIMEOUT_MS` in `.env` (milliseconds, 5000–120000). Lower values fa
 faster when a model is throttled; higher values suit slow networks. The value
 is clamped to safe bounds.
 
+## Photo quality gate
+
+A sharp white Form-B sheet measured ~233 brightness was rejected because the
+upper brightness ceiling was too tight (225 on the affected deployment). The
+ceiling is now 250 by default (`IMAGE_QUALITY_MAX_BRIGHTNESS`) and a sharp but
+overexposed upload is automatically exposure-normalised once before the Vision
+call instead of forcing a retake. The response also carries
+`brightness_max_threshold`, and the UI now displays the acceptable range rather
+than a misleading "minimum ≥ 80".
+
 ## Verification
 
 - `backend/tests/test_vision_timeout.py` — timeout defaults, overrides and

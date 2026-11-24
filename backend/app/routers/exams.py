@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Response, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.auth import Role, get_current_user, require_roles
 from app.db.models import Exam, ExamSeating, RoomAssignment, User
@@ -888,11 +888,23 @@ def get_room_wise_summary(
     if not exam:
         raise HTTPException(status_code=404, detail="Exam not found.")
 
-    rooms = db.query(RoomAssignment).filter(RoomAssignment.exam_id == exam_id).order_by(RoomAssignment.room_no.asc()).all()
+    # One seating query for the whole exam + one eager-loaded rooms query.
+    # The old per-room loop issued 1 + 2*rooms queries (seating + lazy
+    # invigilator for every room) on each dashboard refresh.
+    rooms = (
+        db.query(RoomAssignment)
+        .options(joinedload(RoomAssignment.invigilator))
+        .filter(RoomAssignment.exam_id == exam_id)
+        .order_by(RoomAssignment.room_no.asc())
+        .all()
+    )
+    seating_by_room: Dict[str, List[ExamSeating]] = {}
+    for s in db.query(ExamSeating).filter(ExamSeating.exam_id == exam_id).all():
+        seating_by_room.setdefault((s.room_no or "").strip(), []).append(s)
     summaries = []
 
     for r in rooms:
-        seating = db.query(ExamSeating).filter(ExamSeating.exam_id == exam_id, ExamSeating.room_no == r.room_no).all()
+        seating = seating_by_room.get((r.room_no or "").strip(), [])
         total = len(seating)
         present = sum(1 for s in seating if s.status == "PRESENT")
         absent = total - present

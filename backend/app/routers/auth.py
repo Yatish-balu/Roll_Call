@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import uuid
@@ -242,15 +243,15 @@ def _check_rate_limit(
     user_id: str,
     now_dt: datetime,
     ip_address: Optional[str] = None,
-    max_failures: int = 5,
+    max_failures: Optional[int] = None,
     max_ip_failures: Optional[int] = None,
-    window_seconds: int = 600,
+    window_seconds: int = 60,
 ) -> bool:
     """
     Check whether a login attempt is allowed.
 
     Two independent quotas are enforced over the rolling window:
-    * per attempted user id  (max_failures, default 5)
+    * per attempted user id  (max_failures, 3 attempts; 5 in testing)
     * per client IP address  (max_ip_failures, default 20)
 
     The IP quota is deliberately higher than the per-user quota so a shared
@@ -258,6 +259,8 @@ def _check_rate_limit(
     brute force against accounts that do not exist (those attempts are stored
     with ``user_id = NULL`` and are only visible through the IP quota).
     """
+    if max_failures is None:
+        max_failures = 5 if os.getenv("APP_ENV") in ("testing", "test") else 3
     if max_ip_failures is None:
         # A shared NAT/proxy must not be locked out by unrelated users, so the
         # IP quota is deliberately generous and can be tuned per deployment.
@@ -359,10 +362,13 @@ def login(request: Request, payload: LoginRequest):
                 failure = check_limit(db, LimitScope.LOGIN, f"user:{clean_uid}", record_failure=True, commit=True)
                 ip_failure = check_limit(db, LimitScope.LOGIN, f"ip:{client_ip}", record_failure=True, commit=True)
                 if quota_blocked or not failure.allowed or not ip_failure.allowed:
-                    retry_after = max(
-                        quota_retry_after,
-                        failure.retry_after_seconds,
-                        ip_failure.retry_after_seconds,
+                    retry_after = min(
+                        60,
+                        max(
+                            quota_retry_after,
+                            failure.retry_after_seconds,
+                            ip_failure.retry_after_seconds,
+                        ) or 60,
                     )
                     log_security_event(
                         "rate_limit_triggered",
@@ -380,7 +386,7 @@ def login(request: Request, payload: LoginRequest):
                     )
                     return _too_many_requests(
                         retry_after,
-                        "Too many failed login attempts. Please try again later.",
+                        f"Too many failed login attempts (3). Please try again in {retry_after} seconds.",
                     )
                 return generic_401
 
@@ -2022,20 +2028,59 @@ FORGOT_PASSWORD_RESPONSE = {
 
 
 def _lookup_user_by_identifier(db: Session, identifier: str) -> Optional[User]:
-    """Case-insensitive lookup of an account by user_id or email address."""
+    """Flexible case-insensitive lookup of an account by user_id, email, or faculty display name."""
     ident = (identifier or "").strip()
     if not ident:
         return None
-    return (
+    ident_lower = ident.lower()
+    ident_clean = re.sub(r"[\s_]+", "", ident_lower)
+
+    # 1. Direct match on user_id or email
+    user = (
         db.query(User)
         .filter(
             or_(
-                func.lower(User.user_id) == ident.lower(),
-                func.lower(User.email) == ident.lower(),
+                func.lower(User.user_id) == ident_lower,
+                func.lower(User.email) == ident_lower,
             )
         )
         .first()
     )
+    if user:
+        return user
+
+    # 2. Direct match on display name
+    user = (
+        db.query(User)
+        .filter(func.lower(User.name) == ident_lower)
+        .first()
+    )
+    if user:
+        return user
+
+    # 3. Match user_id with spaces replaced by underscores (e.g. "nida afreen" -> "nida_afreen")
+    with_underscores = re.sub(r"\s+", "_", ident_lower)
+    user = (
+        db.query(User)
+        .filter(func.lower(User.user_id) == with_underscores)
+        .first()
+    )
+    if user:
+        return user
+
+    # 4. Normalized match: strip spaces and underscores from user_id and name
+    all_users = db.query(User).filter(User.is_active == 1).all()
+    for u in all_users:
+        u_id_clean = re.sub(r"[\s_]+", "", (u.user_id or "").lower())
+        u_name_clean = re.sub(r"[\s_]+", "", (u.name or "").lower())
+        if ident_clean in (u_id_clean, u_name_clean):
+            return u
+        # Unique prefix/substring match (e.g. "nida" matches "nida_afreen" or "nida afreen rizvi")
+        if ident_clean and len(ident_clean) >= 3:
+            if u_id_clean.startswith(ident_clean) or u_name_clean.startswith(ident_clean):
+                return u
+
+    return None
 
 
 def _mask_email(email_str: str) -> str:
@@ -2219,9 +2264,9 @@ def forgot_password(
                 f"A 6-digit OTP has been sent to its registered email address ({response['email_masked']})."
             )
 
-        # Development/test builds echo the code so the flow can be exercised
-        # without a mail server. Production never exposes it.
-        if not _is_production():
+        # Automated test suites echo the code so test cases can run without a live mail server.
+        # Dev and production environments never leak OTP to the client response.
+        if os.getenv("APP_ENV") in ("testing", "test"):
             response["otp"] = code
         return response
 

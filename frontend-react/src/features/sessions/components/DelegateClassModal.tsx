@@ -33,6 +33,7 @@ export function DelegateClassModal({
   const [isLoadingColleagues, setIsLoadingColleagues] = useState(false);
   const [substituteId, setSubstituteId] = useState("");
   const [delegationType, setDelegationType] = useState<"PROXY" | "EXCHANGE">("PROXY");
+  const [exchangeSessionId, setExchangeSessionId] = useState("");
   const [reason, setReason] = useState("On Medical Leave");
   const [customReason, setCustomReason] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -65,6 +66,11 @@ export function DelegateClassModal({
       return;
     }
 
+    if (delegationType === "EXCHANGE" && !exchangeSessionId.trim()) {
+      setError("Please specify the colleague's session ID to swap with, or select 'Proxy Substitution' for a standard one-way handover.");
+      return;
+    }
+
     const finalReason = reason === "CUSTOM" ? customReason.trim() : reason;
     if (!finalReason) {
       setError("Please provide a reason for class substitution/handover.");
@@ -77,6 +83,7 @@ export function DelegateClassModal({
         session_id: sessionId,
         substitute_faculty_id: substituteId,
         delegation_type: delegationType,
+        exchange_session_id: delegationType === "EXCHANGE" ? exchangeSessionId.trim() : undefined,
         reason: finalReason,
       };
 
@@ -208,6 +215,25 @@ export function DelegateClassModal({
                 </div>
               </button>
             </div>
+
+            {delegationType === "EXCHANGE" && (
+              <div className="mt-2.5 p-3 rounded-xl bg-amber-50/70 border border-amber-200/80 space-y-1.5 animate-in fade-in duration-150">
+                <label className="block text-[11px] font-bold text-[#24251C]">
+                  Colleague's Exchange Session ID *
+                </label>
+                <input
+                  type="text"
+                  value={exchangeSessionId}
+                  onChange={(e) => setExchangeSessionId(e.target.value)}
+                  placeholder="e.g. SESS-2026-11-28-02 (Session you will teach in return)"
+                  className="w-full px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-mono text-[#24251C] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#6C5119]"
+                  required={delegationType === "EXCHANGE"}
+                />
+                <p className="text-[10px] text-[#77735F]">
+                  Enter the session ID belonging to {selectedColleague?.name || "the selected colleague"} that you will take in return.
+                </p>
+              </div>
+            )}
           </div>
 
           {/* Reason */}

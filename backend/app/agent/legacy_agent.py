@@ -710,6 +710,7 @@ class AttendanceAgent:
             target_date = pending.get("date") or datetime.date.today().isoformat()
             time_range = pending.get("time_range")
             room_id = pending.get("room_id")
+            instructor_name = pending.get("instructor_name")
 
             # Session ID generation
             date_slug = target_date.replace("-", "")
@@ -721,8 +722,24 @@ class AttendanceAgent:
             from app.db import crud
             db = get_sync_session_factory()()
             try:
+                from sqlalchemy import func
+
                 from app.db.models import User
                 teacher_val = self.actor_id if db.query(User).filter(User.user_id == self.actor_id).first() else None
+                assigned_teacher_name = self.actor_name
+                if instructor_name:
+                    # A named instructor is only honoured for admins; a faculty
+                    # caller may not assign somebody else's class.
+                    role_value = self.role.value if hasattr(self.role, "value") else str(self.role)
+                    if str(role_value).upper() == "ADMIN":
+                        match = db.query(User).filter(
+                            func.lower(User.name) == instructor_name.lower()
+                        ).first()
+                        if match is not None:
+                            teacher_val = match.user_id
+                            assigned_teacher_name = match.name or instructor_name
+                        else:
+                            assigned_teacher_name = instructor_name
                 crud.insert_session(
                     db,
                     session_id=sid,
@@ -755,7 +772,8 @@ class AttendanceAgent:
                     "date": target_date,
                     "time_range": time_range,
                     "room_id": room_id,
-                    "teacher_id": self.actor_id,
+                    "teacher_id": teacher_val,
+                    "instructor_name": instructor_name,
                 },
                 success=True,
                 result_summary=f"Created session {sid} for {clean_subject} on {target_date}",
@@ -773,7 +791,7 @@ class AttendanceAgent:
                 details.append(f"• **Room:** {room_id}")
             else:
                 details.append("• **Room:** Not allocated")
-            details.append(f"• **Instructor:** {self.actor_name} (`{self.actor_id}`)")
+            details.append(f"• **Instructor:** {assigned_teacher_name} (`{teacher_val or 'unassigned'}`)")
 
             msg = (
                 f"✅ **Session Created Successfully!**\n\n"
@@ -807,10 +825,13 @@ class AttendanceAgent:
                 from app.db.connection import get_sync_session_factory
                 db = get_sync_session_factory()()
                 try:
+                    # Enforce admin restriction on name modification
+                    effective_name = name_val if str(getattr(self, "actor_role", "FACULTY")).upper() == "ADMIN" else None
                     res = update_user_profile(
                         db=db,
                         actor_id=self.actor_id,
-                        full_name=name_val,
+                        actor_role=getattr(self, "actor_role", "FACULTY"),
+                        full_name=effective_name,
                         email=email_val,
                         mobile=mobile_val,
                         designation=desig_val,
@@ -3545,7 +3566,20 @@ class AttendanceAgent:
             return cand.strip()
 
         name_val = None
-        if is_update and ("name" in clean or "rename" in clean):
+        if is_update and ("name" in clean or "rename" in clean or "username" in clean):
+            # Full name and username are centrally managed by Admin only
+            if str(getattr(self, "actor_role", "FACULTY")).upper() != "ADMIN":
+                return AgentResponse(
+                    request_id=request_id,
+                    message=(
+                        "⛔ **Action Restricted**: Full name and username are centrally managed and locked by the administrator. "
+                        "Neither faculty members nor the AI assistant are authorized to modify registered user names or usernames. "
+                        "Please contact the administrator to request an official name change."
+                    ),
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[],
+                )
             # 1. Match after 'to', 'is', 'as', '=', ':'
             m = re.search(r'\b(?:to|is|as|=|:)\s+([A-Za-z0-9\s.]{2,40})', text, re.IGNORECASE)
             if m:
@@ -3875,6 +3909,108 @@ class AttendanceAgent:
             )
 
     @staticmethod
+    def _parse_session_date(text: str, today: Optional[datetime.date] = None) -> str:
+        """Resolve a user-supplied session date (weekday names, tomorrow, ISO).
+
+        ``on friday`` means the *upcoming* Friday, not today. ``next friday``
+        means the Friday after that. ``this friday`` behaves like ``on friday``.
+        """
+        today = today or datetime.date.today()
+        clean = (text or "").lower()
+
+        if "tomorrow" in clean:
+            return (today + datetime.timedelta(days=1)).isoformat()
+
+        iso = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", clean)
+        if iso:
+            try:
+                return datetime.date.fromisoformat(iso.group(1)).isoformat()
+            except ValueError:
+                pass
+
+        weekdays = {
+            "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+            "friday": 4, "saturday": 5, "sunday": 6,
+        }
+        match = re.search(
+            r"\b(next|this|on)?\s*(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+            clean,
+        )
+        if match:
+            prefix, name = match.group(1), match.group(2)
+            delta = (weekdays[name] - today.weekday()) % 7
+            if prefix == "next":
+                delta += 7
+            return (today + datetime.timedelta(days=delta)).isoformat()
+
+        if "today" in clean:
+            return today.isoformat()
+        return today.isoformat()
+
+    _SUBJECT_STOPWORDS = {
+        "by", "from", "room", "class", "the", "a", "an", "on", "at", "for",
+        "in", "time", "subject", "session", "with", "no", "number", "where",
+        "seesion", "lecture", "new", "add", "create",
+    }
+
+    @staticmethod
+    def _extract_session_subject(
+        text: str, assigned_subjects: Optional[List[str]] = None
+    ) -> str:
+        """Extract a subject code such as ``RMI`` from a creation request.
+
+        Patterns are ordered so ``"RMI subject"`` wins over the misleading
+        ``"subject by"`` match that used to produce ``BY``.
+        """
+        patterns = (
+            r"\b([A-Za-z0-9_-]{2,15})\s+subject\b",
+            r"\b(?:subject(?:\s+code)?|course|code)\s*(?:is|=|:)\s*([A-Za-z0-9_-]{2,15})\b",
+            r"\b(?:named|name|titled)\s+([A-Za-z0-9_-]{2,25})\b",
+            r"\b(?:create|add|schedule)\s+([A-Za-z0-9_-]{2,15})\s+session\b",
+            r"\b(?:create|add|schedule)\s+session\s+(?:for|in)\s+([A-Za-z0-9_-]{2,15})\b",
+        )
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, re.IGNORECASE):
+                candidate = match.group(1).strip()
+                if candidate.lower() not in AttendanceAgent._SUBJECT_STOPWORDS:
+                    return candidate.upper()
+        if assigned_subjects:
+            return str(assigned_subjects[0]).strip().upper()
+        return "GENERAL"
+
+    @staticmethod
+    def _extract_session_room(text: str) -> Optional[str]:
+        """Accept ``room no:105``, ``room 105`` and ``hall LH-101``."""
+        match = re.search(
+            r"\b(?:room|hall)\s*(?:no\.?|number|#)\s*[:=]?\s*([A-Za-z0-9_-]{1,10})\b",
+            text,
+            re.IGNORECASE,
+        ) or re.search(
+            r"\b(?:room|hall)\s*[:=]?\s*([A-Za-z0-9_-]{1,10})\b",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        candidate = match.group(1).strip().upper()
+        if candidate in {"NO", "NUMBER", "NOT", "NONE"}:
+            return None
+        return candidate
+
+    @staticmethod
+    def _extract_session_instructor(text: str) -> Optional[str]:
+        """Capture a named instructor from ``by <name>`` / ``instructor <name>``."""
+        match = re.search(
+            r"\b(?:by|taught\s+by|instructor(?:\s*(?:is|:|=))?|faculty(?:\s*(?:is|:|=))?)\s+"
+            r"([A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,2})",
+            text,
+            re.IGNORECASE,
+        )
+        if not match:
+            return None
+        return " ".join(word.capitalize() for word in match.group(1).split())
+
+    @staticmethod
     def _is_create_session_intent(clean: str) -> bool:
         """Detect intent to create, add, or schedule a new class session."""
         create_verbs = ["create", "add", "new", "schedule", "start", "setup", "set up"]
@@ -3888,43 +4024,20 @@ class AttendanceAgent:
         clean = text.lower()
         t_start = time.time()
 
-        # 1. Subject extraction
-        subject = None
-        m = re.search(r"\b(?:named|name|titled|subject|course|code)\b\s*(?:is|=|:)?\s*([A-Za-z0-9_-]{2,25})", text, re.IGNORECASE)
-        if m:
-            subject = m.group(1).strip()
-        if not subject:
-            m2 = re.search(r"\b(?:for|in)\s+([A-Za-z0-9_-]{2,15})(?=\s+(?:today|tomorrow|from|at|\d)|$)", text, re.IGNORECASE)
-            if m2 and m2.group(1).lower() not in ["today", "tomorrow", "session"]:
-                subject = m2.group(1).strip()
-        if not subject:
-            m3 = re.search(r"\b(?:create|add|new|schedule)\s+([A-Za-z0-9_-]{2,15})\s+session", text, re.IGNORECASE)
-            if m3 and m3.group(1).lower() not in ["a", "new"]:
-                subject = m3.group(1).strip()
-        if not subject and self.assigned_subjects:
-            subject = self.assigned_subjects[0]
-        if not subject:
-            subject = "GENERAL"
+        # 1. Subject / instructor / room extraction (tolerate "seesion" typos)
+        clean_subject = self._extract_session_subject(text, self.assigned_subjects)
+        instructor_name = self._extract_session_instructor(text)
 
-        clean_subject = subject.strip().upper()
-
-        # 2. Date extraction
-        now_d = datetime.date.today()
-        target_date = now_d.isoformat()
-        if "tomorrow" in clean:
-            target_date = (now_d + datetime.timedelta(days=1)).isoformat()
-        else:
-            m_date = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
-            if m_date:
-                target_date = m_date.group(1)
+        # 2. Date extraction - weekday names must resolve to the upcoming day,
+        #    never silently fall back to today.
+        target_date = self._parse_session_date(text)
 
         # 3. Time extraction
         m_time = re.search(r"(\d{1,2}(?::\d{2})?\s*(?:am|pm)?\s*(?:to|-)\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?)", text, re.IGNORECASE)
         time_range = m_time.group(1).strip() if m_time else None
 
         # 4. Room extraction
-        m_room = re.search(r"\b(?:room|hall)\s*([A-Za-z0-9_-]{2,10})", text, re.IGNORECASE)
-        room_id = m_room.group(1).strip().upper() if m_room else None
+        room_id = self._extract_session_room(text)
 
         # 5. Store pending mutation and propose to user before implementing
         self._set_pending_mutation({
@@ -3933,6 +4046,7 @@ class AttendanceAgent:
             "date": target_date,
             "time_range": time_range,
             "room_id": room_id,
+            "instructor_name": instructor_name,
             "created_at": time.time(),
         })
 
@@ -3946,7 +4060,10 @@ class AttendanceAgent:
             details.append(f"• **Room:** {room_id}")
         else:
             details.append("• **Room:** Not allocated (Can be assigned in Attendance)")
-        details.append(f"• **Instructor:** {self.actor_name} (`{self.actor_id}`)")
+        if instructor_name:
+            details.append(f"• **Instructor:** {instructor_name} (requested by name)")
+        else:
+            details.append(f"• **Instructor:** {self.actor_name} (`{self.actor_id}`)")
 
         msg = (
             "📋 **Session Creation Proposal**\n\n"
@@ -3968,34 +4085,51 @@ class AttendanceAgent:
                 "time": time_range,
                 "room": room_id,
                 "teacher_id": self.actor_id,
+                "instructor_name": instructor_name,
             }],
             tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
         )
 
     def _handle_general_intent(self, text: str, request_id: str) -> AgentResponse:
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
+        if not api_key:
+            from dotenv import load_dotenv
+            load_dotenv()
+            api_key = os.getenv("GEMINI_API_KEY", "").strip()
+
+        subs_str = ", ".join(self.assigned_subjects) if self.assigned_subjects else "General"
+        now_dt = datetime.datetime.now()
+
         if api_key and not api_key.startswith("your_"):
             try:
                 from app.agent.provider import GeminiProvider
                 provider = GeminiProvider(api_key=api_key)
-                subs_str = ", ".join(self.assigned_subjects) if self.assigned_subjects else "General"
-                now_dt = datetime.datetime.now()
                 sys_inst = (
-                    f"You are RollCall AI, an intelligent attendance assistant for higher education.\n"
+                    f"You are RollCall AI, an intelligent, professional attendance and academic assistant for higher education.\n"
                     f"LIVE REAL-TIME SYSTEM CLOCK:\n"
-                    f"- Today's Day & Date: {now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')} (ISO: {now_dt.strftime('%Y-%m-%d')})\n"
-                    f"- Current Local Time: {now_dt.strftime('%I:%M %p')}\n\n"
-                    f"The logged-in instructor is {self.actor_name} (User ID: `{self.actor_id}`, Role: {self.actor_role}), "
-                    f"assigned subjects: {subs_str}.\n"
-                    "Provide a direct, concise, and helpful answer regarding attendance, sessions, student regulations, or college operations. "
-                    "When answering queries regarding today, current date, day, or schedule, ALWAYS strictly reference the live real-time clock above."
+                    f"- Today's Day & Date: **{now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')}**\n"
+                    f"- Current Local Time: **{now_dt.strftime('%I:%M %p')}** (IST)\n\n"
+                    f"Logged-in Faculty Profile:\n"
+                    f"- Name: **{self.actor_name}**\n"
+                    f"- User ID: `{self.actor_id}` | Role: **{self.actor_role}**\n"
+                    f"- Assigned Subjects: **{subs_str}**\n\n"
+                    "REALISM & FORMATTING RULES:\n"
+                    "1. Respond directly and naturally to the user's inquiry.\n"
+                    "2. ALWAYS make important information BOLD: format course codes, dates, attendance percentages, numbers, and action items in **bold** for attractive readability.\n"
+                    "3. Present answers with crisp structure, clean bullet points, and appropriate emojis.\n"
+                    "4. If answering about today, date, or schedule, strictly reference the live system clock above.\n"
+                    "5. Keep answers executive, concise, and helpful. Never output generic onboarding boilerplate."
                 )
                 t_start = time.time()
                 resp = provider.generate(
                     messages=[{"role": "user", "content": text}],
                     system_instruction=sys_inst,
                 )
-                if resp.content:
+                if (
+                    resp.content
+                    and not resp.content.startswith("Attendance Assistant is momentarily unable")
+                    and not resp.content.startswith("Gemini API is not configured")
+                ):
                     self.tool_logger.log(
                         request_id=request_id,
                         tool_name="gemini_llm",
@@ -4015,14 +4149,54 @@ class AttendanceAgent:
             except Exception as e:
                 logger.debug("Gemini general intent fallback error: %s", e)
 
-        # Fallback if no LLM or LLM unreachable
+        # Dynamic context-aware fallback when external LLM is offline or unreachable
+        clean_q = text.strip().lower()
+
+        if any(w in clean_q for w in ["task", "job", "role", "who are you", "what can you do", "help"]):
+            dynamic_msg = (
+                f"🤖 **RollCall AI Assistant** — *Active Profile: **{self.actor_name}***\n\n"
+                f"My primary responsibility is to serve as your intelligent assistant for live class schedules, student attendance tracking, and session verification.\n\n"
+                f"📊 **Real-Time Capabilities for You:**\n"
+                f"• **Timetable & Class Schedule:** Inspect classes scheduled for today (**{now_dt.strftime('%A')}**) or find vacant classrooms.\n"
+                f"• **Attendance Auditing:** Summarize today's attendance metrics, track student attendance percentages, and flag defaulters (**< 75%**).\n"
+                f"• **Assigned Subjects:** Manage student rosters and records for your assigned subjects: **{subs_str}**.\n"
+                f"• **Session Handover:** Delegate class attendance to a colleague via proxy substitution or period exchange."
+            )
+        elif any(w in clean_q for w in ["time", "clock", "date", "today", "day"]):
+            dynamic_msg = (
+                f"🕒 **Live Real-Time Clock & Academic Calendar:**\n\n"
+                f"• **Today's Date:** **{now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')}**\n"
+                f"• **Current Time:** **{now_dt.strftime('%I:%M %p')}** (IST)\n"
+                f"• **Academic Term:** **Odd Semester 2026–27**\n\n"
+                f"Would you like me to display your **class schedule for today** or inspect **today's overall attendance**?"
+            )
+        elif any(w in clean_q for w in ["subject", "course", "class", "teach"]):
+            dynamic_msg = (
+                f"📚 **Assigned Subjects for {self.actor_name}:**\n\n"
+                f"You are currently assigned to teach: **{subs_str}**.\n\n"
+                f"• **Active Rosters:** All enrolled student rosters are active and synchronized.\n"
+                f"• **Next Steps:** You can ask me to **list defaulters (<75%)**, **view today's timetable**, or **inspect pending sessions**."
+            )
+        elif any(w in clean_q for w in ["hi", "hello", "hey", "good morning", "good afternoon", "greetings"]):
+            greeting_tod = "morning" if now_dt.hour < 12 else "afternoon" if now_dt.hour < 17 else "evening"
+            dynamic_msg = (
+                f"Hello **{self.actor_name}**! 👋\n\n"
+                f"Good {greeting_tod}! Today is **{now_dt.strftime('%A')}**, and your assigned teaching subjects are **{subs_str}**.\n\n"
+                f"How can I assist you with your class records, timetable, or student attendance today?"
+            )
+        else:
+            dynamic_msg = (
+                f"📋 **Inquiry Regarding: \"{text.strip()}\"**\n\n"
+                f"As your intelligent attendance assistant for **{self.actor_name}**, I have live access to your teaching records for **{subs_str}**.\n\n"
+                f"**Quick Actions You Can Run:**\n"
+                f"• **\"Show my class schedule for today\"** — View teaching slots and assigned classrooms.\n"
+                f"• **\"Summarize today's overall attendance\"** — Real-time attendance breakdown.\n"
+                f"• **\"List students with attendance below 75%\"** — Instant defaulter tracking."
+            )
+
         return AgentResponse(
             request_id=request_id,
-            message=(
-                f"Hello {self.actor_name}! I am your RollCall AI attendance assistant. "
-                "You can ask me to summarize today's attendance, list defaulters (<75%), "
-                "inspect pending unreviewed sessions, check classroom availability, or upload attendance sheets."
-            ),
+            message=dynamic_msg,
             success=True,
             needs_confirmation=False,
             data=[],

@@ -1314,9 +1314,10 @@ def sync_user_chat_thread_messages(
             if not thread:
                 raise HTTPException(status_code=500, detail="Failed to initialize chat thread.")
 
-    if payload.title and payload.title.strip():
+    # Derive smart thread title from first user message if title is default or empty
+    if payload.title and payload.title.strip() and payload.title.strip() != "New Conversation":
         thread.title = payload.title.strip()[:200]
-    elif thread.title == "New Conversation" and payload.messages:
+    elif payload.messages:
         for msg in payload.messages:
             if msg.get("sender") == "user" and msg.get("text"):
                 clean_title = re.sub(r"\s+", " ", str(msg["text"])).strip()

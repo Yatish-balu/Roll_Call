@@ -4,7 +4,7 @@ import React, { useState, useRef } from "react";
 import { Link } from "react-router-dom";
 import { sendAgentQuery, uploadAttendanceFile } from "@/services/api/dashboard";
 import type { VerifiedAgentResponse } from "@/types/dashboard";
-import { AnimatedAiMascot } from "./AnimatedAiMascot";
+
 
 export function AiAssistantCard() {
   const [query, setQuery] = useState("");
@@ -153,8 +153,22 @@ export function AiAssistantCard() {
           </span>
         </div>
 
-        {/* Pure Code 3D Animated Vector Mascot */}
-        <AnimatedAiMascot isThinking={isProcessing} />
+        {/* Real-Time Status & Capabilities Banner */}
+        <div className="p-4 rounded-xl bg-[#EDE8D8]/50 border border-[#E4DDCA] flex items-center justify-between">
+          <div className="flex items-center space-x-3">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse" />
+            <div>
+              <p className="text-xs font-bold text-[#24251C]">Live Attendance AI Online</p>
+              <p className="text-[11px] text-[#77735F]">Natural language queries, session verification & schedule lookup</p>
+            </div>
+          </div>
+          {isProcessing && (
+            <div className="flex items-center space-x-1.5 text-xs text-[#6C5119] font-medium">
+              <div className="w-3.5 h-3.5 border-2 border-[#6C5119] border-t-transparent rounded-full animate-spin" />
+              <span>Thinking...</span>
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Backend Connection Error Banner */}
