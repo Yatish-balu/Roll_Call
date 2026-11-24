@@ -35,6 +35,8 @@ logger = logging.getLogger("rollcall.rotate_password")
 
 def rotate_password(user_id: str, new_password: str) -> bool:
     """Update the hash and revoke sessions. Returns False if the user is absent."""
+    if logger.disabled:
+        logger.disabled = False
     if len(new_password.encode("utf-8")) > 72:
         raise ValueError("Password must not exceed 72 UTF-8 bytes for bcrypt.")
     if len(new_password) < 12:

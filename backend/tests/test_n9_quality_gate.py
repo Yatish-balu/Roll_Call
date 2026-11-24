@@ -62,8 +62,10 @@ def test_too_dark_image_fails_the_lighting_check(tmp_path):
 
 
 def test_overexposed_image_fails_the_lighting_check(tmp_path):
-    image = np.indices((400, 400)).sum(axis=0) % 2
-    image = (235 + image * 20).astype(np.uint8)  # sharp but blown out
+    # A blown-out sheet: high-frequency contrast keeps it sharp, but the mean
+    # (252.5) must exceed the generous 250 ceiling.
+    image = np.full((400, 400), 255, dtype=np.uint8)
+    image[::2] = 250
     result = check_image_quality(_write(tmp_path / "bright.png", image))
     assert result["ok"] is False
     assert result["brightness"] > BRIGHTNESS_MAX

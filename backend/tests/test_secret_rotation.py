@@ -19,7 +19,11 @@ NEW_PASSWORD = "RotatedPass_2026_Strong"
 
 @pytest.fixture
 def rotation_db(monkeypatch, caplog):
+    caplog.set_level(logging.INFO)
     caplog.set_level(logging.INFO, logger="rollcall.rotate_password")
+    rot_logger = logging.getLogger("rollcall.rotate_password")
+    rot_logger.disabled = False
+    rot_logger.propagate = True
     temp_dir = tempfile.mkdtemp()
     engine = create_engine(f"sqlite:///{os.path.join(temp_dir, 'rotation.db')}")
     Base.metadata.create_all(engine)

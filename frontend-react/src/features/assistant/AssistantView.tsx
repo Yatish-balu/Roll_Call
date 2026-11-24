@@ -35,6 +35,7 @@ export interface PhotoQualityRejectionData {
   sharpnessThreshold?: number;
   measuredBrightness?: number;
   brightnessThreshold?: number;
+  brightnessMaxThreshold?: number;
 }
 
 export interface ConfirmationCardData {
@@ -970,7 +971,14 @@ export function AssistantView() {
           });
         }
       } catch (err: unknown) {
-        const anyErr = err as Record<string, any>;
+        const anyErr = err as {
+          statusCode?: number;
+          status?: number;
+          code?: string;
+          message?: string;
+          details?: Record<string, unknown>;
+          response?: { data?: { detail?: Record<string, unknown> } };
+        };
 
         const isQualityRejected =
           (anyErr?.statusCode === 422 || anyErr?.status === 422) &&
@@ -981,11 +989,15 @@ export function AssistantView() {
             String(anyErr?.message || "").toLowerCase().includes("sharpness"));
 
         if (isQualityRejected) {
-          const rawDetail = (anyErr?.details?.detail || anyErr?.details || anyErr?.response?.data?.detail || {}) as Record<string, any>;
+          const rawDetail = ((anyErr?.details?.detail as Record<string, unknown>) ||
+            anyErr?.details ||
+            anyErr?.response?.data?.detail ||
+            {}) as Record<string, unknown>;
+          const nestedDetail = rawDetail.detail as Record<string, unknown> | undefined;
           const reasons = Array.isArray(rawDetail.reasons)
             ? (rawDetail.reasons as string[])
-            : Array.isArray(rawDetail.detail?.reasons)
-            ? (rawDetail.detail.reasons as string[])
+            : Array.isArray(nestedDetail?.reasons)
+            ? (nestedDetail.reasons as string[])
             : [
                 "Image sharpness is below the required optical threshold (Laplacian variance check failed).",
                 "Lighting across the attendance sheet is uneven, shadowed, or underexposed.",
@@ -999,6 +1011,10 @@ export function AssistantView() {
             measuredBrightness: typeof rawDetail.brightness === "number" ? rawDetail.brightness : 12.0,
             brightnessThreshold:
               typeof rawDetail.brightness_threshold === "number" ? rawDetail.brightness_threshold : 12.0,
+            brightnessMaxThreshold:
+              typeof rawDetail.brightness_max_threshold === "number"
+                ? rawDetail.brightness_max_threshold
+                : 250.0,
           };
 
           setMessages((prev) => [
@@ -1929,7 +1945,7 @@ export function AssistantView() {
                                 {m.qualityRejection.measuredSharpness.toFixed(1)}
                               </span>
                               <span className="text-[10px] text-[#77735F]">
-                                Minimum Required: ≥ {m.qualityRejection.sharpnessThreshold ?? 100.0}
+                                Minimum Required: ≥ {m.qualityRejection.sharpnessThreshold ?? 10.0}
                               </span>
                             </div>
                           </div>
@@ -1945,7 +1961,8 @@ export function AssistantView() {
                                 {m.qualityRejection.measuredBrightness.toFixed(1)}
                               </span>
                               <span className="text-[10px] text-[#77735F]">
-                                Minimum Required: ≥ {m.qualityRejection.brightnessThreshold ?? 80.0}
+                                Acceptable: {m.qualityRejection.brightnessThreshold ?? 12.0}–
+                                {m.qualityRejection.brightnessMaxThreshold ?? 250.0}
                               </span>
                             </div>
                           </div>

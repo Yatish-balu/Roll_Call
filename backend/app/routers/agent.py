@@ -522,6 +522,34 @@ async def agent_process_file(
             from tools.quality_gate import check_image_quality
 
             quality = check_image_quality(temp_path)
+
+            # A sharp but bright white sheet is still usable: rescale its
+            # exposure once instead of asking the faculty to retake the photo.
+            if (
+                not quality["ok"]
+                and quality["sharpness"] >= quality["thresholds"]["sharpness_min"]
+                and quality["reasons"]
+                and all("overexposed" in reason for reason in quality["reasons"])
+            ):
+                try:
+                    from PIL import Image, ImageEnhance
+
+                    with Image.open(temp_path) as raw:
+                        target = min(
+                            quality["thresholds"]["brightness_max"] - 25.0,
+                            215.0,
+                        )
+                        factor = max(0.2, target / max(quality["brightness"], 1.0))
+                        corrected = ImageEnhance.Brightness(raw.convert("RGB")).enhance(factor)
+                        corrected.save(temp_path)
+                    quality = check_image_quality(temp_path)
+                    logger.info(
+                        "Auto-normalised overexposed upload (%s) before vision scan.",
+                        safe_filename,
+                    )
+                except Exception as exposure_err:
+                    logger.debug("Exposure normalisation skipped: %s", exposure_err)
+
             is_forced = bool(force_ai) or (
                 user_confirmation
                 and any(w in user_confirmation.lower() for w in ["force", "proceed", "yes", "confirm", "ai"])
@@ -560,6 +588,9 @@ async def agent_process_file(
                         "sharpness_threshold": quality.get("thresholds", {}).get("sharpness_min", 10.0),
                         "brightness": quality.get("brightness", 0.0),
                         "brightness_threshold": quality.get("thresholds", {}).get("brightness_min", 12.0),
+                        "brightness_max_threshold": quality.get("thresholds", {}).get(
+                            "brightness_max", 250.0
+                        ),
                     },
                 )
 
@@ -1208,29 +1239,7 @@ def get_user_chat_thread(
         .first()
     )
     if not thread:
-        now = _utcnow_iso()
-        thread = UserChatThread(
-            thread_id=thread_id,
-            user_id=current_user.user_id,
-            title="New Conversation",
-            created_at=now,
-            updated_at=now,
-            is_pinned=0,
-            is_archived=0,
-        )
-        db.add(thread)
-        try:
-            db.commit()
-            db.refresh(thread)
-        except Exception:
-            db.rollback()
-            thread = (
-                db.query(UserChatThread)
-                .filter(UserChatThread.thread_id == thread_id, UserChatThread.user_id == current_user.user_id)
-                .first()
-            )
-            if not thread:
-                raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
+        raise HTTPException(status_code=404, detail="Chat thread not found or unauthorized.")
 
     msgs = (
         db.query(UserChatMessage)

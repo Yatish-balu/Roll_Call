@@ -26,7 +26,10 @@ import os
 # Modern Gemini Vision AI has robust multimodal optical clarity down to 10.0 sharpness and 12.0 brightness.
 SHARPNESS_THRESHOLD: float = float(os.getenv("IMAGE_QUALITY_MIN_SHARPNESS", "10.0"))
 BRIGHTNESS_MIN: float = float(os.getenv("IMAGE_QUALITY_MIN_BRIGHTNESS", "12.0"))
-BRIGHTNESS_MAX: float = float(os.getenv("IMAGE_QUALITY_MAX_BRIGHTNESS", "238.0"))
+# White exam/attendance sheets photographed on a phone routinely measure 230-245
+# even with correct exposure, so keep generous headroom. Truly blown-out images
+# (>250 mean) are still rejected or auto-normalised before the Vision call.
+BRIGHTNESS_MAX: float = float(os.getenv("IMAGE_QUALITY_MAX_BRIGHTNESS", "250.0"))
 
 
 def check_image_quality(path: str) -> Dict[str, Any]:

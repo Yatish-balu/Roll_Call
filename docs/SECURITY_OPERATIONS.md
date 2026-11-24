@@ -164,9 +164,9 @@ value from the latest commit does not invalidate a copy that leaked earlier.
 | `MFA_ENCRYPTION_KEY` | **Do not rotate casually:** existing TOTP secrets cannot be decrypted. Plan re-enrollment for all MFA users or keep a legacy key for migration. |
 | `SMTP_PASSWORD`, `GEMINI_API_KEY`, other shared values | Rotate wherever the old value may have been used in shared/staging/production. |
 
-The old committed development fallback (`rollcall-dev-secret-key-change-in-
-production-32bytes-min`) is no longer in source: `DEV_FALLBACK_SECRET` is
-generated per process. Treat the old literal as burned and never reuse it.
+The previously committed development fallback is no longer in source:
+`DEV_FALLBACK_SECRET` is generated per process. Treat the old literal as burned
+and never reuse it (refer to the audit report for its value, not this repo).
 
 ### Generate replacement values locally (do not paste them into chat or Git)
 
