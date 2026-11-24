@@ -124,23 +124,6 @@ export function ExamControlView() {
     }
   };
 
-  // Download Room Blank Form-B Sign Sheet PDF
-  const handleDownloadRoomPdf = async (roomNo: string) => {
-    if (!selectedExamId) return;
-    try {
-      const blob = await examsApi.downloadSignSheetPdf(selectedExamId, roomNo);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `Form_B_SignSheet_${selectedExamId}_${roomNo.replace(/\s+/g, "_")}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (err: unknown) {
-      alert("Failed to download signature sheet: " + (err instanceof Error ? err.message : String(err)));
-    }
-  };
 
   // Admin Override Submit
   const handleOverrideSubmit = async (e: React.FormEvent) => {
@@ -304,7 +287,6 @@ export function ExamControlView() {
                     examId={selectedExamId}
                     isAdmin={isAdmin}
                     onSelect={(roomNo) => navigate(`/exams/${selectedExamId}/rooms/${encodeURIComponent(roomNo)}`)}
-                    onDownloadPdf={handleDownloadRoomPdf}
                     onAdminOverride={(roomNo) => setOverrideRoomNo(roomNo)}
                   />
                 ))}

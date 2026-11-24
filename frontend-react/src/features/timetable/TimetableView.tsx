@@ -578,28 +578,7 @@ export function TimetableView() {
                         <span>Open Form-B</span>
                         <span>➔</span>
                       </Link>
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            const blob = await examsApi.downloadSignSheetPdf(duty.exam_id, duty.room_no);
-                            const url = window.URL.createObjectURL(blob);
-                            const a = document.createElement("a");
-                            a.href = url;
-                            a.download = `Form_B_${duty.exam_id}_${duty.room_no}.pdf`;
-                            document.body.appendChild(a);
-                            a.click();
-                            window.URL.revokeObjectURL(url);
-                            document.body.removeChild(a);
-                          } catch {
-                            alert("Failed to download PDF sign sheet.");
-                          }
-                        }}
-                        title="Download blank Form-B PDF"
-                        className="p-2 rounded-xl border border-[#E4DDCA] text-[#77735F] hover:text-[#24251C] bg-white hover:bg-[#F2EDE0] transition-colors"
-                      >
-                        📄
-                      </button>
+
                     </div>
                   </div>
                 );

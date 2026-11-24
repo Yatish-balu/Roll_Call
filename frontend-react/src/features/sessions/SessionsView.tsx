@@ -122,6 +122,13 @@ export function SessionsView() {
     void loadInitialization();
   }, [loadSessions, loadInitialization]);
 
+  // Sessions created from the AI assistant must appear here immediately.
+  useEffect(() => {
+    const refresh = () => void loadSessions();
+    window.addEventListener("rollcall:sessions-changed", refresh);
+    return () => window.removeEventListener("rollcall:sessions-changed", refresh);
+  }, [loadSessions]);
+
   const allocationsBySession = useMemo(() => {
     const map = new Map<string, SessionAllocation[]>();
     for (const allocation of allocations) {

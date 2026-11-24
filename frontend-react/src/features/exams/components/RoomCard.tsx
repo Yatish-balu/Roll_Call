@@ -5,7 +5,6 @@ interface RoomCardProps {
   room: RoomSummaryItem;
   examId?: string;
   onSelect?: (roomNo: string) => void;
-  onDownloadPdf?: (roomNo: string) => void;
   onAdminOverride?: (roomNo: string) => void;
   isAdmin?: boolean;
 }
@@ -13,7 +12,6 @@ interface RoomCardProps {
 export function RoomCard({
   room,
   onSelect,
-  onDownloadPdf,
   onAdminOverride,
   isAdmin = false,
 }: RoomCardProps) {
@@ -78,15 +76,6 @@ export function RoomCard({
             className="flex-1 py-1.5 px-3 rounded-xl bg-[#3F451F] text-white text-xs font-medium hover:bg-[#343919] transition-colors"
           >
             Form-B Roster
-          </button>
-        )}
-        {onDownloadPdf && (
-          <button
-            onClick={() => onDownloadPdf(room.room_no)}
-            title="Download Printable Blank Form-B Sign Sheet"
-            className="p-1.5 rounded-xl border border-gray-300 text-gray-700 hover:bg-gray-50 transition-colors"
-          >
-            📄 PDF
           </button>
         )}
         {isAdmin && (room.status === "LATE_LOCKED" || room.status === "SUBMITTED") && onAdminOverride && (

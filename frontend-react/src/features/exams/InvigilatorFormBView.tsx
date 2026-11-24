@@ -329,23 +329,6 @@ export function InvigilatorFormBView() {
     }
   };
 
-  // Download Blank Form-B Sign Sheet
-  const handleDownloadPdf = async () => {
-    if (!selectedExamId || !selectedRoomNo) return;
-    try {
-      const blob = await examsApi.downloadSignSheetPdf(selectedExamId, selectedRoomNo);
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `Form_B_SignSheet_${selectedExamId}_${selectedRoomNo}.pdf`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (err: unknown) {
-      alert("Download failed: " + (err instanceof Error ? err.message : String(err)));
-    }
-  };
 
   const presentCount = roster.filter((s) => s.status === "PRESENT").length;
   const absentCount = roster.filter((s) => s.status === "ABSENT").length;
@@ -468,12 +451,7 @@ export function InvigilatorFormBView() {
             Mark All Present
           </button>
 
-          <button
-            onClick={handleDownloadPdf}
-            className="inline-flex items-center gap-1.5 px-3 py-2 rounded-xl border border-gray-300 text-gray-700 text-xs font-medium hover:bg-gray-50"
-          >
-            <span>📄</span> Blank Form-B PDF
-          </button>
+
         </div>
 
         <div className="flex items-center gap-2">
@@ -726,9 +704,6 @@ export function InvigilatorFormBView() {
               </div>
             </div>
 
-            <p className="text-[11px] text-amber-800 bg-amber-50 p-2.5 rounded-xl border border-amber-200 mb-4">
-              ⚠️ <strong>Final Warning:</strong> This submission is final and cryptographically logged. Further modifications require Chief Superintendent Admin Override.
-            </p>
 
             <div className="flex items-center justify-end gap-2">
               <button

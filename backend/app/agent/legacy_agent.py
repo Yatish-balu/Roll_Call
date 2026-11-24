@@ -722,7 +722,7 @@ class AttendanceAgent:
             from app.db import crud
             db = get_sync_session_factory()()
             try:
-                from sqlalchemy import func
+                from sqlalchemy import func, or_
 
                 from app.db.models import User
                 teacher_val = self.actor_id if db.query(User).filter(User.user_id == self.actor_id).first() else None
@@ -732,8 +732,17 @@ class AttendanceAgent:
                     # caller may not assign somebody else's class.
                     role_value = self.role.value if hasattr(self.role, "value") else str(self.role)
                     if str(role_value).upper() == "ADMIN":
+                        # Names in the roster are often longer than the spoken
+                        # form ("Nida Afreen" vs "nida afreen rizvi"), so match
+                        # a contained, case-insensitive name (or user id).
+                        pattern = f"%{instructor_name.lower()}%"
                         match = db.query(User).filter(
-                            func.lower(User.name) == instructor_name.lower()
+                            or_(
+                                func.lower(User.name).like(pattern),
+                                func.lower(User.user_id).like(
+                                    f"%{instructor_name.lower().replace(' ', '_')}%"
+                                ),
+                            )
                         ).first()
                         if match is not None:
                             teacher_val = match.user_id
@@ -2752,13 +2761,22 @@ class AttendanceAgent:
 
         # 3. Student query
         usn_match = re.search(r"\b\d[A-Z]{2}\d{2}[A-Z]{2}\d{3}\b", text, re.IGNORECASE)
-        if usn_match or "student" in clean:
+        sem_match = re.search(r"\b([1-8])(?:st|nd|rd|th)?\s*(?:sem|semester)\b|\b(?:sem|semester)\s*([1-8])\b", text, re.IGNORECASE)
+        branch_match = re.search(r"\b(CY|CSE|ECE|ME|CV|AIML|ISE)\b", text, re.IGNORECASE)
+        target_sem = int(sem_match.group(1) or sem_match.group(2)) if sem_match else None
+        target_branch = branch_match.group(1).upper() if branch_match else None
+        is_count_query = any(w in clean for w in ["total", "count", "how many", "number of", "no.of", "no of"])
+        is_list_query = any(w in clean for w in ["list", "show", "all", "names", "roster"])
+
+        if usn_match or target_sem is not None or "student" in clean:
             usn = usn_match.group(0).upper() if usn_match else None
             res = self.registry.execute(
                 "query_tool",
                 request_id=request_id,
                 query_type="students",
                 usn=usn,
+                branch=target_branch,
+                semester=target_sem,
                 db_target=db,
             )
             if not res.found:
@@ -2770,9 +2788,45 @@ class AttendanceAgent:
                     data=[],
                     tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
                 )
+
+            # Case A: Specific USN or single-student targeted lookup without list/count intent
+            if usn or (len(res.data) == 1 and not is_count_query and not is_list_query and not target_sem):
+                rec = res.data[0]
+                return AgentResponse(
+                    request_id=request_id,
+                    message=f"Found student record: {rec.get('name')} ({rec.get('usn')}, Branch: {rec.get('branch')}).",
+                    success=True,
+                    needs_confirmation=False,
+                    data=res.data,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+
+            sem_text = f"in {target_sem}th Semester" if target_sem else ""
+            branch_text = f" ({target_branch})" if target_branch else ""
+
+            # Case B: Count / Total inquiry
+            if is_count_query:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=f"There are {res.total_count} students enrolled {sem_text}{branch_text}.".replace("  ", " ").strip(),
+                    success=True,
+                    needs_confirmation=False,
+                    data=res.data,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+
+            # Case C: List / Roster inquiry
+            display_limit = 15
+            lines_list = []
+            for idx, st in enumerate(res.data[:display_limit], 1):
+                lines_list.append(f"{idx}. {st.get('name')} ({st.get('usn')})")
+            remaining = len(res.data) - display_limit
+            more_text = f"\n... and {remaining} more students." if remaining > 0 else ""
+            header = f"Found {res.total_count} students {sem_text}{branch_text}:".replace("  ", " ").strip()
+            msg = f"{header}\n" + "\n".join(lines_list) + more_text
             return AgentResponse(
                 request_id=request_id,
-                message=f"Found student record: {res.data[0].get('name')} ({res.data[0].get('usn')}, Branch: {res.data[0].get('branch')}).",
+                message=msg,
                 success=True,
                 needs_confirmation=False,
                 data=res.data,
@@ -2844,9 +2898,40 @@ class AttendanceAgent:
             return fallback.group(1)
         return None
 
+    def _format_subject_display(self) -> str:
+        """Format assigned subjects into clean, readable course titles, stripping raw aliases like RM."""
+        if not self.assigned_subjects:
+            return "all assigned classes"
+
+        COURSE_NAMES = {
+            "22RMK56": "Research Methodology & IPR (22RMK56)",
+            "RM": "Research Methodology & IPR (22RMK56)",
+            "22CY51": "Software Engineering (SE, 22CY51)",
+            "SE": "Software Engineering (SE, 22CY51)",
+            "22CY52": "Computer Networks & Security (CN, 22CY52)",
+            "CN": "Computer Networks & Security (CN, 22CY52)",
+            "22CY53": "Essential of Cyber Security (ECS, 22CY53)",
+            "ECS": "Essential of Cyber Security (ECS, 22CY53)",
+            "22CY551": "AI in Cyber Security (AI, 22CY551)",
+            "AI": "AI in Cyber Security (AI, 22CY551)",
+            "22CYL54": "Adv. Cyber Security (ACS, 22CYL54)",
+            "ACS": "Adv. Cyber Security (ACS, 22CYL54)",
+            "22ESK57": "Environment Studies (EVS, 22ESK57)",
+            "EVS": "Environment Studies (EVS, 22ESK57)",
+        }
+        cleaned = []
+        seen = set()
+        for s in self.assigned_subjects:
+            code = str(s).strip().upper()
+            title = COURSE_NAMES.get(code, code)
+            if title not in seen:
+                seen.add(title)
+                cleaned.append(title)
+        return ", ".join(cleaned) if cleaned else "your assigned subjects"
+
     @staticmethod
     def _is_query_intent(text: str) -> bool:
-        keywords = ["how many", "who", "absent", "present", "session", "student", "records", "database", "query", "find"]
+        keywords = ["how many", "who", "absent", "present", "session", "student", "records", "database", "query", "find", "sem", "semester"]
         return any(k in text.lower() for k in keywords)
 
     @staticmethod
@@ -2858,11 +2943,14 @@ class AttendanceAgent:
         greetings = [
             "hi", "hello", "hey", "hola", "namaste", "good morning",
             "good afternoon", "good evening", "greetings", "who are you",
-            "what can you do", "help", "who am i",
+            "what can you do", "help", "who am i", "how are you",
+            "how are u", "how r u", "how do you do", "how's it going",
+            "how are you doing", "what is your task", "what is u r task",
+            "what is ur task",
         ]
         if clean in greetings:
             return True
-        for g in ("hi ", "hello ", "hey ", "good morning", "good afternoon", "good evening"):
+        for g in ("hi ", "hello ", "hey ", "good morning", "good afternoon", "good evening", "how are you", "how are u"):
             if clean.startswith(g):
                 return True
         return False
@@ -2876,18 +2964,32 @@ class AttendanceAgent:
             result_summary="Greeted teacher and loaded profile snapshot",
             duration_seconds=0.001,
         )
-        subs = ", ".join(self.assigned_subjects) if self.assigned_subjects else "All assigned classes"
-        msg = (
-            f"Hello {self.actor_name}! I am your RollCall AI attendance assistant.\n\n"
-            f"I have live access to your teaching schedule and attendance data for **{subs}**.\n\n"
-            "You can ask me questions like:\n"
-            "• **Summarize today's overall attendance**\n"
-            "• **List students with attendance below 75%**\n"
-            "• **Which sessions have pending unreviewed attendance?**\n"
-            "• **Show attendance statistics for Computer Science (CSE)**\n"
-            "• **Show vacant rooms or my timetable today**\n"
-            "• Or upload an attendance sheet CSV/photo for automated verification."
-        )
+        clean = text.lower().strip()
+        subs = self._format_subject_display()
+
+        if any(p in clean for p in ["how are you", "how are u", "how r u", "how do you do", "how's it going", "how is it going"]):
+            msg = (
+                f"Hello {self.actor_name}! I am doing very well and ready to assist you.\n\n"
+                f"I have live access to your teaching schedule and student records for {subs}.\n\n"
+                "How can I help you today? You can ask to view your schedule, check student attendance, list defaulters, or find vacant rooms."
+            )
+        elif any(p in clean for p in ["task", "role", "what can you do", "who are you"]):
+            msg = (
+                f"Hello {self.actor_name}! I am your RollCall AI attendance assistant.\n\n"
+                f"I help you manage class sessions, verify attendance sheets, track defaulters (<75%), and monitor your timetable for {subs}.\n\n"
+                "Feel free to ask for today's schedule, student attendance, or list of students in any semester."
+            )
+        else:
+            msg = (
+                f"Hello {self.actor_name}! I am your RollCall AI attendance assistant.\n\n"
+                f"I have live access to your teaching schedule and attendance data for {subs}.\n\n"
+                "You can ask me questions like:\n"
+                "• Summarize today's overall attendance\n"
+                "• List students with attendance below 75%\n"
+                "• List students in 5th semester\n"
+                "• Show my class schedule or vacant rooms today\n"
+                "• Or upload an attendance sheet CSV or photo for automated verification."
+            )
         return AgentResponse(
             request_id=request_id,
             message=msg,
@@ -4097,7 +4199,7 @@ class AttendanceAgent:
             load_dotenv()
             api_key = os.getenv("GEMINI_API_KEY", "").strip()
 
-        subs_str = ", ".join(self.assigned_subjects) if self.assigned_subjects else "General"
+        subs_str = self._format_subject_display()
         now_dt = datetime.datetime.now()
 
         if api_key and not api_key.startswith("your_"):
@@ -4107,18 +4209,19 @@ class AttendanceAgent:
                 sys_inst = (
                     f"You are RollCall AI, an intelligent, professional attendance and academic assistant for higher education.\n"
                     f"LIVE REAL-TIME SYSTEM CLOCK:\n"
-                    f"- Today's Day & Date: **{now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')}**\n"
-                    f"- Current Local Time: **{now_dt.strftime('%I:%M %p')}** (IST)\n\n"
+                    f"- Today's Day & Date: {now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')}\n"
+                    f"- Current Local Time: {now_dt.strftime('%I:%M %p')} (IST)\n\n"
                     f"Logged-in Faculty Profile:\n"
-                    f"- Name: **{self.actor_name}**\n"
-                    f"- User ID: `{self.actor_id}` | Role: **{self.actor_role}**\n"
-                    f"- Assigned Subjects: **{subs_str}**\n\n"
-                    "REALISM & FORMATTING RULES:\n"
-                    "1. Respond directly and naturally to the user's inquiry.\n"
-                    "2. ALWAYS make important information BOLD: format course codes, dates, attendance percentages, numbers, and action items in **bold** for attractive readability.\n"
-                    "3. Present answers with crisp structure, clean bullet points, and appropriate emojis.\n"
+                    f"- Name: {self.actor_name}\n"
+                    f"- User ID: {self.actor_id} | Role: {self.actor_role}\n"
+                    f"- Assigned Subjects: {subs_str}\n\n"
+                    "CONVERSATIONAL & FORMATTING RULES:\n"
+                    "1. Respond directly, naturally, and politely to the user's inquiry.\n"
+                    "2. Do NOT use markdown asterisks (**) or markdown header symbols (###) in your reply.\n"
+                    "3. Present answers with crisp, clear paragraphs or clean bullet points.\n"
                     "4. If answering about today, date, or schedule, strictly reference the live system clock above.\n"
-                    "5. Keep answers executive, concise, and helpful. Never output generic onboarding boilerplate."
+                    "5. Never output shorthand codes like RM or SE without their proper title (e.g. Research Methodology, Software Engineering).\n"
+                    "6. Keep answers helpful, conversational, and direct."
                 )
                 t_start = time.time()
                 resp = provider.generate(
@@ -4130,6 +4233,8 @@ class AttendanceAgent:
                     and not resp.content.startswith("Attendance Assistant is momentarily unable")
                     and not resp.content.startswith("Gemini API is not configured")
                 ):
+                    # Clean out any stray asterisks from external model response
+                    clean_content = resp.content.replace("**", "")
                     self.tool_logger.log(
                         request_id=request_id,
                         tool_name="gemini_llm",
@@ -4140,7 +4245,7 @@ class AttendanceAgent:
                     )
                     return AgentResponse(
                         request_id=request_id,
-                        message=resp.content,
+                        message=clean_content,
                         success=True,
                         needs_confirmation=False,
                         data=[],
@@ -4154,44 +4259,43 @@ class AttendanceAgent:
 
         if any(w in clean_q for w in ["task", "job", "role", "who are you", "what can you do", "help"]):
             dynamic_msg = (
-                f"🤖 **RollCall AI Assistant** — *Active Profile: **{self.actor_name}***\n\n"
+                f"RollCall AI Assistant — Active Profile: {self.actor_name}\n\n"
                 f"My primary responsibility is to serve as your intelligent assistant for live class schedules, student attendance tracking, and session verification.\n\n"
-                f"📊 **Real-Time Capabilities for You:**\n"
-                f"• **Timetable & Class Schedule:** Inspect classes scheduled for today (**{now_dt.strftime('%A')}**) or find vacant classrooms.\n"
-                f"• **Attendance Auditing:** Summarize today's attendance metrics, track student attendance percentages, and flag defaulters (**< 75%**).\n"
-                f"• **Assigned Subjects:** Manage student rosters and records for your assigned subjects: **{subs_str}**.\n"
-                f"• **Session Handover:** Delegate class attendance to a colleague via proxy substitution or period exchange."
+                f"Real-Time Capabilities for You:\n"
+                f"• Timetable & Class Schedule: Inspect classes scheduled for today ({now_dt.strftime('%A')}) or find vacant classrooms.\n"
+                f"• Attendance Auditing: Summarize today's attendance metrics, track student attendance percentages, and flag defaulters (< 75%).\n"
+                f"• Assigned Subjects: Manage student rosters and records for your assigned subjects: {subs_str}.\n"
+                f"• Session Handover: Delegate class attendance to a colleague via proxy substitution or period exchange."
             )
         elif any(w in clean_q for w in ["time", "clock", "date", "today", "day"]):
             dynamic_msg = (
-                f"🕒 **Live Real-Time Clock & Academic Calendar:**\n\n"
-                f"• **Today's Date:** **{now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')}**\n"
-                f"• **Current Time:** **{now_dt.strftime('%I:%M %p')}** (IST)\n"
-                f"• **Academic Term:** **Odd Semester 2026–27**\n\n"
-                f"Would you like me to display your **class schedule for today** or inspect **today's overall attendance**?"
+                f"Live Real-Time Clock & Academic Calendar:\n\n"
+                f"• Today's Date: {now_dt.strftime('%A')}, {now_dt.strftime('%B %d, %Y')}\n"
+                f"• Current Time: {now_dt.strftime('%I:%M %p')} (IST)\n"
+                f"• Academic Term: Odd Semester 2026–27\n\n"
+                f"Would you like me to display your class schedule for today or inspect today's overall attendance?"
             )
         elif any(w in clean_q for w in ["subject", "course", "class", "teach"]):
             dynamic_msg = (
-                f"📚 **Assigned Subjects for {self.actor_name}:**\n\n"
-                f"You are currently assigned to teach: **{subs_str}**.\n\n"
-                f"• **Active Rosters:** All enrolled student rosters are active and synchronized.\n"
-                f"• **Next Steps:** You can ask me to **list defaulters (<75%)**, **view today's timetable**, or **inspect pending sessions**."
+                f"Assigned Subjects for {self.actor_name}:\n\n"
+                f"You are currently assigned to teach: {subs_str}.\n\n"
+                f"• Active Rosters: All enrolled student rosters are active and synchronized.\n"
+                f"• Next Steps: You can ask me to list defaulters (<75%), view today's timetable, or inspect pending sessions."
             )
         elif any(w in clean_q for w in ["hi", "hello", "hey", "good morning", "good afternoon", "greetings"]):
             greeting_tod = "morning" if now_dt.hour < 12 else "afternoon" if now_dt.hour < 17 else "evening"
             dynamic_msg = (
-                f"Hello **{self.actor_name}**! 👋\n\n"
-                f"Good {greeting_tod}! Today is **{now_dt.strftime('%A')}**, and your assigned teaching subjects are **{subs_str}**.\n\n"
+                f"Hello {self.actor_name}! Good {greeting_tod}! Today is {now_dt.strftime('%A')}, and your assigned teaching subjects are {subs_str}.\n\n"
                 f"How can I assist you with your class records, timetable, or student attendance today?"
             )
         else:
             dynamic_msg = (
-                f"📋 **Inquiry Regarding: \"{text.strip()}\"**\n\n"
-                f"As your intelligent attendance assistant for **{self.actor_name}**, I have live access to your teaching records for **{subs_str}**.\n\n"
-                f"**Quick Actions You Can Run:**\n"
-                f"• **\"Show my class schedule for today\"** — View teaching slots and assigned classrooms.\n"
-                f"• **\"Summarize today's overall attendance\"** — Real-time attendance breakdown.\n"
-                f"• **\"List students with attendance below 75%\"** — Instant defaulter tracking."
+                f"Hello {self.actor_name}! I have live access to your teaching schedule and student records for {subs_str}.\n\n"
+                f"Here are quick actions you can run:\n"
+                f"• Show my class schedule for today — View teaching slots and assigned classrooms.\n"
+                f"• Summarize today's overall attendance — Real-time attendance breakdown.\n"
+                f"• List students with attendance below 75% — Instant defaulter tracking.\n"
+                f"• List students in 5th semester — View enrolled student rosters."
             )
 
         return AgentResponse(

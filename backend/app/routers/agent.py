@@ -381,7 +381,10 @@ async def agent_process_file(
         if total_bytes == 0 or first_chunk is None:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Uploaded file is empty (0 bytes).",
+                detail=(
+                    "Uploaded file is empty (0 bytes). The file on disk has no "
+                    "content - re-download or re-save it from the source and try again."
+                ),
             )
 
         # 3. Content and format inspection

@@ -252,6 +252,17 @@ def test_admin_login_requires_valid_admin_key(client):
     )
     assert res3.status_code == 401
 
+    # 3b. A password hash (or any arbitrary string) is NOT a valid admin key.
+    res3b = client.post(
+        "/api/v1/auth/login",
+        json={
+            "user_id": "admin_john",
+            "password": "AdminPass123!",
+            "admin_key": "$2b$12$j3mmKiApoKgogYvb1ieK/uyarwjvMorVikA.7sCpG5sSwWibDyMum",
+        },
+    )
+    assert res3b.status_code == 401
+
     # 4. Correct admin_key -> 200
     res4 = client.post(
         "/api/v1/auth/login",

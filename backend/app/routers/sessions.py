@@ -41,6 +41,8 @@ logger = logging.getLogger("rollcall.routers.sessions")
 
 router = APIRouter(prefix="/sessions", tags=["Sessions"])
 
+_INITIALIZED_DATES: set[str] = set()
+
 
 def _attach_lock_fields(
     payload: Dict[str, Any], caller_role: str, now_iso: str
@@ -140,12 +142,15 @@ def list_sessions(
         from app.db.models import Session as DbSession
 
         init_date = dt.date.fromisoformat(date) if date else dt.date.today()
-        if not db.execute(
-            select(DbSession.session_id)
-            .where(DbSession.date == init_date.isoformat())
-            .limit(1)
-        ).first():
-            initialize_sessions_for_date(db, init_date)
+        iso_str = init_date.isoformat()
+        if iso_str not in _INITIALIZED_DATES:
+            if not db.execute(
+                select(DbSession.session_id)
+                .where(DbSession.date == iso_str)
+                .limit(1)
+            ).first():
+                initialize_sessions_for_date(db, init_date)
+            _INITIALIZED_DATES.add(iso_str)
     except Exception as exc:
         logger.debug("Automatic session initialisation skipped: %s", exc)
 

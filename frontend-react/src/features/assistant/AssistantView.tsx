@@ -130,6 +130,33 @@ interface ContextAction {
   href?: string;
 }
 
+function renderFormattedMessage(text: string | undefined | null) {
+  if (!text) return null;
+  // Parse **bold text** or *italic text* into clean <b> elements, stripping raw asterisks
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  return (
+    <>
+      {parts.map((part, idx) => {
+        if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+          return (
+            <b key={idx} className="font-bold text-[#1F2113]">
+              {part.slice(2, -2)}
+            </b>
+          );
+        }
+        if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
+          return (
+            <b key={idx} className="font-semibold text-[#1F2113]">
+              {part.slice(1, -1)}
+            </b>
+          );
+        }
+        return <React.Fragment key={idx}>{part}</React.Fragment>;
+      })}
+    </>
+  );
+}
+
 function getContextualActions(m: ChatMessage): ContextAction[] {
   const text = m.text || "";
   const lower = text.toLowerCase();
@@ -851,6 +878,21 @@ export function AssistantView() {
         return;
       }
 
+      if (file.size === 0) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: nextMsgId("err"),
+            sender: "assistant",
+            text: `"${file.name}" is empty (0 bytes). The file on disk has no content - re-download or re-save it from the source, then try again.`,
+            timestamp: getFormattedTime(),
+            error: true,
+          },
+        ]);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+        return;
+      }
+
       if (file.size > MAX_UPLOAD_BYTES) {
         setMessages((prev) => [
           ...prev,
@@ -1258,6 +1300,19 @@ export function AssistantView() {
       };
 
       setMessages((prev) => [...prev, assistantMsg]);
+
+      // A confirmed create-session (or any other timetable change) must
+      // refresh the Sessions view immediately rather than waiting for a
+      // cache TTL or a manual page reload.
+      if (
+        String(res.message || "").toLowerCase().includes("session created") ||
+        (Array.isArray(res.data) &&
+          (res.data as Array<Record<string, unknown>>).some(
+            (item) => item?.action === "create_session"
+          ))
+      ) {
+        window.dispatchEvent(new CustomEvent("rollcall:sessions-changed"));
+      }
 
       if (res.needs_confirmation && res.confirmation_request) {
         setPendingConfirmation({
@@ -1887,7 +1942,7 @@ export function AssistantView() {
                 }`}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <p className="whitespace-pre-wrap leading-relaxed flex-1">{m.text}</p>
+                  <p className="whitespace-pre-wrap leading-relaxed flex-1">{renderFormattedMessage(m.text)}</p>
                   {!isUser && (
                     <button
                       onClick={() => handleCopyText(m.id, m.text)}

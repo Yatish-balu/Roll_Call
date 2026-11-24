@@ -678,11 +678,12 @@ def query_students(
     usn: Optional[str] = None,
     branch: Optional[str] = None,
     name: Optional[str] = None,
+    semester: Optional[Union[int, str]] = None,
     limit: int = 500,
     db_target: Union[str, sqlite3.Connection, Any] = DEFAULT_DB_PATH,
     scope: Any = None,
 ) -> QueryResult:
-    """Retrieve students matching optional usn, branch, or name filters.
+    """Retrieve students matching optional usn, branch, name, or semester filters.
 
     When a ``scope`` is supplied only students inside the caller's scope are
     returned.
@@ -719,12 +720,31 @@ def query_students(
     if name:
         conditions.append("name LIKE ?")
         params.append(f"%{name.strip()}%")
-
-    where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
-    sql = f"SELECT usn, name, branch FROM students {where_clause} ORDER BY usn LIMIT {limit}"  # nosec B608 - fixed clause list, values bound, bounded int
-
     ro_db = _get_readonly_conn(db_target)
     try:
+        try:
+            cursor_cols = ro_db.execute("PRAGMA table_info(students)")
+            col_names = {r[1] for r in (cursor_cols.fetchall() if hasattr(cursor_cols, "fetchall") else list(cursor_cols))}
+        except Exception:
+            col_names = {"usn", "name", "branch"}
+
+        if semester is not None and "semester_id" in col_names:
+            sem_str = str(semester).strip().upper()
+            m_num = re.search(r"\d+", sem_str)
+            if m_num:
+                sem_num = int(m_num.group(0))
+                conditions.append(
+                    "(semester_id = ? OR semester_id = ? OR semester_id IN (SELECT semester_id FROM semesters WHERE semester_number = ?))"
+                )
+                params.extend([f"SEM-{sem_num}", str(sem_num), sem_num])
+            else:
+                conditions.append("semester_id = ?")
+                params.append(sem_str)
+
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        select_cols = "usn, name, branch, semester_id" if "semester_id" in col_names else "usn, name, branch"
+        sql = f"SELECT {select_cols} FROM students {where_clause} ORDER BY usn LIMIT {limit}"  # nosec B608 - fixed clause list, values bound, bounded int
+
         res = ro_db.execute(sql, params)
         rows = res.fetchall() if hasattr(res, "fetchall") else list(res)
         results = _rows_to_dicts(rows)
@@ -943,6 +963,7 @@ def query_tool(
             usn=usn,
             branch=branch,
             name=kwargs.get("name"),
+            semester=kwargs.get("semester"),
             limit=limit,
             db_target=db_target,
             scope=scope,

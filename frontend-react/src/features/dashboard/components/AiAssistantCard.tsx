@@ -5,6 +5,32 @@ import { Link } from "react-router-dom";
 import { sendAgentQuery, uploadAttendanceFile } from "@/services/api/dashboard";
 import type { VerifiedAgentResponse } from "@/types/dashboard";
 
+function renderFormattedMessage(text: string | undefined | null) {
+  if (!text) return null;
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*)/g);
+  return (
+    <>
+      {parts.map((part, idx) => {
+        if (part.startsWith("**") && part.endsWith("**") && part.length > 4) {
+          return (
+            <b key={idx} className="font-bold text-[#1F2113]">
+              {part.slice(2, -2)}
+            </b>
+          );
+        }
+        if (part.startsWith("*") && part.endsWith("*") && part.length > 2) {
+          return (
+            <b key={idx} className="font-semibold text-[#1F2113]">
+              {part.slice(1, -1)}
+            </b>
+          );
+        }
+        return <React.Fragment key={idx}>{part}</React.Fragment>;
+      })}
+    </>
+  );
+}
+
 
 export function AiAssistantCard() {
   const [query, setQuery] = useState("");
@@ -210,7 +236,7 @@ export function AiAssistantCard() {
               </button>
             </div>
           </div>
-          <p className="leading-relaxed text-[#24251C] whitespace-pre-wrap">{lastResponse.message}</p>
+          <p className="leading-relaxed text-[#24251C] whitespace-pre-wrap">{renderFormattedMessage(lastResponse.message)}</p>
         </div>
       ) : recentChat ? (
         <div className="p-3 rounded-xl bg-[#EDE8D8]/50 border border-[#E4DDCA] text-xs text-[#24251C] space-y-1.5 shadow-2xs">
@@ -229,7 +255,7 @@ export function AiAssistantCard() {
             </p>
           )}
           <p className="leading-relaxed text-[#24251C] line-clamp-2 text-[11px]">
-            {recentChat.answer}
+            {renderFormattedMessage(recentChat.answer)}
           </p>
         </div>
       ) : null}
