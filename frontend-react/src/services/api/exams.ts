@@ -121,6 +121,53 @@ export interface BranchSummaryItem {
   attendance_percentage: number;
 }
 
+export interface ExamHeaderInfo {
+  exam_id: string;
+  subject_code: string;
+  subject_name?: string;
+  date: string;
+  start_time: string;
+  end_time: string;
+  slot?: string;
+  total_registered: number;
+  total_present: number;
+  total_absent: number;
+  attendance_pct: number;
+}
+
+export interface StudentExamAttendanceRow {
+  sl_no: number;
+  usn: string;
+  name: string;
+  branch: string;
+  exams_written: number;
+  exams_absent: number;
+  total_exams: number;
+  attendance_pct: number;
+  exam_status: Record<string, string>;
+  missed_subjects: string[];
+}
+
+export interface BranchConsolidationReport {
+  branch: string;
+  branch_name?: string;
+  total_students: number;
+  total_exams: number;
+  overall_attendance_pct: number;
+  perfect_attendance_count: number;
+  partial_attendance_count: number;
+  exams: ExamHeaderInfo[];
+  students: StudentExamAttendanceRow[];
+}
+
+export interface MultiExamConsolidationResponse {
+  series_title: string;
+  semester?: number;
+  total_students_college: number;
+  total_exams_series: number;
+  branches: BranchConsolidationReport[];
+}
+
 export interface FormBScanResult {
   message: string;
   matched_count: number;
@@ -285,5 +332,20 @@ export const examsApi = {
   async downloadAbsenteesPdf(examId: string): Promise<Blob> {
     const url = `/api/v1/exams/${encodeURIComponent(examId)}/absentees-pdf`;
     return apiClient.getBlob(url);
+  },
+
+  async getBranchConsolidation(params?: {
+    semester?: number;
+    exam_type?: string;
+    branch?: string;
+  }): Promise<MultiExamConsolidationResponse> {
+    const query = new URLSearchParams();
+    if (params?.semester !== undefined) query.append("semester", String(params.semester));
+    if (params?.exam_type) query.append("exam_type", params.exam_type);
+    if (params?.branch) query.append("branch", params.branch);
+    const qs = query.toString();
+    return apiClient.get<MultiExamConsolidationResponse>(
+      `/api/v1/exams/consolidation/branch-wise${qs ? `?${qs}` : ""}`
+    );
   },
 };

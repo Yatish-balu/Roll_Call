@@ -627,14 +627,28 @@ async def agent_process_file(
         if not req_text:
             req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
 
-        resp = agent.process_request(
-            user_input=req_text,
-            file_path=temp_path,
-            master_usns=master_usns,
-            master_rooms=master_rooms,
-            default_room=default_room,
-            default_branch=default_branch,
-        )
+        try:
+            resp = agent.process_request(
+                user_input=req_text,
+                file_path=temp_path,
+                master_usns=master_usns,
+                master_rooms=master_rooms,
+                default_room=default_room,
+                default_branch=default_branch,
+            )
+        except Exception as proc_exc:
+            logger.error("agent.process_request encountered an unhandled exception: %s", proc_exc, exc_info=True)
+            from app.schemas.agent import AgentResponse
+            resp = AgentResponse(
+                request_id=get_request_id(),
+                message=(
+                    f"⚠️ The AI Vision engine encountered an issue while extracting this document ({proc_exc}). "
+                    "Please ensure the image is clear and well-lit, or open the Exam Invigilation tab directly."
+                ),
+                success=False,
+                needs_confirmation=False,
+                data={"error": str(proc_exc), "file": safe_filename},
+            )
 
         # Detect special document types (Exams Form-B, Timetables, Academic Calendars)
         is_exam_form_b = isinstance(resp.data, dict) and bool(resp.data.get("is_exam_form_b"))

@@ -129,3 +129,50 @@ class BranchSummaryItem(BaseModel):
     present_count: int
     absent_count: int
     attendance_percentage: float
+
+
+class ExamHeaderInfo(BaseModel):
+    exam_id: str
+    subject_code: str
+    subject_name: Optional[str] = None
+    date: str
+    start_time: str
+    end_time: str
+    slot: Optional[str] = "FN"
+    total_registered: int = 0
+    total_present: int = 0
+    total_absent: int = 0
+    attendance_pct: float = 0.0
+
+
+class StudentExamAttendanceRow(BaseModel):
+    sl_no: int
+    usn: str
+    name: str
+    branch: str
+    exams_written: int
+    exams_absent: int
+    total_exams: int
+    attendance_pct: float
+    exam_status: Dict[str, str]  # { "22CY72": "PRESENT", "22CY73": "ABSENT", ... }
+    missed_subjects: List[str] = Field(default_factory=list)
+
+
+class BranchConsolidationReport(BaseModel):
+    branch: str
+    branch_name: Optional[str] = None
+    total_students: int
+    total_exams: int
+    overall_attendance_pct: float
+    perfect_attendance_count: int
+    partial_attendance_count: int
+    exams: List[ExamHeaderInfo]
+    students: List[StudentExamAttendanceRow]
+
+
+class MultiExamConsolidationResponse(BaseModel):
+    series_title: str
+    semester: Optional[int] = None
+    total_students_college: int
+    total_exams_series: int
+    branches: List[BranchConsolidationReport]

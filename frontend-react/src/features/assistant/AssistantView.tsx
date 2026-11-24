@@ -441,7 +441,11 @@ export function AssistantView() {
   // Synchronize threads on user identity change (strict per-account isolation)
   useEffect(() => {
     // Only reset chat if the user explicitly switched accounts (e.g. from user A to user B)
-    const isUserSwitch = prevUserIdRef.current !== undefined && prevUserIdRef.current !== userId;
+    const isUserSwitch = Boolean(
+      prevUserIdRef.current &&
+      userId &&
+      prevUserIdRef.current !== userId
+    );
     prevUserIdRef.current = userId;
 
     if (isUserSwitch) {

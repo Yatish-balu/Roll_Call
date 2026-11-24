@@ -7,15 +7,18 @@ import {
   type ExamItem,
   type RoomSummaryItem,
   type BranchSummaryItem,
+  type MultiExamConsolidationResponse,
 } from "@/services/api/exams";
 import { useAuth } from "@/hooks/useAuth";
 import { RoomCard } from "./components/RoomCard";
 import { BranchSummaryTable } from "./components/BranchSummaryTable";
+import { BranchConsolidationMatrix } from "./components/BranchConsolidationMatrix";
 
 export function ExamControlView() {
   const navigate = useNavigate();
   const { isAdmin } = useAuth();
 
+  const [activeTab, setActiveTab] = useState<"rooms" | "consolidation">("rooms");
   const [exams, setExams] = useState<ExamItem[]>([]);
   const [selectedExamId, setSelectedExamId] = useState<string>("");
   const [selectedExam, setSelectedExam] = useState<ExamItem | null>(null);
@@ -24,6 +27,10 @@ export function ExamControlView() {
   const [branches, setBranches] = useState<BranchSummaryItem[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // Multi-exam CIE Branch Consolidation state
+  const [consolidationData, setConsolidationData] = useState<MultiExamConsolidationResponse | null>(null);
+  const [isLoadingConsolidation, setIsLoadingConsolidation] = useState(false);
 
   // Admin Override Modal state
   const [overrideRoomNo, setOverrideRoomNo] = useState<string | null>(null);
@@ -79,6 +86,25 @@ export function ExamControlView() {
       loadSummaries(selectedExamId);
     }
   }, [selectedExamId, loadSummaries]);
+
+  // Load multi-exam branch consolidation
+  const loadConsolidation = useCallback(async (sem: number = 7) => {
+    try {
+      setIsLoadingConsolidation(true);
+      const data = await examsApi.getBranchConsolidation({ semester: sem });
+      setConsolidationData(data);
+    } catch (err: unknown) {
+      console.error("Failed to load consolidation data:", err);
+    } finally {
+      setIsLoadingConsolidation(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeTab === "consolidation" && !consolidationData) {
+      loadConsolidation(7);
+    }
+  }, [activeTab, consolidationData, loadConsolidation]);
 
   // Download Absentees PDF
   const handleDownloadAbsentees = async () => {
@@ -143,7 +169,7 @@ export function ExamControlView() {
 
   return (
     <div className="space-y-6">
-      {/* Top Header & Exam Selector */}
+      {/* Top Header */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 bg-white p-5 rounded-2xl border border-gray-200/80 shadow-sm">
         <div>
           <h2 className="text-xl font-bold text-gray-900 flex items-center gap-2">
@@ -154,21 +180,47 @@ export function ExamControlView() {
           </p>
         </div>
 
-        <div className="flex items-center gap-3">
-          <label htmlFor="exam-select" className="text-xs font-semibold text-gray-600">Select Exam:</label>
-          <select
-            id="exam-select"
-            value={selectedExamId}
-            onChange={(e) => setSelectedExamId(e.target.value)}
-            className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 shadow-sm focus:border-[#3F451F] focus:outline-none"
-          >
-            {exams.map((ex) => (
-              <option key={ex.exam_id} value={ex.exam_id}>
-                {ex.name} ({ex.exam_id})
-              </option>
-            ))}
-          </select>
-        </div>
+        {activeTab === "rooms" && (
+          <div className="flex items-center gap-3">
+            <label htmlFor="exam-select" className="text-xs font-semibold text-gray-600">Select Exam:</label>
+            <select
+              id="exam-select"
+              value={selectedExamId}
+              onChange={(e) => setSelectedExamId(e.target.value)}
+              className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 shadow-sm focus:border-[#3F451F] focus:outline-none"
+            >
+              {exams.map((ex) => (
+                <option key={ex.exam_id} value={ex.exam_id}>
+                  {ex.name} ({ex.exam_id})
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+      </div>
+
+      {/* View Switcher Tabs */}
+      <div className="flex gap-2 border-b border-gray-200 pb-1">
+        <button
+          onClick={() => setActiveTab("rooms")}
+          className={`px-5 py-2.5 text-sm font-semibold rounded-xl transition-all flex items-center gap-2 ${
+            activeTab === "rooms"
+              ? "bg-[#3F451F] text-white shadow"
+              : "bg-white text-gray-600 hover:text-gray-900 border border-gray-200"
+          }`}
+        >
+          <span>🏢</span> Exam Hall & Rooms Status
+        </button>
+        <button
+          onClick={() => setActiveTab("consolidation")}
+          className={`px-5 py-2.5 text-sm font-semibold rounded-xl transition-all flex items-center gap-2 ${
+            activeTab === "consolidation"
+              ? "bg-[#3F451F] text-white shadow"
+              : "bg-white text-gray-600 hover:text-gray-900 border border-gray-200"
+          }`}
+        >
+          <span>📊</span> Multi-Exam Branch Matrix (CIE Consolidation)
+        </button>
       </div>
 
       {error && (
@@ -184,78 +236,89 @@ export function ExamControlView() {
         </div>
       )}
 
-      {/* Selected Exam Active Banner */}
-      {selectedExam && (
-        <div className="bg-[#EDE8D8]/40 border border-[#3F451F]/15 rounded-2xl p-5">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#3F451F] text-white">
-                  {selectedExam.exam_type}
-                </span>
-                <span className="text-xs font-medium text-gray-600">
-                  Subject: <strong className="text-gray-900">{selectedExam.subject_code}</strong> {selectedExam.subject_name && `(${selectedExam.subject_name})`}
-                </span>
+      {activeTab === "consolidation" ? (
+        <BranchConsolidationMatrix
+          branches={consolidationData?.branches || []}
+          seriesTitle={consolidationData?.series_title}
+          semester={consolidationData?.semester || 7}
+          isLoading={isLoadingConsolidation}
+        />
+      ) : (
+        <>
+          {/* Selected Exam Active Banner */}
+          {selectedExam && (
+            <div className="bg-[#EDE8D8]/40 border border-[#3F451F]/15 rounded-2xl p-5">
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-[#3F451F] text-white">
+                      {selectedExam.exam_type}
+                    </span>
+                    <span className="text-xs font-medium text-gray-600">
+                      Subject: <strong className="text-gray-900">{selectedExam.subject_code}</strong> {selectedExam.subject_name && `(${selectedExam.subject_name})`}
+                    </span>
+                  </div>
+                  <h3 className="text-lg font-bold text-gray-900 mt-1">{selectedExam.name}</h3>
+                  <p className="text-xs text-gray-600">
+                    Date: <strong>{selectedExam.date}</strong> · Time: <strong>{selectedExam.start_time} - {selectedExam.end_time}</strong> · Cutoff: <strong>{selectedExam.cutoff_minutes} mins</strong>
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={handleDownloadAbsentees}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#3F451F] text-white text-xs font-semibold shadow hover:bg-[#343919] transition-colors"
+                  >
+                    <span>📑</span> Download Form-B Absentees PDF
+                  </button>
+                  <button
+                    onClick={() => navigate("/invigilation")}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-gray-300 text-gray-800 text-xs font-semibold hover:bg-gray-50 transition-colors"
+                  >
+                    <span>📝</span> Open Invigilator View
+                  </button>
+                </div>
               </div>
-              <h3 className="text-lg font-bold text-gray-900 mt-1">{selectedExam.name}</h3>
-              <p className="text-xs text-gray-600">
-                Date: <strong>{selectedExam.date}</strong> · Time: <strong>{selectedExam.start_time} - {selectedExam.end_time}</strong> · Cutoff: <strong>{selectedExam.cutoff_minutes} mins</strong>
-              </p>
+            </div>
+          )}
+
+          {/* Room Summary Grid */}
+          <div>
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-bold text-gray-900">Room-Wise Attendance Status</h3>
+              <span className="text-xs text-gray-500">{rooms.length} Exam Rooms</span>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <button
-                onClick={handleDownloadAbsentees}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-[#3F451F] text-white text-xs font-semibold shadow hover:bg-[#343919] transition-colors"
-              >
-                <span>📑</span> Download Form-B Absentees PDF
-              </button>
-              <button
-                onClick={() => navigate("/invigilation")}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white border border-gray-300 text-gray-800 text-xs font-semibold hover:bg-gray-50 transition-colors"
-              >
-                <span>📝</span> Open Invigilator View
-              </button>
-            </div>
+            {isLoading ? (
+              <div className="text-center py-12 text-sm text-gray-500">Loading room attendance data...</div>
+            ) : rooms.length === 0 ? (
+              <div className="bg-white p-8 rounded-2xl border text-center text-gray-500 text-sm">
+                No rooms registered for this exam yet.
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                {rooms.map((room) => (
+                  <RoomCard
+                    key={room.room_no}
+                    room={room}
+                    examId={selectedExamId}
+                    isAdmin={isAdmin}
+                    onSelect={(roomNo) => navigate(`/exams/${selectedExamId}/rooms/${encodeURIComponent(roomNo)}`)}
+                    onDownloadPdf={handleDownloadRoomPdf}
+                    onAdminOverride={(roomNo) => setOverrideRoomNo(roomNo)}
+                  />
+                ))}
+              </div>
+            )}
           </div>
-        </div>
+
+          {/* Branch Summary */}
+          <div className="bg-white rounded-2xl border border-gray-200/80 p-5 shadow-sm">
+            <h3 className="text-base font-bold text-gray-900 mb-3">Branch-Wise Consolidation</h3>
+            <BranchSummaryTable branches={branches} />
+          </div>
+        </>
       )}
-
-      {/* Room Summary Grid */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h3 className="text-base font-bold text-gray-900">Room-Wise Attendance Status</h3>
-          <span className="text-xs text-gray-500">{rooms.length} Exam Rooms</span>
-        </div>
-
-        {isLoading ? (
-          <div className="text-center py-12 text-sm text-gray-500">Loading room attendance data...</div>
-        ) : rooms.length === 0 ? (
-          <div className="bg-white p-8 rounded-2xl border text-center text-gray-500 text-sm">
-            No rooms registered for this exam yet.
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-            {rooms.map((room) => (
-              <RoomCard
-                key={room.room_no}
-                room={room}
-                examId={selectedExamId}
-                isAdmin={isAdmin}
-                onSelect={(roomNo) => navigate(`/exams/${selectedExamId}/rooms/${encodeURIComponent(roomNo)}`)}
-                onDownloadPdf={handleDownloadRoomPdf}
-                onAdminOverride={(roomNo) => setOverrideRoomNo(roomNo)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Branch Summary */}
-      <div className="bg-white rounded-2xl border border-gray-200/80 p-5 shadow-sm">
-        <h3 className="text-base font-bold text-gray-900 mb-3">Branch-Wise Consolidation</h3>
-        <BranchSummaryTable branches={branches} />
-      </div>
 
       {/* Admin Override Modal */}
       {overrideRoomNo && (

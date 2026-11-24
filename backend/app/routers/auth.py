@@ -2075,6 +2075,22 @@ def lookup_account_for_reset(
                 "message": "No active account found for this identifier. Please verify your User ID or email.",
             }
 
+        target_email = (db_user.email or "").strip()
+        is_dummy_domain = any(
+            target_email.lower().endswith(suffix)
+            for suffix in (".internal", ".local", "@rollcall.edu", "@example.com")
+        )
+        if is_dummy_domain and not _is_production():
+            smtp_user = os.getenv("SMTP_USERNAME") or os.getenv("SMTP_SENDER")
+            if smtp_user and "@" in smtp_user:
+                dev_masked = _mask_email(smtp_user.strip())
+                return {
+                    "found": True,
+                    "user_id": db_user.user_id,
+                    "email_masked": dev_masked,
+                    "message": f"Account found for {db_user.user_id}. In test mode, OTP is routed to {dev_masked}.",
+                }
+
         masked = _mask_email(db_user.email or "")
         return {
             "found": True,
@@ -2143,15 +2159,31 @@ def forgot_password(
 
         code = store_otp(db, db_user.user_id, minutes_valid=_OTP_RESET_TTL_MINUTES)
 
+        target_email = (db_user.email or "").strip()
+        is_dummy_domain = any(
+            target_email.lower().endswith(suffix)
+            for suffix in (".internal", ".local", "@rollcall.edu", "@example.com")
+        )
+        dev_forwarded = False
+        if is_dummy_domain and not _is_production():
+            smtp_user = os.getenv("SMTP_USERNAME") or os.getenv("SMTP_SENDER")
+            if smtp_user and "@" in smtp_user:
+                target_email = smtp_user.strip()
+                dev_forwarded = True
+
+        email_subject = f"RollCall AI: Password Reset OTP for {db_user.user_id}"
+        email_body = (
+            f"A password reset was requested for user account: {db_user.user_id} "
+            f"(registered address: {db_user.email}).\n\n"
+            f"Your one-time verification code is: {code}\n\n"
+            f"It expires in {_OTP_RESET_TTL_MINUTES} minutes. "
+            "If you did not request this, you can ignore this message."
+        )
+
         delivery = get_email_provider().send(
-            db_user.email,
-            "RollCall AI password reset code",
-            (
-                "A password reset was requested for your account.\n\n"
-                f"Your one-time code is: {code}\n\n"
-                f"It expires in {_OTP_RESET_TTL_MINUTES} minutes. "
-                "If you did not request this, you can ignore this message."
-            ),
+            target_email,
+            email_subject,
+            email_body,
         )
         if not delivery.configured:
             logger.error(
@@ -2160,8 +2192,9 @@ def forgot_password(
             )
         elif not delivery.delivered:
             logger.error(
-                "Password reset OTP delivery failed for %s: %s",
+                "Password reset OTP delivery failed for %s (target: %s): %s",
                 db_user.user_id,
+                target_email,
                 delivery.detail,
             )
 
@@ -2172,13 +2205,19 @@ def forgot_password(
             actor_id=db_user.user_id,
             ip_address=client_ip,
             request_id=get_request_id(),
-            details={"delivered": delivery.delivered, "provider_configured": delivery.configured},
+            details={"delivered": delivery.delivered, "provider_configured": delivery.configured, "dev_forwarded": dev_forwarded},
         )
 
-        response["email_masked"] = _mask_email(db_user.email or "")
-        response["message"] = (
-            f"A 6-digit OTP has been sent to its registered email address ({response['email_masked']})."
-        )
+        if dev_forwarded:
+            response["email_masked"] = _mask_email(target_email)
+            response["message"] = (
+                f"A 6-digit OTP has been sent to your developer/tester inbox ({response['email_masked']}) for account {db_user.user_id}."
+            )
+        else:
+            response["email_masked"] = _mask_email(db_user.email or "")
+            response["message"] = (
+                f"A 6-digit OTP has been sent to its registered email address ({response['email_masked']})."
+            )
 
         # Development/test builds echo the code so the flow can be exercised
         # without a mail server. Production never exposes it.

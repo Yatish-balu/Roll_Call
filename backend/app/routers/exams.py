@@ -22,14 +22,18 @@ from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.exams import (
     AdminOverridePayload,
+    BranchConsolidationReport,
     BranchSummaryItem,
     BulkMarkPayload,
     ExamCreate,
+    ExamHeaderInfo,
     ExamOut,
     ExamSeatingOut,
+    MultiExamConsolidationResponse,
     RoomAssignPayload,
     RoomAssignmentOut,
     RoomSummaryItem,
+    StudentExamAttendanceRow,
 )
 from app.security.events import log_security_event
 from app.security.uploads import (
@@ -955,6 +959,214 @@ def get_branch_wise_summary(
         ))
 
     return out
+
+
+BRANCH_FULL_NAMES: Dict[str, str] = {
+    "CY": "Computer Science & Engineering (Cyber Security)",
+    "CSE": "Computer Science & Engineering",
+    "CS": "Computer Science & Engineering",
+    "ISE": "Information Science & Engineering",
+    "IS": "Information Science & Engineering",
+    "AIML": "Artificial Intelligence & Machine Learning",
+    "AI": "Artificial Intelligence & Machine Learning",
+    "ECE": "Electronics & Communication Engineering",
+    "EC": "Electronics & Communication Engineering",
+    "EEE": "Electrical & Electronics Engineering",
+    "ME": "Mechanical Engineering",
+    "CV": "Civil Engineering",
+}
+
+
+@router.get(
+    "/consolidation/branch-wise",
+    response_model=MultiExamConsolidationResponse,
+    summary="Get multi-exam branch consolidation matrix with subject codes, dates, and student attendance counts",
+)
+def get_multi_exam_branch_consolidation(
+    semester: Optional[int] = Query(None, description="Filter by semester (e.g. 7)"),
+    exam_type: Optional[str] = Query(None, description="Filter by exam type (e.g. THEORY_CIE)"),
+    branch: Optional[str] = Query(None, description="Filter by specific branch code (e.g. CY)"),
+    current_user: AuthenticatedUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(Exam)
+    if exam_type:
+        query = query.filter(Exam.exam_type == exam_type)
+    if semester is not None:
+        query = query.filter(Exam.semester == semester)
+
+    all_exams = query.order_by(Exam.date.asc(), Exam.start_time.asc()).all()
+    if not all_exams:
+        return MultiExamConsolidationResponse(
+            series_title="CIE Assessment Series",
+            semester=semester,
+            total_students_college=0,
+            total_exams_series=0,
+            branches=[],
+        )
+
+    # Deduplicate exams by subject_code so each distinct CIE subject gets exactly one column
+    deduped_exams_map: Dict[str, Exam] = {}
+    for ex in all_exams:
+        sc = (ex.subject_code or "").strip().upper()
+        if sc not in deduped_exams_map:
+            deduped_exams_map[sc] = ex
+        elif ex.exam_id.startswith("DSCE-CIE3-22") or ex.exam_id.startswith("DSCE-CIE"):
+            deduped_exams_map[sc] = ex
+
+    unique_exams = sorted(
+        deduped_exams_map.values(),
+        key=lambda x: (str(x.date), str(x.start_time), str(x.subject_code)),
+    )
+    exam_ids = [e.exam_id for e in all_exams]
+    unique_exam_ids = [e.exam_id for e in unique_exams]
+
+    seating_query = db.query(ExamSeating).filter(ExamSeating.exam_id.in_(exam_ids))
+    if branch:
+        seating_query = seating_query.filter(ExamSeating.branch.ilike(f"%{branch}%"))
+    all_seating = seating_query.order_by(ExamSeating.branch.asc(), ExamSeating.sl_no.asc()).all()
+
+    branch_exam_map: Dict[str, set] = {}
+    branch_student_map: Dict[str, Dict[str, Dict[str, Any]]] = {}
+
+    for s in all_seating:
+        b = (s.branch or "GEN").upper().strip()
+        sc = (s.subject_code or "").upper().strip()
+        if b not in branch_exam_map:
+            branch_exam_map[b] = set()
+            branch_student_map[b] = {}
+
+        branch_exam_map[b].add(sc)
+
+        usn = (s.usn or "").upper().strip()
+        if usn not in branch_student_map[b]:
+            branch_student_map[b][usn] = {
+                "sl_no": s.sl_no or (len(branch_student_map[b]) + 1),
+                "usn": usn,
+                "name": s.name or usn,
+                "branch": b,
+                "statuses": {},
+            }
+        # Record attendance per subject code
+        if sc:
+            existing_st = branch_student_map[b][usn]["statuses"].get(sc)
+            # If present in any room for this subject, keep PRESENT
+            if existing_st != "PRESENT":
+                branch_student_map[b][usn]["statuses"][sc] = s.status or "PRESENT"
+
+    branch_reports: List[BranchConsolidationReport] = []
+    total_college_students = 0
+
+    for b, students_dict in sorted(branch_student_map.items()):
+        total_college_students += len(students_dict)
+        relevant_exams = [
+            ex
+            for ex in unique_exams
+            if ex.subject_code.upper() in branch_exam_map.get(b, set()) or len(branch_exam_map.get(b, set())) == 0
+        ]
+        if not relevant_exams:
+            relevant_exams = unique_exams
+
+        exam_headers: List[ExamHeaderInfo] = []
+        for ex in relevant_exams:
+            sc = ex.subject_code.upper()
+            pres_cnt = sum(
+                1 for st in students_dict.values() if st["statuses"].get(sc) == "PRESENT"
+            )
+            abs_cnt = sum(
+                1 for st in students_dict.values() if st["statuses"].get(sc) == "ABSENT"
+            )
+            reg_cnt = len(students_dict)
+            pct = round((pres_cnt / reg_cnt * 100), 1) if reg_cnt > 0 else 0.0
+            slot_label = "FN" if str(ex.start_time) < "13:00:00" else "AN"
+            exam_headers.append(
+                ExamHeaderInfo(
+                    exam_id=ex.exam_id,
+                    subject_code=ex.subject_code,
+                    subject_name=ex.subject_name or ex.name,
+                    date=str(ex.date),
+                    start_time=str(ex.start_time),
+                    end_time=str(ex.end_time),
+                    slot=slot_label,
+                    total_registered=reg_cnt,
+                    total_present=pres_cnt,
+                    total_absent=abs_cnt,
+                    attendance_pct=pct,
+                )
+            )
+
+        student_rows: List[StudentExamAttendanceRow] = []
+        tot_written_branch = 0
+        tot_possible_branch = len(students_dict) * len(relevant_exams)
+
+        for usn, st in sorted(students_dict.items(), key=lambda x: (x[1]["sl_no"], x[0])):
+            exam_status: Dict[str, str] = {}
+            missed_subs: List[str] = []
+            written_count = 0
+            absent_count = 0
+
+            for ex in relevant_exams:
+                sc = ex.subject_code.upper()
+                st_status = st["statuses"].get(sc, "ABSENT")
+                exam_status[ex.subject_code] = st_status
+                if st_status == "PRESENT":
+                    written_count += 1
+                else:
+                    absent_count += 1
+                    missed_subs.append(ex.subject_code)
+
+            tot_written_branch += written_count
+            att_pct = (
+                round((written_count / len(relevant_exams) * 100), 1)
+                if len(relevant_exams) > 0
+                else 0.0
+            )
+
+            student_rows.append(
+                StudentExamAttendanceRow(
+                    sl_no=st["sl_no"],
+                    usn=usn,
+                    name=st["name"],
+                    branch=b,
+                    exams_written=written_count,
+                    exams_absent=absent_count,
+                    total_exams=len(relevant_exams),
+                    attendance_pct=att_pct,
+                    exam_status=exam_status,
+                    missed_subjects=missed_subs,
+                )
+            )
+
+        perfect_count = sum(1 for r in student_rows if r.exams_written == len(relevant_exams))
+        partial_count = len(student_rows) - perfect_count
+        overall_pct = (
+            round((tot_written_branch / tot_possible_branch * 100), 1)
+            if tot_possible_branch > 0
+            else 0.0
+        )
+
+        branch_reports.append(
+            BranchConsolidationReport(
+                branch=b,
+                branch_name=BRANCH_FULL_NAMES.get(b, f"Department of {b}"),
+                total_students=len(student_rows),
+                total_exams=len(relevant_exams),
+                overall_attendance_pct=overall_pct,
+                perfect_attendance_count=perfect_count,
+                partial_attendance_count=partial_count,
+                exams=exam_headers,
+                students=student_rows,
+            )
+        )
+
+    series_name = unique_exams[0].name.split("-")[0].strip() if unique_exams else "CIE Assessment Series"
+    return MultiExamConsolidationResponse(
+        series_title=f"{series_name} — Full College Attendance Consolidation",
+        semester=semester or (unique_exams[0].semester if unique_exams else None),
+        total_students_college=total_college_students,
+        total_exams_series=len(unique_exams),
+        branches=branch_reports,
+    )
 
 
 # ============================================================================

@@ -2056,8 +2056,8 @@ class AttendanceAgent:
                 from app.db.models import Exam, RoomAssignment
                 known_exams = self.db_target.query(Exam).all()
                 for ex in known_exams:
-                    sc = (ex.subject_code or "").upper()
-                    if any(sc == c["subject_code"].upper() for c in detected_columns):
+                    sc = (ex.subject_code or "").strip().upper()
+                    if any(sc == (c.get("subject_code") or "").strip().upper() for c in detected_columns if isinstance(c, dict)):
                         matching_exams.append({
                             "exam_id": ex.exam_id,
                             "name": ex.name,
@@ -2079,12 +2079,16 @@ class AttendanceAgent:
 
         col_lines = []
         for i, col in enumerate(detected_columns, 1):
-            col_lines.append(f"{i}. **{col['date']}** ({col['slot']}): Subject `{col['subject_code']}`")
+            if isinstance(col, dict):
+                d_str = col.get("date") or "Scheduled Date"
+                s_str = col.get("slot") or "Session"
+                c_str = col.get("subject_code") or "EXAM"
+                col_lines.append(f"{i}. **{d_str}** ({s_str}): Subject `{c_str}`")
 
         students_preview = ""
         if extracted_students:
-            first_usn = extracted_students[0]["usn"]
-            last_usn = extracted_students[-1]["usn"]
+            first_usn = extracted_students[0].get("usn", "N/A")
+            last_usn = extracted_students[-1].get("usn", "N/A")
             students_preview = f"• **Roster:** {len(extracted_students)} candidates identified (USN range: `{first_usn}` to `{last_usn}`)\n"
 
         exam_link_msg = ""
