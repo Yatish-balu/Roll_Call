@@ -135,6 +135,7 @@ def list_students(
                 "section": section_labels.get(row.section_id),
                 "batch_id": row.batch_id,
                 "roll_no": row.roll_no,
+                "proctor_id": getattr(row, "proctor_id", None),
             }
             for row in rows
         ],

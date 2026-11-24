@@ -40,6 +40,7 @@ from tools.query_tool import query_tool, QueryResult, NO_DATA_MESSAGE
 from tools.export_tool import export_tool, ExportResult
 from app.security.ai_policy import authorize_tool
 from app.auth.roles import Role
+from app.services.vision_client import create_vision_client
 
 logger = logging.getLogger("rollcall.agent")
 
@@ -1403,7 +1404,7 @@ class AttendanceAgent:
                 from PIL import Image
                 api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
                 if api_key and not api_key.startswith("your_"):
-                    client = genai.Client(api_key=api_key)
+                    client = create_vision_client(api_key)
                     img = Image.open(str(file_path))
                     # Downscale for quick check
                     img.thumbnail((800, 800))
@@ -1573,7 +1574,7 @@ class AttendanceAgent:
                 from PIL import Image
                 api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
                 if api_key and not api_key.startswith("your_"):
-                    client = genai.Client(api_key=api_key)
+                    client = create_vision_client(api_key)
                     img = Image.open(str(file_path))
                     # Downscale for quick check
                     img.thumbnail((800, 800))
@@ -1646,7 +1647,7 @@ class AttendanceAgent:
                 from PIL import Image
                 api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
                 if api_key and not api_key.startswith("your_"):
-                    client = genai.Client(api_key=api_key)
+                    client = create_vision_client(api_key)
                     img = self._preprocess_image_for_vision(file_path)
                     prompt = (
                         "You are an academic scheduling expert. Analyze this Calendar of Events document.\n"
@@ -1927,7 +1928,7 @@ class AttendanceAgent:
                 try:
                     from google import genai
                     from PIL import Image
-                    client = genai.Client(api_key=api_key)
+                    client = create_vision_client(api_key)
                     with Image.open(str(file_path)) as pil_raw:
                         img = pil_raw.copy()
                     img.thumbnail((400, 400))
@@ -2218,7 +2219,7 @@ class AttendanceAgent:
                 from PIL import Image
                 api_key = (os.getenv("GEMINI_API_KEY") or "").strip()
                 if api_key and not api_key.startswith("your_"):
-                    client = genai.Client(api_key=api_key)
+                    client = create_vision_client(api_key)
                     # Enhance contrast, sharpen, and auto-orient low-visibility image
                     img = self._preprocess_image_for_vision(file_path)
                     prompt = (

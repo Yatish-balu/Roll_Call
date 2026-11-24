@@ -48,6 +48,15 @@ class StudentUpdate(BaseModel):
 
 class StudentResponse(StudentBase):
     usn: str = Field(..., description="Unique Student Number")
+    semester: Optional[int] = Field(None, description="Semester number (1-8)")
+    semester_id: Optional[str] = Field(None, description="Semester ID (e.g. SEM-5)")
+    section: Optional[str] = Field(None, description="Section label")
+    section_id: Optional[str] = Field(None, description="Section ID")
+    batch: Optional[str] = Field(None, description="Batch label")
+    batch_id: Optional[str] = Field(None, description="Batch ID")
+    roll_no: Optional[str] = Field(None, description="Roll number")
+    dept_id: Optional[str] = Field(None, description="Department ID")
+    proctor_id: Optional[str] = Field(None, description="Proctor user ID")
 
     model_config = ConfigDict(from_attributes=True)
 

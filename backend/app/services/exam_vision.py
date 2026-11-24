@@ -16,14 +16,15 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# Preferred models in priority order for Vision OCR
-# Ultra-fast, high-accuracy Gemini Vision models in priority order
+# Preferred models in priority order for Vision OCR. Only the first two are
+# tried: a longer chain multiplied latency when a model was slow/unavailable.
 PREFERRED_MODELS = (
     "gemini-3.5-flash-lite",
     "gemini-flash-lite-latest",
     "gemini-3.8-flash",
     "gemini-flash-latest",
 )
+VISION_MODEL_ATTEMPTS = 2
 
 
 class ExamScanResultList(list):
@@ -168,18 +169,24 @@ def scan_form_b_image(
     b64 = base64.b64encode(processed_bytes).decode("utf-8")
     mime = "image/png" if processed_bytes.startswith(b"\x89PNG") else "image/jpeg"
 
-    # Try modern google.genai client first, fallback to legacy google.generativeai
+    # Try the modern google.genai client with a bounded timeout. The legacy SDK
+    # is only used when the modern one cannot be imported at all - retrying the
+    # same models through a second SDK only doubled the wait.
     raw_response_text = None
     last_err = None
+    modern_sdk_available = False
 
     try:
-        from google import genai
-        client = genai.Client(api_key=api_key)
+        from app.services.vision_client import create_vision_client
+
+        client = create_vision_client(api_key)
+        modern_sdk_available = True
         from PIL import Image
         import io
         pil_img = Image.open(io.BytesIO(processed_bytes))
+        scan_started = time.monotonic()
 
-        for model_name in PREFERRED_MODELS:
+        for model_name in PREFERRED_MODELS[:VISION_MODEL_ATTEMPTS]:
             try:
                 resp = client.models.generate_content(
                     model=model_name,
@@ -187,7 +194,11 @@ def scan_form_b_image(
                 )
                 if resp and resp.text:
                     raw_response_text = resp.text.strip()
-                    logger.info("Successfully scanned Form-B using google.genai with model: %s", model_name)
+                    logger.info(
+                        "Form-B scan succeeded with model %s in %.2fs",
+                        model_name,
+                        time.monotonic() - scan_started,
+                    )
                     break
             except Exception as exc:
                 last_err = exc
@@ -199,12 +210,12 @@ def scan_form_b_image(
     except Exception as genai_err:
         logger.debug("google.genai SDK unavailable or error: %s, falling back to google.generativeai", genai_err)
 
-    if not raw_response_text:
+    if not raw_response_text and not modern_sdk_available:
         try:
             import google.generativeai as legacy_genai
             legacy_genai.configure(api_key=api_key)
 
-            for model_name in PREFERRED_MODELS:
+            for model_name in PREFERRED_MODELS[:VISION_MODEL_ATTEMPTS]:
                 try:
                     model_obj = legacy_genai.GenerativeModel(model_name)
                     response = model_obj.generate_content([
