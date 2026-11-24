@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile, status
+from starlette.concurrency import run_in_threadpool
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -556,9 +557,9 @@ async def agent_process_file(
                         "message": err_msg,
                         "reasons": quality.get("reasons", [reasons]),
                         "sharpness": quality.get("sharpness", 0.0),
-                        "sharpness_threshold": quality.get("thresholds", {}).get("sharpness_min", 15.0),
+                        "sharpness_threshold": quality.get("thresholds", {}).get("sharpness_min", 10.0),
                         "brightness": quality.get("brightness", 0.0),
-                        "brightness_threshold": quality.get("thresholds", {}).get("brightness_min", 20.0),
+                        "brightness_threshold": quality.get("thresholds", {}).get("brightness_min", 12.0),
                     },
                 )
 
@@ -628,7 +629,11 @@ async def agent_process_file(
             req_text = f"Process attendance for session {target_session}" if target_session else "Process attendance file"
 
         try:
-            resp = agent.process_request(
+            # Vision extraction is synchronous and I/O-bound. Running it in a
+            # worker thread keeps the API responsive while Gemini is thinking,
+            # so tab navigation and other uploads are not stalled by one photo.
+            resp = await run_in_threadpool(
+                agent.process_request,
                 user_input=req_text,
                 file_path=temp_path,
                 master_usns=master_usns,

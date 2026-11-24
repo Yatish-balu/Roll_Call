@@ -970,13 +970,7 @@ export function AssistantView() {
           });
         }
       } catch (err: unknown) {
-        const anyErr = err as {
-          statusCode?: number;
-          status?: number;
-          code?: string;
-          message?: string;
-          details?: Record<string, unknown>;
-        };
+        const anyErr = err as Record<string, any>;
 
         const isQualityRejected =
           (anyErr?.statusCode === 422 || anyErr?.status === 422) &&
@@ -987,9 +981,11 @@ export function AssistantView() {
             String(anyErr?.message || "").toLowerCase().includes("sharpness"));
 
         if (isQualityRejected) {
-          const details = (anyErr.details || {}) as Record<string, unknown>;
-          const reasons = Array.isArray(details.reasons)
-            ? (details.reasons as string[])
+          const rawDetail = (anyErr?.details?.detail || anyErr?.details || anyErr?.response?.data?.detail || {}) as Record<string, any>;
+          const reasons = Array.isArray(rawDetail.reasons)
+            ? (rawDetail.reasons as string[])
+            : Array.isArray(rawDetail.detail?.reasons)
+            ? (rawDetail.detail.reasons as string[])
             : [
                 "Image sharpness is below the required optical threshold (Laplacian variance check failed).",
                 "Lighting across the attendance sheet is uneven, shadowed, or underexposed.",
@@ -997,12 +993,12 @@ export function AssistantView() {
 
           const rejectionData: PhotoQualityRejectionData = {
             reasons,
-            measuredSharpness: typeof details.sharpness === "number" ? details.sharpness : 14.2,
+            measuredSharpness: typeof rawDetail.sharpness === "number" ? rawDetail.sharpness : 10.0,
             sharpnessThreshold:
-              typeof details.sharpness_threshold === "number" ? details.sharpness_threshold : 15.0,
-            measuredBrightness: typeof details.brightness === "number" ? details.brightness : 18.5,
+              typeof rawDetail.sharpness_threshold === "number" ? rawDetail.sharpness_threshold : 10.0,
+            measuredBrightness: typeof rawDetail.brightness === "number" ? rawDetail.brightness : 12.0,
             brightnessThreshold:
-              typeof details.brightness_threshold === "number" ? details.brightness_threshold : 20.0,
+              typeof rawDetail.brightness_threshold === "number" ? rawDetail.brightness_threshold : 12.0,
           };
 
           setMessages((prev) => [
@@ -2228,7 +2224,11 @@ export function AssistantView() {
             <div className="flex items-center gap-3">
               <div className="w-5 h-5 border-2 border-[#3F451F] border-t-transparent rounded-full animate-spin" />
               <span className="font-semibold text-[#24251C]">
-                {uploadStage === "uploading" ? "Uploading the roster…" : "Extracting attendance records…"}
+                {uploadStage === "uploading"
+                  ? uploadProgress < 0
+                    ? "Sending the roster…"
+                    : "Uploading the roster…"
+                  : "Extracting attendance records…"}
               </span>
             </div>
             {selectedFile && (
@@ -2238,14 +2238,20 @@ export function AssistantView() {
                   {(selectedFile.size / 1024).toFixed(0)} KB
                 </span>
                 <span className="font-mono text-[11px] font-bold text-[#3F451F]">
-                  {uploadProgress}%
+                  {uploadProgress < 0 ? "…" : `${uploadProgress}%`}
                 </span>
               </div>
             )}
             <div className="h-1.5 w-full rounded-full bg-[#E4DDCA] overflow-hidden">
               <div
-                className="h-full bg-[#6C5119] transition-[width] duration-200"
-                style={{ width: `${uploadStage === "uploading" ? uploadProgress : 100}%` }}
+                className={`h-full bg-[#6C5119] transition-[width] duration-200 ${
+                  uploadStage === "uploading" && uploadProgress < 0 ? "animate-pulse" : ""
+                }`}
+                style={{
+                  width: `${
+                    uploadStage === "uploading" && uploadProgress >= 0 ? uploadProgress : 100
+                  }%`,
+                }}
               />
             </div>
             <p className="text-[11px]">

@@ -348,6 +348,9 @@ def test_scan_form_b_ai_mocked(client: TestClient, monkeypatch):
     admin_hdr = _auth_headers("admin_root", "ADMIN")
     faculty_hdr = _auth_headers("faculty_cn", "FACULTY")
     exam_id = "TEST-AI-SCAN-2026"
+    # Keep the exam in the future so the 24-hour edit lock never turns this
+    # test into a date-dependent failure.
+    exam_date = (datetime.now(timezone.utc) + timedelta(days=30)).date().isoformat()
 
     # Create exam
     client.post(
@@ -356,7 +359,7 @@ def test_scan_form_b_ai_mocked(client: TestClient, monkeypatch):
             "exam_id": exam_id,
             "name": "AI Vision Scan Exam",
             "exam_type": "THEORY_CIE",
-            "date": "2026-11-24",
+            "date": exam_date,
             "start_time": "10:00:00",
             "end_time": "11:30:00",
             "cutoff_minutes": 30,

@@ -1766,7 +1766,12 @@ def edit_student_profile(
     if payload.parent_phone is not None:
         updates["parent_phone"] = payload.parent_phone.strip()
     if payload.semester is not None:
-        updates["semester"] = payload.semester.strip()
+        raw_sem = payload.semester.strip()
+        from app.db.models import Semester
+        sem_id = f"SEM-{raw_sem}" if raw_sem.isdigit() else raw_sem.upper()
+        exists = db.query(Semester).filter(Semester.semester_id == sem_id).first()
+        if exists:
+            updates["semester_id"] = sem_id
 
     if updates:
         set_clause = ", ".join(f"{k} = :{k}" for k in updates)

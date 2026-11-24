@@ -232,9 +232,14 @@ export async function processAttendanceFile(
   return apiClient.post<AgentResponse>("/api/v1/agent/process-file", formData, {
     onUploadProgress: (event) => {
       if (!onProgress) return;
-      const total = event.total ?? 0;
-      const percent = total > 0 ? Math.round((event.loaded / total) * 100) : 0;
-      onProgress(percent);
+      // Axios does not always expose Content-Length for multipart uploads.
+      // Fall back to the known File size; -1 means "indeterminate" to the UI.
+      const total = event.total || file.size || 0;
+      if (total <= 0) {
+        onProgress(-1);
+        return;
+      }
+      onProgress(Math.min(100, Math.round((event.loaded / total) * 100)));
     },
   });
 }
