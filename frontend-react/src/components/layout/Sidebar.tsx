@@ -156,8 +156,8 @@ export function Sidebar({ isOpen = false, onClose }: SidebarProps) {
     const examsGroup: NavGroup = {
       label: "Exams & Form-B",
       items: [
+        { name: "Exams", href: "/exams", icon: ICONS.reports, badge: "CIE" },
         { name: "My Invigilation", href: "/invigilation", icon: ICONS.attendance, badge: "Form-B" },
-        ...(isAdmin ? [{ name: "Exam Cell Control", href: "/exams", icon: ICONS.reports, badge: "Admin" }] : []),
       ],
     };
 

@@ -9,15 +9,16 @@ from pydantic import BaseModel, Field
 class ExamCreate(BaseModel):
     exam_id: str = Field(..., min_length=3, max_length=50, description="Unique exam identifier (e.g. DSCE-CIE3-NOV2026)")
     name: str = Field(..., min_length=3, max_length=200, description="Exam display name")
-    exam_type: str = Field("THEORY_CIE", description="THEORY_CIE, LAB_CIE, LAB_EXTERNAL, or THEORY_SEE")
+    exam_type: str = Field("THEORY_CIE", description="THEORY_CIE, MID_TERM, LAB_CIE, LAB_EXTERNAL, or THEORY_SEE")
     semester: Optional[int] = Field(None, ge=1, le=8)
     department: Optional[str] = Field(None, max_length=100)
     date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$", description="Exam date in YYYY-MM-DD")
     start_time: str = Field(..., description="Start time (e.g. 10:00 or 10:00:00)")
     end_time: str = Field(..., description="End time (e.g. 11:30 or 11:30:00)")
-    cutoff_minutes: int = Field(45, ge=5, le=180, description="Form-B submission deadline in minutes from start")
+    cutoff_minutes: int = Field(0, ge=0, le=180, description="Form-B submission deadline in minutes from start (0 = no lock/demo mode)")
     subject_code: str = Field(..., min_length=2, max_length=30)
     subject_name: Optional[str] = Field(None, max_length=150)
+    rooms: Optional[List[str]] = Field(default_factory=list, description="Initial room numbers to allocate")
 
 
 class ExamOut(BaseModel):
@@ -39,7 +40,7 @@ class ExamOut(BaseModel):
 
 
 class RoomAssignPayload(BaseModel):
-    room_no: str
+    room_no: Optional[str] = None
     block_name: Optional[str] = None
     capacity: Optional[int] = 30
     invigilator_id: Optional[str] = None

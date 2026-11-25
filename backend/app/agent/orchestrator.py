@@ -9,6 +9,8 @@ Integrates:
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import logging
 import os
@@ -24,7 +26,77 @@ from app.agent.provider import LLMProvider, MockProvider, ModelResponse, ToolCal
 from app.agent.registry import RiskTier, ToolRegistry, tool_registry
 from app.agent.stream import AgentTaskManager, TaskState, task_manager
 
+try:
+    from app.agent.gatekeeper import (
+        GATEKEEPER_DOMAIN_REFUSAL,
+        GATEKEEPER_SECURITY_REFUSAL,
+        GatekeeperDecision,
+        evaluate_user_intent,
+    )
+except ImportError:  # pragma: no cover - defensive fallback
+    GATEKEEPER_DOMAIN_REFUSAL = (
+        "I am RollCall AI, specialized exclusively for institutional attendance, classroom scheduling, "
+        "and student roster management. I cannot assist with topics outside of attendance and class operations. "
+        "How can I help you with your attendance or schedule today?"
+    )
+    GATEKEEPER_SECURITY_REFUSAL = (
+        "I can't help with requests that try to change my instructions, reveal internal prompts, "
+        "or bypass RollCall's security controls. Ask me about attendance, schedules, sessions, "
+        "or student records instead."
+    )
+
+    class GatekeeperDecision:  # type: ignore
+        def __init__(
+            self,
+            decision: str = "IN_SCOPE",
+            normalized_intent: str = "",
+            needs_clarification: bool = False,
+            clarification_question: Optional[str] = None,
+            refusal_message: Optional[str] = None,
+            reason: str = "",
+        ):
+            self.decision = decision
+            self.normalized_intent = normalized_intent
+            self.needs_clarification = needs_clarification
+            self.clarification_question = clarification_question
+            self.refusal_message = refusal_message
+            self.reason = reason
+
+    async def evaluate_user_intent(message: str, **kwargs: Any) -> GatekeeperDecision:  # type: ignore
+        return GatekeeperDecision(decision="IN_SCOPE", normalized_intent=message)
+
+try:
+    from app.agent.guardrails import validate_agent_output, OutputCheckResult
+except ImportError:  # pragma: no cover - defensive fallback
+    class OutputCheckResult:  # type: ignore
+        def __init__(self, allowed: bool = True, sanitized_response: str = "", blocked_reason: Optional[str] = None):
+            self.allowed = allowed
+            self.sanitized_response = sanitized_response
+            self.blocked_reason = blocked_reason
+
+    def validate_agent_output(response_text: str, **kwargs: Any) -> OutputCheckResult:  # type: ignore
+        return OutputCheckResult(allowed=True, sanitized_response=response_text)
+
+try:
+    from app.security.ai_input import wrap_untrusted_content
+except ImportError:  # pragma: no cover - defensive fallback
+    def wrap_untrusted_content(text: str, tag: str = "untrusted") -> str:
+        return f"<{tag}>\n{text}\n</{tag}>"
+
 logger = logging.getLogger("rollcall.agent.orchestrator")
+
+
+def _run_coroutine_sync(coro: Any) -> Any:
+    """Run an async coroutine synchronously whether or not an event loop is running."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 
 @dataclass
@@ -79,6 +151,9 @@ class AgentOrchestrator:
         pending_sessions_summary: Optional[str] = None,
         task_id: Optional[str] = None,
         db: Optional[Any] = None,
+        document_extraction: Optional[Dict[str, Any]] = None,
+        has_attachments: bool = False,
+        recent_context: Optional[str] = None,
     ) -> OrchestratorResult:
         """Run an autonomous goal-directed ReAct loop for the given user prompt."""
         # 1. Initialize task in stream manager
@@ -87,7 +162,102 @@ class AgentOrchestrator:
             task = self.manager.create_task(actor_id=actor_id, prompt=prompt)
         tid = task.task_id
 
-        # 2. Input Security Guardrail: Prompt Injection Detection
+        # 2. Check uploaded document extraction if provided
+        if document_extraction:
+            has_attachments = True
+            ext_status = str(document_extraction.get("extraction_status", "")).lower()
+            allow_llm = document_extraction.get("allow_llm_inference", True)
+            if ext_status == "unreadable" or allow_llm is False:
+                failure_msg = (
+                    document_extraction.get("honest_failure_message")
+                    or "Uploaded document is unreadable or malformed. Please upload a clear photo or CSV sheet."
+                )
+                self.manager.emit_event(
+                    tid,
+                    event_type="task.failed",
+                    message=failure_msg,
+                    data={"extraction_status": ext_status},
+                )
+                self.manager.update_status(tid, TaskState.FAILED, message=failure_msg)
+                return OrchestratorResult(
+                    task_id=tid,
+                    final_response=failure_msg,
+                    steps_executed=0,
+                    status="FAILED",
+                )
+
+        # 3. Intent Gatekeeper & Input Guardrail
+        gk_decision = _run_coroutine_sync(
+            evaluate_user_intent(
+                prompt,
+                user_role=role.lower(),
+                has_attachments=has_attachments,
+                recent_context=recent_context,
+            )
+        )
+
+        decision_val = getattr(gk_decision, "decision", "IN_SCOPE")
+
+        if decision_val == "PROMPT_INJECTION":
+            refusal_msg = getattr(gk_decision, "refusal_message", None) or GATEKEEPER_SECURITY_REFUSAL
+            reason = getattr(gk_decision, "reason", "Prompt injection pattern detected.")
+            logger.warning("Prompt injection blocked by gatekeeper for actor %s: %s", actor_id, reason)
+            self.audit_logger.log_security_threat(
+                task_id=tid,
+                actor_id=actor_id,
+                role=role,
+                threat_type="PROMPT_INJECTION",
+                reason=reason,
+                raw_payload=prompt,
+                db=db,
+            )
+            self.manager.emit_event(
+                tid,
+                event_type="task.failed",
+                message=refusal_msg,
+                data={"reason": reason},
+            )
+            self.manager.update_status(tid, TaskState.FAILED, message=refusal_msg)
+            return OrchestratorResult(
+                task_id=tid,
+                final_response=refusal_msg,
+                steps_executed=0,
+                status="FAILED",
+            )
+
+        if decision_val == "OUT_OF_SCOPE":
+            refusal_msg = getattr(gk_decision, "refusal_message", None) or GATEKEEPER_DOMAIN_REFUSAL
+            self.manager.emit_event(
+                tid,
+                event_type="task.completed",
+                message=refusal_msg,
+                data={"final_response": refusal_msg, "out_of_scope": True},
+            )
+            self.manager.update_status(tid, TaskState.COMPLETED, message=refusal_msg)
+            return OrchestratorResult(
+                task_id=tid,
+                final_response=refusal_msg,
+                steps_executed=0,
+                status="COMPLETED",
+            )
+
+        if getattr(gk_decision, "needs_clarification", False) and getattr(gk_decision, "clarification_question", None):
+            clarify_msg = gk_decision.clarification_question
+            self.manager.emit_event(
+                tid,
+                event_type="task.completed",
+                message=clarify_msg,
+                data={"final_response": clarify_msg, "needs_clarification": True},
+            )
+            self.manager.update_status(tid, TaskState.COMPLETED, message=clarify_msg)
+            return OrchestratorResult(
+                task_id=tid,
+                final_response=clarify_msg,
+                steps_executed=0,
+                status="COMPLETED",
+            )
+
+        # Also run secondary PromptInjectionGuard just in case
         is_safe, injection_reason = self.injection_guard.validate_input(prompt)
         if not is_safe:
             block_msg = f"Security Policy Violation: {injection_reason}"
@@ -115,7 +285,16 @@ class AgentOrchestrator:
                 status="FAILED",
             )
 
-        # 3. Retrieve conversation context with authoritative teacher snapshot
+        # 4. Normalize intent & wrap untrusted user input
+        normalized_intent = getattr(gk_decision, "normalized_intent", "").strip() or prompt
+        wrapped_user_query = wrap_untrusted_content(normalized_intent, tag="user_query")
+
+        if document_extraction and document_extraction.get("clean_markdown"):
+            doc_md = str(document_extraction["clean_markdown"])
+            wrapped_doc = wrap_untrusted_content(doc_md, tag="uploaded_document")
+            wrapped_user_query = f"{wrapped_user_query}\n\n{wrapped_doc}"
+
+        # 5. Retrieve conversation context with authoritative teacher snapshot
         ctx: ConversationContext = context_manager.get_or_create(
             actor_id=actor_id,
             role=role,
@@ -125,12 +304,12 @@ class AgentOrchestrator:
             today_schedule_summary=today_schedule_summary,
             pending_sessions_summary=pending_sessions_summary,
         )
-        ctx.add_user_message(prompt)
+        ctx.add_user_message(wrapped_user_query)
 
         # Update task state to PLANNING
         self.manager.update_status(tid, TaskState.PLANNING, message="Planning resolution strategy.")
 
-        # 4. Available tools filtered by actor role
+        # 6. Available tools filtered by actor role
         available_tools = self.registry.get_tools_schema_for_role(role)
 
         steps_executed = 0
@@ -292,8 +471,15 @@ class AgentOrchestrator:
             raw_answer = response.content or ""
             break
 
-        # Output Sanitization Guardrail: redact secrets & credentials
-        sanitized_answer = self.sanitizer.sanitize_output(raw_answer)
+        # Output Validation & Sanitization Guardrail:
+        # Enforce validate_agent_output (prompt-leak prevention, off-topic drift check, secret redaction)
+        out_check = validate_agent_output(
+            raw_answer,
+            tool_called=bool(executed_tool_names),
+            gatekeeper_decision=gk_decision,
+        )
+        sanitized_answer = getattr(out_check, "sanitized_response", None) or self.sanitizer.sanitize_output(raw_answer)
+
         ctx.add_assistant_message(content=sanitized_answer)
 
         # Goal Evaluation

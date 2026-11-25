@@ -118,13 +118,29 @@ class AgentTaskManager:
         if not task:
             return None
 
+        event_data = dict(data) if data else {}
+        clean_msg = message
+
+        if event_type in ("task.completed", "task.failed"):
+            try:
+                from app.agent.guardrails import validate_agent_output
+                out_res = validate_agent_output(clean_msg, tool_called=True)
+                if not out_res.allowed or out_res.sanitized_response:
+                    clean_msg = out_res.sanitized_response
+                if "final_response" in event_data and isinstance(event_data["final_response"], str):
+                    out_res2 = validate_agent_output(event_data["final_response"], tool_called=True)
+                    if not out_res2.allowed or out_res2.sanitized_response:
+                        event_data["final_response"] = out_res2.sanitized_response
+            except Exception:
+                pass
+
         task.event_sequence += 1
         event = AgentEvent(
             event_id=f"{task_id}_{task.event_sequence}",
             task_id=task_id,
             event_type=event_type,
-            message=message,
-            data=data or {},
+            message=clean_msg,
+            data=event_data,
         )
         task.events.append(event)
         task.updated_at = event.timestamp

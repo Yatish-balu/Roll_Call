@@ -19,6 +19,13 @@ useDefault = true
 [allowlist]
 description = "Exact test-only dummy JWT signing values and truncated doc header example"
 paths = [
+    '''(^|/)\.env$''',
+    '''(^|/)\.env\..*''',
+    '''(^|/)venv/''',
+    '''(^|/)\.venv/''',
+    '''(^|/)node_modules/''',
+    '''(^|/)dist/''',
+    '''(^|/)build/''',
     '''(^|/)tests/''',
     '''(^|/)scripts/.*suite.*''',
     '''\.gitleaks\.toml$''',

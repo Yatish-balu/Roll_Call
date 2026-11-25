@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useParams } from "react-router-dom";
 import {
   examsApi,
@@ -28,6 +28,32 @@ export function InvigilatorFormBView() {
   // Submit confirmation modal
   const [isSubmitModalOpen, setIsSubmitModalOpen] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [candidateFilter, setCandidateFilter] = useState<"ALL" | "PRESENT" | "ABSENT">("ALL");
+  const [searchQuery, setSearchQuery] = useState("");
+
+  const openPhotoInNewTab = (photoUrl: string | null) => {
+    if (!photoUrl) return;
+    const newWin = window.open("", "_blank");
+    if (newWin) {
+      newWin.document.write(`
+        <!DOCTYPE html>
+        <html>
+          <head>
+            <title>Form-B Photo View</title>
+            <style>
+              body { margin: 0; background: #0f1117; display: flex; justify-content: center; align-items: center; min-height: 100vh; font-family: system-ui, sans-serif; }
+              img { max-width: 96vw; max-height: 96vh; object-fit: contain; box-shadow: 0 8px 32px rgba(0,0,0,0.6); border-radius: 8px; }
+            </style>
+          </head>
+          <body>
+            <img src="${photoUrl}" alt="Scanned Form-B Attendance Sheet" />
+          </body>
+        </html>
+      `);
+      newWin.document.close();
+    }
+  };
+
   const [uploadedPhotoUrl, setUploadedPhotoUrl] = useState<string | null>(() => {
     if (typeof window !== "undefined") {
       try {
@@ -197,8 +223,9 @@ export function InvigilatorFormBView() {
 
   // Toggle student status (PRESENT <-> ABSENT)
   const toggleStudentStatus = (usn: string) => {
-    if (currentRoom?.status === "SUBMITTED" || currentRoom?.status === "LATE_LOCKED") {
-      alert("This room is locked. Attendance cannot be modified without Admin Override.");
+    // Demo mode: LATE_LOCKED is not enforced (Form-B cutoff is disabled).
+    if (currentRoom?.status === "SUBMITTED") {
+      alert("This room is already submitted. Attendance cannot be modified.");
       return;
     }
     setRoster((prev) =>
@@ -216,7 +243,8 @@ export function InvigilatorFormBView() {
 
   // Mark all present
   const markAllPresent = () => {
-    if (currentRoom?.status === "SUBMITTED" || currentRoom?.status === "LATE_LOCKED") return;
+    // Demo mode: LATE_LOCKED is not enforced (Form-B cutoff is disabled).
+    if (currentRoom?.status === "SUBMITTED") return;
     setRoster((prev) =>
       prev.map((s) => ({
         ...s,
@@ -332,7 +360,24 @@ export function InvigilatorFormBView() {
 
   const presentCount = roster.filter((s) => s.status === "PRESENT").length;
   const absentCount = roster.filter((s) => s.status === "ABSENT").length;
-  const isLocked = currentRoom?.status === "SUBMITTED" || currentRoom?.status === "LATE_LOCKED";
+
+  const filteredRoster = useMemo(() => {
+    return roster.filter((item) => {
+      if (candidateFilter === "PRESENT" && item.status !== "PRESENT") return false;
+      if (candidateFilter === "ABSENT" && item.status !== "ABSENT") return false;
+      if (searchQuery.trim()) {
+        const q = searchQuery.toLowerCase().trim();
+        const usnMatch = item.usn.toLowerCase().includes(q);
+        const nameMatch = (item.name || "").toLowerCase().includes(q);
+        return usnMatch || nameMatch;
+      }
+      return true;
+    });
+  }, [roster, candidateFilter, searchQuery]);
+
+  // Demo mode: legacy LATE_LOCKED rooms stay editable; only a real SUBMITTED
+  // Form-B is treated as locked.
+  const isLocked = currentRoom?.status === "SUBMITTED";
 
   return (
     <div className="space-y-6">
@@ -398,7 +443,7 @@ export function InvigilatorFormBView() {
                 Exam Hall Assignment
               </span>
               <span className="text-xs px-2.5 py-0.5 rounded-full font-semibold bg-[#3F451F] text-white">
-                {currentRoom.status}
+                {currentRoom.status === "LATE_LOCKED" ? "OPEN" : currentRoom.status}
               </span>
             </div>
             <h3 className="text-xl font-extrabold text-gray-900">
@@ -570,7 +615,7 @@ export function InvigilatorFormBView() {
               </button>
               <button
                 type="button"
-                onClick={() => window.open(uploadedPhotoUrl, "_blank")}
+                onClick={() => openPhotoInNewTab(uploadedPhotoUrl)}
                 className="text-xs text-gray-600 hover:text-gray-900 font-medium cursor-pointer"
               >
                 Open Full Size ↗
@@ -583,7 +628,7 @@ export function InvigilatorFormBView() {
                 src={uploadedPhotoUrl}
                 alt="Scanned Form-B Sheet"
                 className="max-h-96 w-auto object-contain rounded-lg shadow-inner cursor-zoom-in"
-                onClick={() => window.open(uploadedPhotoUrl, "_blank")}
+                onClick={() => openPhotoInNewTab(uploadedPhotoUrl)}
                 title="Click to view full photo in new tab"
               />
             </div>
@@ -593,13 +638,57 @@ export function InvigilatorFormBView() {
 
       {/* Student Roster Table */}
       <div className="bg-white rounded-2xl border border-gray-200/80 shadow-sm overflow-hidden">
-        <div className="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
-          <h3 className="text-sm font-bold text-gray-900">
-            Form-B Seating Roster & Signatures
-          </h3>
-          <span className="text-xs text-gray-500">
-            Click status button to toggle Present / Absent
-          </span>
+        <div className="px-5 py-4 border-b border-gray-100 flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-bold text-gray-900">
+              Form-B Seating Roster & Signatures
+            </h3>
+            <p className="text-xs text-gray-500">
+              Showing {filteredRoster.length} of {roster.length} candidate(s)
+            </p>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Search Input */}
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search USN or Name..."
+              className="px-3 py-1.5 rounded-xl border border-gray-200 text-xs text-gray-800 placeholder-gray-400 focus:outline-none focus:border-[#3F451F] w-48"
+            />
+
+            {/* Filter Pills */}
+            <div className="inline-flex rounded-xl bg-gray-100 p-0.5 text-xs font-semibold">
+              <button
+                type="button"
+                onClick={() => setCandidateFilter("ALL")}
+                className={`px-3 py-1 rounded-lg transition-colors cursor-pointer ${
+                  candidateFilter === "ALL" ? "bg-white text-gray-900 shadow-xs" : "text-gray-600 hover:text-gray-900"
+                }`}
+              >
+                All ({roster.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setCandidateFilter("PRESENT")}
+                className={`px-3 py-1 rounded-lg transition-colors cursor-pointer ${
+                  candidateFilter === "PRESENT" ? "bg-emerald-600 text-white shadow-xs" : "text-emerald-700 hover:text-emerald-900"
+                }`}
+              >
+                Present ({presentCount})
+              </button>
+              <button
+                type="button"
+                onClick={() => setCandidateFilter("ABSENT")}
+                className={`px-3 py-1 rounded-lg transition-colors cursor-pointer ${
+                  candidateFilter === "ABSENT" ? "bg-red-600 text-white shadow-xs" : "text-red-700 hover:text-red-900"
+                }`}
+              >
+                Absent ({absentCount})
+              </button>
+            </div>
+          </div>
         </div>
 
         {isLoading ? (
@@ -607,6 +696,10 @@ export function InvigilatorFormBView() {
         ) : roster.length === 0 ? (
           <div className="text-center py-12 text-sm text-gray-500">
             No seating records found for this room.
+          </div>
+        ) : filteredRoster.length === 0 ? (
+          <div className="text-center py-12 text-sm text-gray-500">
+            No candidates match the selected filter.
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -623,7 +716,7 @@ export function InvigilatorFormBView() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {roster.map((student) => {
+                {filteredRoster.map((student) => {
                   const isPresent = student.status === "PRESENT";
                   return (
                     <tr

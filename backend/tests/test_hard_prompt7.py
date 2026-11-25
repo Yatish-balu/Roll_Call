@@ -342,7 +342,15 @@ def test_ui_photo_upload_empty_result_is_failure(monkeypatch):
 
     # Empty photo extraction should not produce a successful summary.
     assert resp.success is False
-    assert resp.needs_confirmation is True or "zero rows" in resp.message.lower() or "no rows" in resp.message.lower() or "empty" in resp.message.lower()
+    lower_msg = resp.message.lower()
+    assert (
+        resp.needs_confirmation is True
+        or "zero rows" in lower_msg
+        or "no rows" in lower_msg
+        or "empty" in lower_msg
+        or "no attendance records could be extracted" in lower_msg
+        or "illegible" in lower_msg
+    )
     if tmp_file.exists():
         tmp_file.unlink()
     Path(tmp_path).unlink(missing_ok=True)

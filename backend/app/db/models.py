@@ -1362,7 +1362,7 @@ class Exam(Base):
     date: Mapped[str] = mapped_column(String(20), nullable=False)
     start_time: Mapped[str] = mapped_column(String(20), nullable=False)
     end_time: Mapped[str] = mapped_column(String(20), nullable=False)
-    cutoff_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=45)
+    cutoff_minutes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     subject_code: Mapped[str] = mapped_column(String(30), nullable=False)
     subject_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
     created_by: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)

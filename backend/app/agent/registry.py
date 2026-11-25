@@ -164,6 +164,109 @@ registry = ToolRegistry()
 tool_registry = registry
 
 
+def _query_academic_calendar_handler(
+    month: Optional[Any] = None,
+    year: Optional[int] = None,
+    event_type: Optional[str] = None,
+    db: Optional[Any] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Query institutional academic calendar, holidays, and examination events."""
+    from datetime import date
+    from sqlalchemy import text
+    from app.db.connection import get_sync_session_factory
+    from contextlib import nullcontext
+
+    factory = get_sync_session_factory()
+    session_ctx = db if db is not None else factory()
+    with (session_ctx if db is None else nullcontext(db)) as dbs:
+        try:
+            today = date.today()
+            target_year = year or today.year
+            target_month = None
+
+            if month is not None:
+                if str(month).lower() in ("current", "this", "now", "today"):
+                    target_month = today.month
+                else:
+                    try:
+                        target_month = int(month)
+                    except (ValueError, TypeError):
+                        month_names = {
+                            "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+                            "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+                            "aug": 8, "august": 8, "sep": 9, "september": 9, "oct": 10, "october": 10,
+                            "nov": 11, "november": 11, "dec": 12, "december": 12,
+                        }
+                        target_month = month_names.get(str(month).strip().lower(), today.month)
+
+            query_sql = "SELECT event_id, title, event_date, end_date, event_type, description FROM academic_events WHERE 1=1"
+            params: Dict[str, Any] = {}
+
+            if target_year:
+                query_sql += " AND event_date LIKE :year_prefix"
+                params["year_prefix"] = f"{target_year}%"
+
+            if target_month:
+                month_str = f"{target_month:02d}"
+                query_sql += " AND event_date LIKE :month_prefix"
+                params["month_prefix"] = f"{target_year}-{month_str}%"
+
+            if event_type and event_type.upper() not in ("ALL", "ANY"):
+                query_sql += " AND UPPER(event_type) = :ev_type"
+                params["ev_type"] = event_type.upper().strip()
+
+            query_sql += " ORDER BY event_date ASC"
+            rows = dbs.execute(text(query_sql), params).fetchall()
+
+            events = []
+            for r in rows:
+                events.append({
+                    "event_id": r[0],
+                    "title": r[1],
+                    "event_date": str(r[2]),
+                    "end_date": str(r[3]) if r[3] else None,
+                    "event_type": r[4],
+                    "description": r[5],
+                })
+
+            return {
+                "events": events,
+                "count": len(events),
+                "year": target_year,
+                "month": target_month,
+                "message": f"Found {len(events)} institutional event(s) or holiday(s) in academic calendar.",
+            }
+        except Exception as exc:
+            logger.warning("Academic calendar query failed: %s", exc)
+            return {"events": [], "count": 0, "error": str(exc), "message": "No academic calendar records found."}
+
+
+def _query_students_handler(
+    semester: Optional[Any] = None,
+    branch: Optional[str] = None,
+    name: Optional[str] = None,
+    usn: Optional[str] = None,
+    db: Optional[Any] = None,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Retrieve students matching optional usn, branch, name, or semester filters."""
+    from tools.query_tool import query_students
+    res = query_students(
+        usn=usn,
+        branch=branch,
+        name=name,
+        semester=semester,
+        db_target=db,
+    )
+    return {
+        "found": res.found,
+        "count": res.total_count,
+        "students": res.data,
+        "message": res.message,
+    }
+
+
 def register_default_tools(reg: ToolRegistry) -> None:
     """Populate registry with production database-backed tools."""
     from app.agent import tools
@@ -322,6 +425,57 @@ def register_default_tools(reg: ToolRegistry) -> None:
             handler=tools.create_faculty_user,
         )
     )
+
+    reg.register(
+        ToolDefinition(
+            name="query_academic_calendar",
+            description="Query institutional academic calendar, holidays, CIE/exam schedules, and institutional events. NEVER invent holidays from external memory; always query this tool.",
+            capability_family="schedule",
+            risk_tier=RiskTier.READ,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR", "STUDENT", "VIEWER"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "month": {"type": "string", "description": "Target month number (1-12) or name (e.g. 'November' or 'current')."},
+                    "year": {"type": "integer", "description": "Calendar year (e.g. 2026)."},
+                    "event_type": {"type": "string", "description": "Optional event filter: 'HOLIDAY', 'EXAM', 'CIE', 'ACADEMIC', 'ALL'."},
+                },
+            },
+            handler=_query_academic_calendar_handler,
+        )
+    )
+
+    reg.register(
+        ToolDefinition(
+            name="query_students",
+            description="Query student records by semester number (e.g. 5), branch (e.g. 'CY'), student name, or USN.",
+            capability_family="general",
+            risk_tier=RiskTier.READ,
+            allowed_roles={"ADMIN", "FACULTY", "COORDINATOR", "STUDENT", "VIEWER"},
+            parameters={
+                "type": "object",
+                "properties": {
+                    "semester": {"type": "integer", "description": "Semester number (e.g. 5 for 5th semester)."},
+                    "branch": {"type": "string", "description": "Branch code (e.g. 'CY', 'CSE')."},
+                    "name": {"type": "string", "description": "Student full or partial name (e.g. 'Yatish')."},
+                    "usn": {"type": "string", "description": "Student USN (e.g. '1DS24CY060')."},
+                },
+            },
+            handler=_query_students_handler,
+        )
+    )
+
+    try:
+        from app.agent.tools.profile_analytics_tools import GET_DEFAULTERS_ANALYSIS_TOOL
+        reg.register(GET_DEFAULTERS_ANALYSIS_TOOL)
+    except Exception as def_err:
+        logger.debug("Defaulters tool registration note: %s", def_err)
+
+    try:
+        from app.agent.tools.attendance_tools import EXPORT_ATTENDANCE_TOOL
+        reg.register(EXPORT_ATTENDANCE_TOOL)
+    except Exception as exp_err:
+        logger.debug("Export attendance tool registration note: %s", exp_err)
 
     # Register Exam AI Tools
     try:

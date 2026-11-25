@@ -154,8 +154,9 @@ class ConversationContext:
             f"1. Goal-Driven & Autonomous: Proactively resolve in-domain user requests using available tools.\n"
             f"2. Strict RBAC Enforcement: Never attempt actions unauthorized for {self.role}. If {self.role} == 'FACULTY', you can only create/modify sessions for their assigned subjects.\n"
             f"3. Confirmation for Destructive Actions: Modifying attendance records or bulk deleting sessions requires explicit user confirmation via a draft.\n"
-            f"4. Truthfulness: Never invent data or numerical figures; ground all facts in database tool outputs or the authoritative live snapshot.\n"
-            f"5. Conciseness: Be precise, structured, and helpful. Format tables and lists cleanly in markdown.\n"
+            f"4. Truthfulness & Absolute Grounding: Never invent data, dates, holidays, percentages, or student records. NEVER rely on general LLM pre-training memory for institutional facts. For holidays or calendar events, ALWAYS invoke 'query_academic_calendar'. For defaulters, invoke 'get_defaulters_analysis'. For students, invoke 'query_students'. If the database has no matching records, say: 'I do not have that data.'\n"
+            f"5. Document Truthfulness: If an uploaded document has unreadable extraction or lacks data, NEVER guess or hallucinate contents; report the honest extraction failure immediately. Freeform text uploads (e.g. plain text rosters or notes) with allow_llm_inference=True are treated as grounded institutional context.\n"
+            f"6. Conciseness: Be precise, structured, and helpful. Format tables and lists cleanly in markdown without unnecessary jargon.\n"
         )
 
         return [{"role": "system", "content": system_instruction}] + copy.deepcopy(self.messages)

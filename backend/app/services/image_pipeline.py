@@ -295,6 +295,50 @@ def process_mobile_attendance_sheet(
     elif isinstance(ocr_result, dict):
         success_flag = ocr_result.get("success", True)
 
+    # 5. Propagate the honest-extraction contract from the photo reader. An
+    # unreadable scan must never look like a successful empty extraction.
+    extraction_status = "unreadable"
+    extraction_error: Optional[str] = None
+    honest_failure_message: Optional[str] = None
+    extraction_confidence = 0.0
+    extracted_chars = 0
+    allow_llm_inference = False
+
+    if hasattr(ocr_result, "extraction_status"):
+        extraction_status = str(getattr(ocr_result, "extraction_status", "unreadable"))
+        extraction_error = getattr(ocr_result, "extraction_error", None)
+        honest_failure_message = getattr(ocr_result, "honest_failure_message", None)
+        extraction_confidence = float(getattr(ocr_result, "extraction_confidence", 0.0) or 0.0)
+        extracted_chars = int(getattr(ocr_result, "extracted_chars", 0) or 0)
+        allow_llm_inference = bool(getattr(ocr_result, "allow_llm_inference", False))
+    elif isinstance(ocr_result, dict):
+        extraction_status = str(ocr_result.get("extraction_status", "unreadable"))
+        extraction_error = ocr_result.get("extraction_error")
+        honest_failure_message = ocr_result.get("honest_failure_message")
+        extraction_confidence = float(ocr_result.get("extraction_confidence", 0.0) or 0.0)
+        extracted_chars = int(ocr_result.get("extracted_chars", 0) or 0)
+        allow_llm_inference = bool(ocr_result.get("allow_llm_inference", False))
+
+    if extraction_status == "unreadable" or not normalized_rows:
+        extraction_status = "unreadable"
+        allow_llm_inference = False
+        success_flag = False
+        if not extraction_error:
+            extraction_error = "no_rows_detected"
+        if not honest_failure_message:
+            honest_failure_message = (
+                "No student rows could be read from this photo. Retake the photo "
+                "with the full sheet in frame and even lighting, or upload a CSV."
+            )
+    elif extraction_status == "ok" and any(
+        r["status"] in ("UNREVIEWED", "PENDING") for r in normalized_rows
+    ):
+        extraction_status = "partial"
+        if not honest_failure_message:
+            honest_failure_message = (
+                "Some rows could not be read with confidence and need review."
+            )
+
     return {
         "success": success_flag,
         "proposal_type": "mobile_photo_ocr",
@@ -313,4 +357,10 @@ def process_mobile_attendance_sheet(
         "unmatched_students": unmatched_students,
         "rows": normalized_rows,
         "raw_ocr_warnings": raw_warnings,
+        "extraction_status": extraction_status,
+        "extraction_confidence": extraction_confidence if normalized_rows else 0.0,
+        "extracted_chars": extracted_chars,
+        "extraction_error": extraction_error,
+        "honest_failure_message": honest_failure_message,
+        "allow_llm_inference": allow_llm_inference,
     }

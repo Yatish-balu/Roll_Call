@@ -151,7 +151,7 @@ def seed_multi_cie_exams():
                 date=ex_info["date"],
                 start_time=ex_info["start_time"],
                 end_time=ex_info["end_time"],
-                cutoff_minutes=45,
+                cutoff_minutes=0,
                 subject_code=ex_info["subject_code"],
                 subject_name=ex_info["subject_name"],
                 created_by="admin_root",

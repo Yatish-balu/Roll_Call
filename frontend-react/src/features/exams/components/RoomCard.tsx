@@ -6,6 +6,7 @@ interface RoomCardProps {
   examId?: string;
   onSelect?: (roomNo: string) => void;
   onAdminOverride?: (roomNo: string) => void;
+  onAssignInvigilator?: (roomNo: string) => void;
   isAdmin?: boolean;
 }
 
@@ -13,16 +14,17 @@ export function RoomCard({
   room,
   onSelect,
   onAdminOverride,
+  onAssignInvigilator,
   isAdmin = false,
 }: RoomCardProps) {
-  const getStatusBadge = (status: RoomStatus) => {
+  const getStatusBadge = (rawStatus: RoomStatus) => {
+    // Demo mode: legacy LATE_LOCKED rooms are shown as OPEN (cutoff disabled).
+    const status = rawStatus === "LATE_LOCKED" ? "OPEN" : rawStatus;
     switch (status) {
       case "SUBMITTED":
         return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-emerald-100 text-emerald-800">Submitted ✅</span>;
       case "OPEN":
         return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-amber-100 text-amber-800">Open ⏳</span>;
-      case "LATE_LOCKED":
-        return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-red-100 text-red-800">Late Locked 🔒</span>;
       case "SCHEDULED":
       default:
         return <span className="px-2.5 py-0.5 text-xs font-semibold rounded-full bg-gray-100 text-gray-700">Scheduled 🔒</span>;
@@ -78,7 +80,17 @@ export function RoomCard({
             Form-B Roster
           </button>
         )}
-        {isAdmin && (room.status === "LATE_LOCKED" || room.status === "SUBMITTED") && onAdminOverride && (
+        {isAdmin && onAssignInvigilator && (
+          <button
+            onClick={() => onAssignInvigilator(room.room_no)}
+            title="Assign Invigilator to this room"
+            className="py-1.5 px-2.5 rounded-xl border border-purple-300 text-purple-700 hover:bg-purple-50 text-xs font-semibold transition-colors flex items-center gap-1"
+          >
+            <span>👤</span>
+            <span>Assign</span>
+          </button>
+        )}
+        {isAdmin && room.status === "SUBMITTED" && onAdminOverride && (
           <button
             onClick={() => onAdminOverride(room.room_no)}
             title="Admin Override / Unlock"

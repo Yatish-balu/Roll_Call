@@ -59,6 +59,15 @@ _PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
         ),
     ),
     (
+        "instruction_override",
+        re.compile(
+            r"\b(?:ignore|ignoring|ignored|disregard|forget|override|bypass)\s+"
+            r"(?:all\s+|any\s+)?(?:the\s+|your\s+|my\s+|these\s+|those\s+)?"
+            r"(?:rules?|instructions?|guidelines?|polic(?:y|ies)|directives?|guardrails?)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "system_prompt_exfiltration",
         re.compile(
             r"\b(?:reveal|show|print|repeat|dump|leak|output)\s+"
@@ -98,9 +107,37 @@ _PATTERNS: Sequence[tuple[str, re.Pattern[str]]] = (
         re.compile(r"\b(?:jailbreak|developer\s+mode|do\s+anything\s+now)\b", re.IGNORECASE),
     ),
     (
+        "roleplay_override",
+        re.compile(
+            r"\b(?:pretend|roleplay|imagine)\b[\s\S]{0,60}?"
+            r"\b(?:you(?:'re|\s+are)|to\s+be)\b[\s\S]{0,60}?"
+            r"\b(?:professor|teacher|tutor|expert|assistant|admin(?:istrator)?|"
+            r"root|superuser|developer|system|unrestricted|dan)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "persona_override",
+        re.compile(
+            r"\b(?:from\s+now\s+on[,\s]+(?:you\s+are|you're|act\s+as)|you\s+are\s+now)\s+"
+            r"(?:an?\s+)?[\s\S]{0,50}?"
+            r"\b(?:professor|teacher|tutor|expert|assistant|admin|root|system|"
+            r"unrestricted|dan)\b",
+            re.IGNORECASE,
+        ),
+    ),
+    (
         "delimiter_injection",
         re.compile(
             r"(<\|(im_start|im_end|system|assistant|endoftext)\|>|\[/?INST\]|<<\s*/?\s*SYS\s*>>|###\s*(system|assistant)\b)",
+            re.IGNORECASE,
+        ),
+    ),
+    (
+        "prompt_delimiter_spoof",
+        re.compile(
+            r"<\s*/?\s*(?:user_query|uploaded_document|untrusted_content|"
+            r"system_prompt|system|assistant|developer)\s*>",
             re.IGNORECASE,
         ),
     ),
@@ -298,6 +335,82 @@ def screen_agent_input(text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Delimiter wrapping for untrusted content
+# ---------------------------------------------------------------------------
+
+#: Tags used by the prompt layer to separate trusted instructions from user
+#: data.  Any occurrence inside user/file text is escaped before wrapping, so
+#: input cannot close our tag early and inject a fake system turn.
+_UNTRUSTED_DELIMITER_RE = re.compile(
+    r"<\s*(/?)\s*(user_query|uploaded_document|untrusted_content|"
+    r"system_prompt|system|assistant|developer)\s*>",
+    re.IGNORECASE,
+)
+
+
+def escape_untrusted_delimiters(text: str | None) -> str:
+    """Escape fake prompt delimiters so untrusted text stays inside its tag."""
+
+    def _replace(match: "re.Match[str]") -> str:
+        return f"&lt;{match.group(1)}{match.group(2)}&gt;"
+
+    return _UNTRUSTED_DELIMITER_RE.sub(_replace, str(text or ""))
+
+
+_SAFE_TAG_RE = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+
+
+def _safe_tag(tag: str | None, default: str = "user_query") -> str:
+    """Return a safe wrapper tag name; reject anything unexpected."""
+
+    value = str(tag or "").strip().lower()
+    return value if _SAFE_TAG_RE.match(value) else default
+
+
+def _escape_tag(text: str | None, tag: str) -> str:
+    """Escape a caller-selected wrapper tag inside untrusted text."""
+
+    pattern = re.compile(rf"<\s*(/?)\s*{re.escape(tag)}\s*>", re.IGNORECASE)
+    return pattern.sub(lambda m: f"&lt;{m.group(1)}{tag}&gt;", str(text or ""))
+
+
+def wrap_untrusted_content(
+    user_query: str,
+    document_text: str | None = None,
+    *,
+    tag: str = "user_query",
+) -> str:
+    """Wrap user text - and optionally uploaded-file text - in data-only tags.
+
+    The returned string is safe to embed in a prompt.  Closing tags typed by
+    the user or present in a document are escaped (``&lt;/user_query&gt;``), so
+    they cannot break out of the data block and become instructions.
+
+    ``tag`` selects the wrapper name for the user query (default
+    ``user_query``); the orchestrator may pass ``uploaded_document`` when it
+    wraps extracted file text directly.
+    """
+
+    query_tag = _safe_tag(tag)
+    query_text = _escape_tag(escape_untrusted_delimiters(user_query), query_tag)
+    parts = [
+        f"<{query_tag}>",
+        query_text,
+        f"</{query_tag}>",
+    ]
+    if document_text is not None:
+        parts.extend(
+            [
+                "",
+                "<uploaded_document>",
+                escape_untrusted_delimiters(document_text),
+                "</uploaded_document>",
+            ]
+        )
+    return "\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
 # Simple validators used by app/db/crud.py
 # ---------------------------------------------------------------------------
 
@@ -343,6 +456,8 @@ __all__ = [
     "PromptInjectionError",
     "detect_injection",
     "screen_agent_input",
+    "escape_untrusted_delimiters",
+    "wrap_untrusted_content",
     "validate_usn",
     "validate_room_id",
 ]

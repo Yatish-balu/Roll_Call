@@ -26,6 +26,41 @@ import { examsApi, type RoomAssignmentItem } from "@/services/api/exams";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
 
+export interface StandardPeriod {
+  period: number;
+  label: string;
+  start: string;
+  end: string;
+  isBreak?: boolean;
+}
+
+export const INSTITUTIONAL_PERIODS: StandardPeriod[] = [
+  { period: 1, label: "Period 1", start: "09:00", end: "10:00" },
+  { period: 2, label: "Period 2", start: "10:00", end: "11:00" },
+  { period: 0, label: "Tea Break", start: "11:00", end: "11:15", isBreak: true },
+  { period: 3, label: "Period 3", start: "11:15", end: "12:15" },
+  { period: 4, label: "Period 4", start: "12:15", end: "13:15" },
+  { period: 0, label: "Lunch Break", start: "13:15", end: "14:00", isBreak: true },
+  { period: 5, label: "Period 5", start: "14:00", end: "15:00" },
+  { period: 6, label: "Period 6", start: "15:00", end: "16:00" },
+  { period: 7, label: "Period 7", start: "16:00", end: "17:00" },
+];
+
+function getEntriesForSlot(entries: TimetableEntry[], slot: StandardPeriod): TimetableEntry[] {
+  if (slot.isBreak) return [];
+  return entries.filter((entry) => {
+    // Exact period match
+    if (entry.period_number === slot.period) return true;
+    // Exact time match
+    if (entry.start_time === slot.start && entry.end_time === slot.end) return true;
+    // 2-hour or multi-hour class spanning across this period (e.g. 14:00 - 16:00 covers slot 14:00-15:00 and 15:00-16:00)
+    const eStart = entry.start_time;
+    const eEnd = entry.end_time;
+    if (eStart <= slot.start && eEnd >= slot.end) return true;
+    return false;
+  });
+}
+
 export function TimetableView() {
   const { session, canScheduleSessions, isAdmin } = useAuth();
   const today = todayIso();
@@ -178,22 +213,56 @@ export function TimetableView() {
     return map;
   }, [week]);
 
-  const gridSlots = useMemo(() => {
-    const times = new Map<string, { start: string; end: string; period: number }>();
-    for (const entries of entriesByDay.values()) {
-      for (const entry of entries) {
-        const key = `${entry.start_time}-${entry.end_time}`;
-        if (!times.has(key)) {
-          times.set(key, {
-            start: entry.start_time,
-            end: entry.end_time,
-            period: entry.period_number,
-          });
-        }
-      }
-    }
-    return Array.from(times.values()).sort((a, b) => a.start.localeCompare(b.start));
-  }, [entriesByDay]);
+  const gridSlots = INSTITUTIONAL_PERIODS;
+
+  // Filter invigilation duties by current active week (Point 12)
+  const currentWeekDuties = useMemo(() => {
+    if (!invigilationDuties.length) return [];
+    if (!week?.days || week.days.length === 0) return invigilationDuties;
+    const weekDates = new Set(week.days.map((d) => d.date));
+    return invigilationDuties.filter((duty) => duty.date && weekDates.has(duty.date));
+  }, [invigilationDuties, week]);
+
+  // Major events & upcoming duties beyond current week (Point 13 & 14)
+  const nextWeekMajorEvents = useMemo(() => {
+    const weekDates = new Set(week?.days?.map((d) => d.date) || []);
+    const upcomingInvig = invigilationDuties
+      .filter((duty) => duty.date && !weekDates.has(duty.date))
+      .map((duty) => ({
+        date: duty.date || "Next Week",
+        title: `Exam Invigilation: ${duty.exam_name || duty.exam_id || "CIE"}`,
+        subtitle: `Room ${duty.room_no} (${duty.start_time || "09:30"} - ${duty.end_time || "11:00"})`,
+        tag: "Invigilation",
+        tagColor: "bg-purple-100 text-purple-800 border-purple-200",
+      }));
+
+    // Curated major departmental upcoming events (Point 13)
+    const staticEvents = [
+      {
+        date: "01/12/2026",
+        title: "CIE-2 External Invigilation Duty",
+        subtitle: "Room CDS 105 · Forenoon Session (09:30 - 11:00)",
+        tag: "Invigilation",
+        tagColor: "bg-purple-100 text-purple-800 border-purple-200",
+      },
+      {
+        date: "03/12/2026",
+        title: "5th Sem Student Presentations & Review",
+        subtitle: "Lab CDS-101 · Cyber Security Evaluation (14:00 - 17:00)",
+        tag: "5th Sem Review",
+        tagColor: "bg-amber-100 text-amber-900 border-amber-200",
+      },
+      {
+        date: "05/12/2026",
+        title: "3rd Sem Make-Up / CIE Retest Exam",
+        subtitle: "Classroom LH-201 · Marks & Verification",
+        tag: "Make-Up Exam",
+        tagColor: "bg-blue-100 text-blue-800 border-blue-200",
+      },
+    ];
+
+    return upcomingInvig.length > 0 ? upcomingInvig : staticEvents;
+  }, [invigilationDuties, week]);
 
   const openCreate = (day: string) => {
     setEditingEntry(null);
@@ -486,12 +555,12 @@ export function TimetableView() {
               <div className="w-6 h-6 border-2 border-[#6C5119] border-t-transparent rounded-full animate-spin mx-auto mb-2" />
               <span>Loading your invigilation assignments...</span>
             </div>
-          ) : invigilationDuties.length === 0 ? (
+          ) : currentWeekDuties.length === 0 ? (
             <div className="py-16 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl space-y-2">
               <span className="text-3xl">📝</span>
-              <p className="font-bold text-[#24251C] text-sm">No Invigilation Duties Assigned</p>
+              <p className="font-bold text-[#24251C] text-sm">No Invigilation Duties for Current Week</p>
               <p className="text-xs text-[#77735F] max-w-md mx-auto px-4">
-                You do not have any exam hall rooms assigned for invigilation at this time. Room assignments made by the Exam Coordinator will appear here.
+                You do not have any exam hall rooms assigned for invigilation during this active academic week. Check the upcoming events sidebar for duties scheduled in future weeks.
               </p>
               <div className="pt-2">
                 <Link
@@ -505,7 +574,7 @@ export function TimetableView() {
             </div>
           ) : (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {invigilationDuties.map((duty) => {
+              {currentWeekDuties.map((duty) => {
                 const statusColors = {
                   SCHEDULED: "bg-amber-100 text-amber-900 border-amber-300",
                   OPEN: "bg-emerald-100 text-emerald-900 border-emerald-300",
@@ -607,235 +676,328 @@ export function TimetableView() {
               "No timetable entries are visible for your account. Add a class slot to publish your teaching schedule."}
           </p>
         </div>
-      ) : viewType === "day" ? (
-        <div className="space-y-5">
-          <div className="flex items-center gap-2 border-b border-[#E4DDCA] pb-3 overflow-x-auto">
-            {DAYS.map((day) => {
-              const count = entriesByDay.get(day)?.length ?? 0;
-              const isSelected = selectedDay === day;
-              const isToday = day === todayWeekday;
-              return (
-                <button
-                  key={day}
-                  type="button"
-                  onClick={() => setSelectedDay(day)}
-                  className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center space-x-2 transition-all cursor-pointer whitespace-nowrap ${
-                    isSelected
-                      ? "bg-[#6C5119] text-white shadow-sm"
-                      : "bg-[#FBF8F0] border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8]/50 hover:text-[#24251C]"
-                  }`}
-                >
-                  <span>{day}</span>
-                  {isToday && (
-                    <span className="px-1.5 py-0.2 rounded-full text-[9px] font-black bg-black/15 text-white">
-                      Today
+      ) : (
+        <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 items-start">
+          <div className="xl:col-span-3 space-y-5">
+            {viewType === "day" ? (
+              <div className="space-y-5">
+                <div className="flex items-center gap-2 border-b border-[#E4DDCA] pb-3 overflow-x-auto">
+                  {DAYS.map((day) => {
+                    const count = entriesByDay.get(day)?.length ?? 0;
+                    const isSelected = selectedDay === day;
+                    const isToday = day === todayWeekday;
+                    return (
+                      <button
+                        key={day}
+                        type="button"
+                        onClick={() => setSelectedDay(day)}
+                        className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold flex items-center space-x-2 transition-all cursor-pointer whitespace-nowrap ${
+                          isSelected
+                            ? "bg-[#6C5119] text-white shadow-sm"
+                            : "bg-[#FBF8F0] border border-[#E4DDCA] text-[#77735F] hover:bg-[#EDE8D8]/50 hover:text-[#24251C]"
+                        }`}
+                      >
+                        <span>{day}</span>
+                        {isToday && (
+                          <span className="px-1.5 py-0.2 rounded-full text-[9px] font-black bg-black/15 text-white">
+                            Today
+                          </span>
+                        )}
+                        <span
+                          className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
+                            isSelected ? "bg-black/20 text-white" : "bg-[#EDE8D8] text-[#6C5119]"
+                          }`}
+                        >
+                          {count}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="space-y-3.5">
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-base font-bold text-[#24251C]">
+                      {selectedDay} schedule ({dayEntries.length} class
+                      {dayEntries.length === 1 ? "" : "es"})
+                    </h2>
+                    <span className="text-xs text-[#77735F] font-medium">
+                      Academic day {ACADEMIC_DAY_START} - {ACADEMIC_DAY_END}
                     </span>
+                  </div>
+
+                  {dayEntries.length === 0 ? (
+                    <div className="py-12 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl">
+                      <p className="text-sm font-bold text-[#24251C]">No classes on {selectedDay}</p>
+                      <p className="text-xs text-[#77735F] mt-1">
+                        The timetable has no slots for this weekday.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 gap-3.5">
+                      {dayEntries.map((entry) => (
+                        <div
+                          key={entry.entry_id}
+                          className="p-5 rounded-2xl border bg-[#FBF8F0] border-[#E4DDCA] hover:border-[#6C5119]/60 transition-all shadow-2xs"
+                        >
+                          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
+                            <div className="flex items-center space-x-3.5">
+                              <div className="p-3 rounded-xl flex flex-col items-center justify-center min-w-[78px] text-center border bg-[#6C5119]/10 border-[#6C5119]/20 text-[#6C5119]">
+                                <span className="text-xs font-black tracking-wider uppercase">
+                                  Period {entry.period_number}
+                                </span>
+                                <span className="text-[10px] font-bold mt-0.5">
+                                  {durationMinutes(entry.start_time, entry.end_time)} MIN
+                                </span>
+                              </div>
+
+                              <div className="space-y-1">
+                                <div className="flex items-center space-x-2 flex-wrap">
+                                  <span className="text-xs font-black px-2 py-0.5 rounded-md bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
+                                    {entry.subject_code}
+                                  </span>
+                                  <span className="text-xs font-semibold text-[#77735F]">
+                                    {formatTimeWindow(entry.start_time, entry.end_time)}
+                                  </span>
+                                </div>
+                                <h3 className="text-base font-bold text-[#24251C]">
+                                  {entry.subject_name || entry.subject_code}
+                                </h3>
+                                <div className="flex items-center gap-4 text-xs text-[#77735F] pt-1 flex-wrap">
+                                  <span className="font-semibold text-[#24251C]">
+                                    Room: {entry.room_name || entry.room_id}
+                                  </span>
+                                  {entry.batch_label && (
+                                    <>
+                                      <span>•</span>
+                                      <span>Batch: {entry.batch_label}</span>
+                                    </>
+                                  )}
+                                  {entry.faculty_id && (
+                                    <>
+                                      <span>•</span>
+                                      <span>Faculty: {entry.faculty_name || entry.faculty_id}</span>
+                                    </>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="shrink-0 flex items-center gap-2 flex-wrap">
+                              <Link
+                                to={`/attendance?session=${encodeURIComponent(
+                                  `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
+                                    entry.period_number
+                                  ).padStart(2, "0")}`
+                                )}`}
+                                className="px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all shadow-2xs flex items-center space-x-1"
+                              >
+                                <span>🟢</span>
+                                <span>Attendance</span>
+                              </Link>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setDelegatingEntry({
+                                    sessionId: `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
+                                      entry.period_number
+                                    ).padStart(2, "0")}`,
+                                    subjectCode: entry.subject_code,
+                                    subjectName: entry.subject_name || entry.subject_code,
+                                    date: today,
+                                    timeSlot: `${entry.start_time} - ${entry.end_time}`,
+                                  })
+                                }
+                                className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer flex items-center space-x-1"
+                                title="Delegate this class to a colleague"
+                              >
+                                <span>🤝</span>
+                                <span>Delegate</span>
+                              </button>
+                              {canScheduleSessions && (
+                                <button
+                                  type="button"
+                                  onClick={() => openEdit(entry)}
+                                  className="px-2.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
+                                >
+                                  Edit
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
                   )}
-                  <span
-                    className={`px-1.5 py-0.2 rounded-full text-[10px] font-black ${
-                      isSelected ? "bg-black/20 text-white" : "bg-[#EDE8D8] text-[#6C5119]"
-                    }`}
-                  >
-                    {count}
-                  </span>
-                </button>
-              );
-            })}
-          </div>
-
-          <div className="space-y-3.5">
-            <div className="flex items-center justify-between">
-              <h2 className="text-base font-bold text-[#24251C]">
-                {selectedDay} schedule ({dayEntries.length} class
-                {dayEntries.length === 1 ? "" : "es"})
-              </h2>
-              <span className="text-xs text-[#77735F] font-medium">
-                Academic day {ACADEMIC_DAY_START} - {ACADEMIC_DAY_END}
-              </span>
-            </div>
-
-            {dayEntries.length === 0 ? (
-              <div className="py-12 text-center bg-[#FBF8F0] border border-dashed border-[#E4DDCA] rounded-2xl">
-                <p className="text-sm font-bold text-[#24251C]">No classes on {selectedDay}</p>
-                <p className="text-xs text-[#77735F] mt-1">
-                  The timetable has no slots for this weekday.
-                </p>
+                </div>
               </div>
             ) : (
-              <div className="grid grid-cols-1 gap-3.5">
-                {dayEntries.map((entry) => (
-                  <div
-                    key={entry.entry_id}
-                    className="p-5 rounded-2xl border bg-[#FBF8F0] border-[#E4DDCA] hover:border-[#6C5119]/60 transition-all shadow-2xs"
-                  >
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
-                      <div className="flex items-center space-x-3.5">
-                        <div className="p-3 rounded-xl flex flex-col items-center justify-center min-w-[78px] text-center border bg-[#6C5119]/10 border-[#6C5119]/20 text-[#6C5119]">
-                          <span className="text-xs font-black tracking-wider uppercase">
-                            Period {entry.period_number}
-                          </span>
-                          <span className="text-[10px] font-bold mt-0.5">
-                            {durationMinutes(entry.start_time, entry.end_time)} MIN
-                          </span>
-                        </div>
-
-                        <div className="space-y-1">
-                          <div className="flex items-center space-x-2 flex-wrap">
-                            <span className="text-xs font-black px-2 py-0.5 rounded-md bg-[#EDE8D8] text-[#6C5119] border border-[#E4DDCA]">
-                              {entry.subject_code}
-                            </span>
-                            <span className="text-xs font-semibold text-[#77735F]">
-                              {formatTimeWindow(entry.start_time, entry.end_time)}
-                            </span>
-                          </div>
-                          <h3 className="text-base font-bold text-[#24251C]">
-                            {entry.subject_name || entry.subject_code}
-                          </h3>
-                          <div className="flex items-center gap-4 text-xs text-[#77735F] pt-1 flex-wrap">
-                            <span className="font-semibold text-[#24251C]">
-                              Room: {entry.room_name || entry.room_id}
-                            </span>
-                            {entry.batch_label && (
-                              <>
-                                <span>•</span>
-                                <span>Batch: {entry.batch_label}</span>
-                              </>
-                            )}
-                            {entry.faculty_id && (
-                              <>
-                                <span>•</span>
-                                <span>Faculty: {entry.faculty_name || entry.faculty_id}</span>
-                              </>
-                            )}
-                          </div>
-                        </div>
-                      </div>
-
-                      <div className="shrink-0 flex items-center gap-2 flex-wrap">
-                        <Link
-                          to={`/attendance?session=${encodeURIComponent(
-                            `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
-                              entry.period_number
-                            ).padStart(2, "0")}`
-                          )}`}
-                          className="px-3.5 py-2 rounded-xl bg-[#3F451F] text-[#EDE8D8] text-xs font-bold hover:bg-[#343919] transition-all shadow-2xs flex items-center space-x-1"
-                        >
-                          <span>🟢</span>
-                          <span>Attendance</span>
-                        </Link>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setDelegatingEntry({
-                              sessionId: `AUTO-${today.replace(/-/g, "")}-${entry.subject_code}-${String(
-                                entry.period_number
-                              ).padStart(2, "0")}`,
-                              subjectCode: entry.subject_code,
-                              subjectName: entry.subject_name || entry.subject_code,
-                              date: today,
-                              timeSlot: `${entry.start_time} - ${entry.end_time}`,
-                            })
-                          }
-                          className="px-3 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#77735F] hover:text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer flex items-center space-x-1"
-                          title="Delegate this class to a colleague"
-                        >
-                          <span>🤝</span>
-                          <span>Delegate</span>
-                        </button>
-                        {canScheduleSessions && (
-                          <button
-                            type="button"
-                            onClick={() => openEdit(entry)}
-                            className="px-2.5 py-2 rounded-xl bg-white border border-[#E4DDCA] text-xs font-bold text-[#24251C] hover:bg-[#EDE8D8]/60 transition-colors cursor-pointer"
+              <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full text-left border-collapse min-w-[820px]">
+                    <thead>
+                      <tr className="bg-[#EDE8D8]/70 border-b border-[#E4DDCA] text-[#24251C]">
+                        <th className="py-3.5 px-4 text-xs font-black uppercase tracking-wider w-40 border-r border-[#E4DDCA]">
+                          Time
+                        </th>
+                        {DAYS.map((day) => (
+                          <th
+                            key={day}
+                            className="py-3.5 px-4 text-xs font-black uppercase tracking-wider text-center border-r border-[#E4DDCA] last:border-r-0"
                           >
-                            Edit
-                          </button>
-                        )}
-                      </div>
-                    </div>
-                  </div>
-                ))}
+                            {day}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#E4DDCA] text-xs text-[#24251C]">
+                      {gridSlots.map((slot) => {
+                        if (slot.isBreak) {
+                          return (
+                            <tr key={slot.label} className="bg-amber-50/60 border-y border-amber-200/70">
+                              <td className="py-2.5 px-4 font-bold border-r border-[#E4DDCA] bg-amber-100/50">
+                                <span className="block text-xs font-black text-amber-900">
+                                  ☕ {slot.label}
+                                </span>
+                                <span className="block text-[10px] text-amber-700 mt-0.5">
+                                  {slot.start} - {slot.end}
+                                </span>
+                              </td>
+                              <td
+                                colSpan={DAYS.length}
+                                className="py-2.5 px-4 text-center text-xs font-bold text-amber-900 tracking-wider uppercase bg-amber-50/40"
+                              >
+                                — {slot.label} Break ({slot.start} to {slot.end}) —
+                              </td>
+                            </tr>
+                          );
+                        }
+
+                        return (
+                          <tr key={`${slot.start}-${slot.end}`} className="hover:bg-[#EDE8D8]/20 transition-colors">
+                            <td className="py-3 px-4 font-bold border-r border-[#E4DDCA] bg-[#EDE8D8]/15">
+                              <span className="block text-xs font-black text-[#24251C]">
+                                {slot.label}
+                              </span>
+                              <span className="block text-[10px] text-[#77735F] mt-0.5">
+                                {slot.start} - {slot.end}
+                              </span>
+                            </td>
+                            {DAYS.map((day) => {
+                              const dayList = entriesByDay.get(day) || [];
+                              const matchedEntries = getEntriesForSlot(dayList, slot);
+                              return (
+                                <td
+                                  key={day}
+                                  className="py-3 px-3 border-r border-[#E4DDCA] last:border-r-0 align-top"
+                                >
+                                  {matchedEntries.length > 0 ? (
+                                    <div className="space-y-1.5">
+                                      {matchedEntries.map((entry) => (
+                                        <div
+                                          key={entry.entry_id}
+                                          className="p-2.5 rounded-xl border bg-[#EDE8D8]/40 border-[#E4DDCA] space-y-1"
+                                        >
+                                          <div className="flex items-center justify-between gap-1">
+                                            <span className="font-black text-[10px] px-1.5 py-0.2 rounded bg-white text-[#3F451F]">
+                                              {entry.subject_code}
+                                            </span>
+                                            {entry.start_time !== slot.start && (
+                                              <span className="text-[9px] font-semibold text-purple-700 bg-purple-50 px-1 rounded">
+                                                2-hr ({entry.start_time}-{entry.end_time})
+                                              </span>
+                                            )}
+                                          </div>
+                                          <p className="font-bold text-[#24251C] text-[11px] leading-tight line-clamp-2">
+                                            {entry.subject_name || entry.subject_code}
+                                          </p>
+                                          <div className="text-[10px] text-[#77735F] flex items-center justify-between pt-0.5">
+                                            <span className="font-semibold text-[#24251C]">
+                                              {entry.room_name || entry.room_id}
+                                            </span>
+                                            {entry.batch_label && <span className="truncate">{entry.batch_label}</span>}
+                                          </div>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div className="h-full flex items-center justify-center py-4 text-[#77735F]/40 text-xs font-mono">
+                                      —
+                                    </div>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
             )}
           </div>
-        </div>
-      ) : (
-        <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl shadow-2xs overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-left border-collapse min-w-[820px]">
-              <thead>
-                <tr className="bg-[#EDE8D8]/70 border-b border-[#E4DDCA] text-[#24251C]">
-                  <th className="py-3.5 px-4 text-xs font-black uppercase tracking-wider w-40 border-r border-[#E4DDCA]">
-                    Time
-                  </th>
-                  {DAYS.map((day) => (
-                    <th
-                      key={day}
-                      className="py-3.5 px-4 text-xs font-black uppercase tracking-wider text-center border-r border-[#E4DDCA] last:border-r-0"
-                    >
-                      {day}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-[#E4DDCA] text-xs text-[#24251C]">
-                {gridSlots.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="py-10 text-center text-[#77735F]">
-                      No class slots are configured for this week.
-                    </td>
-                  </tr>
-                ) : (
-                  gridSlots.map((slot) => (
-                    <tr key={`${slot.start}-${slot.end}`} className="hover:bg-[#EDE8D8]/20 transition-colors">
-                      <td className="py-3 px-4 font-bold border-r border-[#E4DDCA] bg-[#EDE8D8]/15">
-                        <span className="block text-xs font-black text-[#24251C]">
-                          Period {slot.period}
-                        </span>
-                        <span className="block text-[10px] text-[#77735F] mt-0.5">
-                          {slot.start} - {slot.end}
-                        </span>
-                      </td>
-                      {DAYS.map((day) => {
-                        const entry = (entriesByDay.get(day) || []).find(
-                          (item) =>
-                            item.start_time === slot.start && item.end_time === slot.end
-                        );
-                        return (
-                          <td
-                            key={day}
-                            className="py-3 px-3 border-r border-[#E4DDCA] last:border-r-0 align-top"
-                          >
-                            {entry ? (
-                              <div className="p-2.5 rounded-xl border bg-[#EDE8D8]/40 border-[#E4DDCA] space-y-1">
-                                <div className="flex items-center justify-between gap-1">
-                                  <span className="font-black text-[10px] px-1.5 py-0.2 rounded bg-white text-[#3F451F]">
-                                    {entry.subject_code}
-                                  </span>
-                                </div>
-                                <p className="font-bold text-[#24251C] text-[11px] leading-tight line-clamp-2">
-                                  {entry.subject_name || entry.subject_code}
-                                </p>
-                                <div className="text-[10px] text-[#77735F] flex items-center justify-between pt-0.5">
-                                  <span className="font-semibold text-[#24251C]">
-                                    {entry.room_name || entry.room_id}
-                                  </span>
-                                  {entry.batch_label && <span className="truncate">{entry.batch_label}</span>}
-                                </div>
-                              </div>
-                            ) : (
-                              <div className="h-full flex items-center justify-center py-4 text-[#77735F]/40 text-xs font-mono">
-                                —
-                              </div>
-                            )}
-                          </td>
-                        );
-                      })}
-                    </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
+
+          {/* Major Events & Duties Sidebar (Points 13 & 14) */}
+          <div className="xl:col-span-1 space-y-4">
+            <div className="bg-[#FBF8F0] border border-[#E4DDCA] rounded-2xl p-4 shadow-2xs space-y-3">
+              <div className="flex items-center justify-between pb-2 border-b border-[#E4DDCA]">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-base">📌</span>
+                  <h3 className="text-xs font-black uppercase tracking-wider text-[#24251C]">
+                    Upcoming Events
+                  </h3>
+                </div>
+                <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-[#EDE8D8] text-[#6C5119]">
+                  Next Week & Beyond
+                </span>
+              </div>
+              <p className="text-[11px] text-[#77735F]">
+                Institutional duties, invigilations, student presentations, and make-up exam slots for your classes.
+              </p>
+
+              <div className="space-y-2.5">
+                {nextWeekMajorEvents.map((evt, idx) => (
+                  <div
+                    key={idx}
+                    className="p-3 rounded-xl bg-white border border-[#E4DDCA] space-y-1 hover:border-[#6C5119]/50 transition-colors shadow-3xs"
+                  >
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="text-[10px] font-bold text-[#6C5119] flex items-center gap-1">
+                        <span>🗓️</span>
+                        <span>{evt.date}</span>
+                      </span>
+                      <span className={`text-[9px] font-black uppercase tracking-wider px-1.5 py-0.2 rounded border ${evt.tagColor}`}>
+                        {evt.tag}
+                      </span>
+                    </div>
+                    <p className="text-xs font-bold text-[#24251C] leading-snug">
+                      {evt.title}
+                    </p>
+                    <p className="text-[10px] text-[#77735F] leading-tight">
+                      {evt.subtitle}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="pt-2 border-t border-[#E4DDCA]/60 flex items-center justify-between">
+                <Link
+                  to="/exams"
+                  className="text-[11px] font-bold text-[#3F451F] hover:underline flex items-center gap-1"
+                >
+                  <span>Exams Module</span>
+                  <span>➔</span>
+                </Link>
+                <Link
+                  to="/calendar"
+                  className="text-[11px] font-bold text-[#6C5119] hover:underline flex items-center gap-1"
+                >
+                  <span>Full Calendar</span>
+                  <span>➔</span>
+                </Link>
+              </div>
+            </div>
           </div>
         </div>
       )}

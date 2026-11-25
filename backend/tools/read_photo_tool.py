@@ -19,6 +19,7 @@ Optional environment variables:
 from __future__ import annotations
 
 import base64
+import concurrent.futures
 import json
 import logging
 import math
@@ -90,6 +91,33 @@ DEFAULT_MODEL = "gemini-3.5-flash-lite"
 DEFAULT_FALLBACK_MODELS = ("gemini-3.8-flash", "gemini-3.5-flash")
 DEFAULT_MIN_CONFIDENCE = 0.5
 
+# Honest-extraction contract shared by every reader in the project.
+EXTRACTION_OK = "ok"
+EXTRACTION_PARTIAL = "partial"
+EXTRACTION_UNREADABLE = "unreadable"
+
+MAX_IMAGE_BYTES = 40 * 1024 * 1024  # refuse to buffer absurd files
+DEFAULT_OCR_TIMEOUT_SECONDS = 90.0
+
+
+class VisionTimeoutError(RuntimeError):
+    """Raised when the vision model call exceeds its deadline."""
+
+
+class OcrTimeoutError(RuntimeError):
+    """Raised when the local OCR fallback exceeds its deadline."""
+
+
+def _ocr_timeout_seconds() -> float:
+    try:
+        value = float(os.getenv("OCR_TIMEOUT_SECONDS", str(DEFAULT_OCR_TIMEOUT_SECONDS)).strip())
+    except (TypeError, ValueError):
+        value = DEFAULT_OCR_TIMEOUT_SECONDS
+    return max(5.0, min(value, 600.0))
+
+def _count_extracted_chars(rows: List["PhotoRow"]) -> int:
+    return sum(len(r.usn) + len(r.name) + len(r.status) for r in rows)
+
 
 # ---------------------------------------------------------------------------
 # Dataclasses
@@ -122,13 +150,24 @@ class PhotoRow:
 
 @dataclass
 class PhotoExtractionResult:
-    """Full result from read_photo_tool."""
+    """Full result from read_photo_tool.
+
+    Besides the historical fields, every result carries the standard
+    honest-extraction metadata so downstream callers can hard-stop instead of
+    guessing when the image could not be read.
+    """
     image_path: str
     rows: List[PhotoRow]
     source: ExtractionSource
     warnings: List[str] = field(default_factory=list)
     raw_llm_response: Optional[str] = None
     error: Optional[str] = None
+    extraction_status: str = EXTRACTION_UNREADABLE
+    extraction_confidence: float = 0.0
+    extracted_chars: int = 0
+    extraction_error: Optional[str] = None
+    honest_failure_message: Optional[str] = None
+    allow_llm_inference: bool = False
 
     @property
     def valid_rows(self) -> List[PhotoRow]:
@@ -142,6 +181,12 @@ class PhotoExtractionResult:
             "warnings": self.warnings,
             "error": self.error,
             "rows": [r.to_dict() for r in self.rows],
+            "extraction_status": self.extraction_status,
+            "extraction_confidence": self.extraction_confidence,
+            "extracted_chars": self.extracted_chars,
+            "extraction_error": self.extraction_error,
+            "honest_failure_message": self.honest_failure_message,
+            "allow_llm_inference": self.allow_llm_inference,
         }
 
 
@@ -215,6 +260,116 @@ def preprocess_image(image_path: str | Path) -> Tuple[np.ndarray, np.ndarray]:
     # Return RGB colour (best for LLM; thresh stored separately for OCR fallback)
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     return rgb, thresh
+
+
+def assess_image_legibility(rgb: np.ndarray, thresh: np.ndarray) -> Dict[str, Any]:
+    """Judge whether an image plausibly contains a readable table of text.
+
+    This is a *structural* pre-check: it measures ink density, text-sized
+    connected components, and long horizontal rules that indicate a table.
+    A blank page, a page with only a title, or a sheet so degraded that no
+    row structure survives is reported as low legibility so callers never
+    trust a model that invents rows for it.
+
+    Returns a dict with ``legible`` (bool), ``score`` (0-1), and diagnostic
+    counts. The score is intentionally conservative: it is used only to block
+    hopeless inputs, never to invent confidence.
+    """
+    diagnostics: Dict[str, Any] = {
+        "legible": False,
+        "score": 0.0,
+        "reason": None,
+        "dark_ratio": 0.0,
+        "text_like_components": 0,
+        "horizontal_rules": 0,
+        "row_bands": 0,
+    }
+    try:
+        binary = (thresh < 128).astype("uint8")
+    except Exception:
+        diagnostics["reason"] = "unreadable_image"
+        return diagnostics
+
+    if binary.size == 0:
+        diagnostics["reason"] = "blank_or_empty_image"
+        return diagnostics
+
+    height, width = binary.shape[:2]
+    dark_ratio = float(binary.mean())
+    diagnostics["dark_ratio"] = round(dark_ratio, 5)
+
+    # Text-sized blobs: handwriting/print produces many medium components,
+    # while sensor noise produces either tiny specks or one huge smear.
+    text_like = 0
+    try:
+        num_labels, _labels, stats, _centroids = cv2.connectedComponentsWithStats(
+            binary, connectivity=8
+        )
+        max_h = max(120, int(height * 0.25))
+        for label_index in range(1, num_labels):
+            _x, _y, comp_w, comp_h, area = stats[label_index]
+            if 12 <= area <= 5000 and 5 <= comp_h <= max_h and 2 <= comp_w <= max(250, int(width * 0.9)):
+                text_like += 1
+    except Exception:
+        text_like = 0
+    diagnostics["text_like_components"] = text_like
+
+    # Long horizontal rules are the strongest signal of a tabular sheet.
+    # A morphological opening with a half-width kernel only survives genuine
+    # straight rules, so sensor noise cannot fake table structure.
+    horizontal_rules = 0
+    try:
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_RECT, (max(10, int(width * 0.5)), 1)
+        )
+        opened = cv2.morphologyEx(binary * 255, cv2.MORPH_OPEN, kernel)
+        ruled_rows = np.where(opened.sum(axis=1) > 0)[0]
+        previous = -10
+        for ruled_row in ruled_rows:
+            if int(ruled_row) - previous > 2:
+                horizontal_rules += 1
+            previous = int(ruled_row)
+    except Exception:
+        horizontal_rules = 0
+    diagnostics["horizontal_rules"] = horizontal_rules
+
+    # Count contiguous bands of inked rows; a table has several bands.
+    row_bands = 0
+    try:
+        row_fraction = binary.mean(axis=1)
+        inked = row_fraction > 0.02
+        row_bands = int(inked.sum())
+    except Exception:
+        row_bands = 0
+    diagnostics["row_bands"] = row_bands
+
+    # Blank white page (or nothing but a faint title).
+    if dark_ratio < 0.002 or text_like < 5:
+        diagnostics["reason"] = "blank_or_empty_image"
+        return diagnostics
+
+    # A page that is more than a fifth ink, with no ruled table, is a smear or
+    # a noise field rather than a readable attendance sheet.
+    if horizontal_rules == 0 and dark_ratio > 0.20:
+        diagnostics["score"] = 0.1
+        diagnostics["reason"] = "low_legibility_image"
+        return diagnostics
+
+    if horizontal_rules >= 2:
+        score = 0.85
+    elif horizontal_rules == 1:
+        score = 0.70
+    elif text_like >= 20 and row_bands >= 8:
+        # Ruled-off sheets exist; dense, multi-band text is still a table.
+        score = 0.60
+    else:
+        score = 0.20
+
+    diagnostics["score"] = score
+    diagnostics["legible"] = score >= 0.35
+    if not diagnostics["legible"]:
+        diagnostics["reason"] = "low_legibility_image"
+    return diagnostics
 
 
 def _detect_skew_angle(gray: np.ndarray) -> float:
@@ -370,14 +525,40 @@ def _call_gemini(rgb: np.ndarray, api_key: str, model: str) -> str:
     genai.configure(api_key=api_key)
     b64, mime = _image_to_base64(rgb)
 
+    timeout_ms = 20000
+    try:
+        from app.services.vision_client import vision_timeout_ms
+
+        timeout_ms = vision_timeout_ms()
+    except Exception:
+        pass
+
     model_obj = genai.GenerativeModel(model)
-    response = model_obj.generate_content(
-        [
-            {"mime_type": mime, "data": b64},
-            VISION_PROMPT,
-        ]
-    )
+    contents = [
+        {"mime_type": mime, "data": b64},
+        VISION_PROMPT,
+    ]
+    try:
+        response = model_obj.generate_content(
+            contents,
+            request_options={"timeout": max(5, timeout_ms // 1000)},
+        )
+    except TypeError:
+        # Older google-generativeai releases do not accept request_options.
+        response = model_obj.generate_content(contents)
+    except Exception as exc:
+        if _is_timeout_error(exc):
+            raise VisionTimeoutError(f"Vision model {model} timed out: {exc}") from exc
+        raise
     return response.text
+
+
+def _is_timeout_error(exc: BaseException) -> bool:
+    """Recognise the many shapes a vision/network timeout can take."""
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    markers = ("timeout", "timed out", "deadline", "deadlineexceeded", "504")
+    return ("timeout" in name or "deadline" in name) or any(m in text for m in markers)
 
 
 # ---------------------------------------------------------------------------
@@ -553,6 +734,31 @@ def read_photo_tool(
     resolved_min_conf = min_confidence or float(os.getenv("PHOTO_MIN_CONFIDENCE", str(DEFAULT_MIN_CONFIDENCE)))
     warn: List[str] = []
 
+    # Step 0: An empty upload is not an attendance sheet. Say so.
+    try:
+        file_size = os.path.getsize(image_path)
+    except OSError:
+        file_size = -1
+    if file_size == 0:
+        return _unreadable_result(
+            image_path=image_path,
+            source=ExtractionSource.LLM,
+            warn=warn,
+            code="empty_file",
+            message="The uploaded image file is empty (0 bytes). Please re-upload the attendance photo.",
+        )
+    if file_size > MAX_IMAGE_BYTES:
+        return _unreadable_result(
+            image_path=image_path,
+            source=ExtractionSource.LLM,
+            warn=warn,
+            code="file_too_large",
+            message=(
+                "The uploaded image is too large to process. Please upload a photo "
+                "smaller than 40 MB."
+            ),
+        )
+
     # Step 1: Preprocess
     try:
         rgb, thresh = preprocess_image(image_path)
@@ -561,8 +767,31 @@ def read_photo_tool(
     except Exception as exc:  # pragma: no cover
         raise RuntimeError(f"Image preprocessing failed: {exc}") from exc
 
+    # Step 1b: Structural legibility gate. A blank page (or one degraded past
+    # recognition) must never be handed to a model that might invent rows.
+    legibility = assess_image_legibility(rgb, thresh)
+    if not legibility.get("legible"):
+        code = legibility.get("reason") or "low_legibility_image"
+        warn.append(
+            f"Image legibility check failed (score={legibility.get('score')}, "
+            f"text_components={legibility.get('text_like_components')}, "
+            f"rules={legibility.get('horizontal_rules')})."
+        )
+        return _unreadable_result(
+            image_path=image_path,
+            source=ExtractionSource.LLM,
+            warn=warn,
+            code=code,
+            message=(
+                "The image does not contain a readable attendance table. Retake the "
+                "photo in even lighting, keep the whole sheet in frame, and make sure "
+                "the USN and status columns are visible."
+            ),
+        )
+
     raw_response: Optional[str] = None
     source = ExtractionSource.LLM
+    llm_timed_out = False
 
     # Step 2: Try LLM
     if not force_ocr and resolved_key:
@@ -573,13 +802,21 @@ def read_photo_tool(
             try:
                 raw_response = _call_gemini(rgb, resolved_key, candidate)
                 rows = _parse_and_validate_json(raw_response, resolved_min_conf, source, warn)
-                return PhotoExtractionResult(
-                    image_path=image_path,
-                    rows=rows,
-                    source=source,
-                    warnings=warn,
-                    raw_llm_response=raw_response,
-                )
+                if rows:
+                    return _success_result(
+                        image_path=image_path,
+                        rows=rows,
+                        source=source,
+                        warn=warn,
+                        min_conf=resolved_min_conf,
+                        raw_response=raw_response,
+                    )
+                warn.append(f"LLM returned an empty row list ({candidate}).")
+                break  # a valid-but-empty answer will not improve with another model
+            except VisionTimeoutError as exc:
+                llm_timed_out = True
+                warn.append(f"LLM call timed out ({candidate}): {exc}. Trying the next model.")
+                logger.warning("LLM %s timed out: %s", candidate, exc)
             except json.JSONDecodeError as exc:
                 warn.append(f"LLM JSON parse error ({candidate}): {exc}. Trying the next model.")
                 logger.warning("LLM %s returned malformed JSON — falling back to EasyOCR: %s", candidate, exc)
@@ -587,6 +824,8 @@ def read_photo_tool(
                 warn.append(f"LLM response validation error ({candidate}): {exc}. Trying the next model.")
                 logger.warning("LLM %s response invalid — falling back to EasyOCR: %s", candidate, exc)
             except Exception as exc:  # network, quota, retired model name, etc.
+                if _is_timeout_error(exc):
+                    llm_timed_out = True
                 warn.append(
                     f"LLM call failed ({type(exc).__name__}: {exc}) on {candidate}. Trying next model."
                 )
@@ -595,24 +834,143 @@ def read_photo_tool(
     elif not force_ocr and not resolved_key:
         warn.append("GEMINI_API_KEY not set. Falling back to EasyOCR.")
 
-    # Step 3: OCR fallback
+    # Step 3: OCR fallback (bounded so a stuck OCR job cannot hang the request)
     source = ExtractionSource.OCR_FALLBACK
     try:
-        rows = _ocr_fallback(thresh, resolved_min_conf, warn)
-    except Exception as exc:
-        return PhotoExtractionResult(
+        rows = _run_ocr_with_timeout(thresh, resolved_min_conf, warn)
+    except OcrTimeoutError as exc:
+        warn.append(f"OCR fallback timed out: {exc}")
+        return _unreadable_result(
             image_path=image_path,
-            rows=[],
             source=source,
-            warnings=warn,
-            raw_llm_response=raw_response,
+            warn=warn,
+            code="ocr_timeout",
+            message=(
+                "Reading the image timed out and was stopped. Please try again "
+                "with a smaller, clearer photo."
+            ),
+            raw_response=raw_response,
+        )
+    except Exception as exc:
+        return _unreadable_result(
+            image_path=image_path,
+            source=source,
+            warn=warn,
+            code="ocr_failed",
+            message=(
+                "The image could not be read. Please re-upload a clear photo of the "
+                "attendance sheet."
+            ),
+            raw_response=raw_response,
             error=f"OCR fallback also failed: {type(exc).__name__}: {exc}",
         )
 
+    if rows:
+        return _success_result(
+            image_path=image_path,
+            rows=rows,
+            source=source,
+            warn=warn,
+            min_conf=resolved_min_conf,
+            raw_response=raw_response,
+        )
+
+    code = "ocr_timeout" if llm_timed_out else "no_rows_detected"
+    if code == "ocr_timeout":
+        message = (
+            "Reading the image timed out and no student rows were recovered. Please "
+            "try again, or upload a CSV export instead."
+        )
+    else:
+        message = (
+            "No student rows could be read from the image. Please re-upload a clearer "
+            "photo where the USN and status columns are fully visible, or upload a CSV."
+        )
+    return _unreadable_result(
+        image_path=image_path,
+        source=source,
+        warn=warn,
+        code=code,
+        message=message,
+        raw_response=raw_response,
+    )
+
+
+def _run_ocr_with_timeout(
+    thresh: np.ndarray,
+    min_confidence: float,
+    warn: List[str],
+) -> List[PhotoRow]:
+    """Run the EasyOCR fallback under a hard wall-clock deadline."""
+    timeout = _ocr_timeout_seconds()
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(_ocr_fallback, thresh, min_confidence, warn)
+    try:
+        return future.result(timeout=timeout)
+    except concurrent.futures.TimeoutError as exc:
+        raise OcrTimeoutError(f"OCR exceeded {timeout:.0f}s") from exc
+    finally:
+        executor.shutdown(wait=False)
+
+
+def _success_result(
+    image_path: str,
+    rows: List[PhotoRow],
+    source: ExtractionSource,
+    warn: List[str],
+    min_conf: float,
+    raw_response: Optional[str],
+) -> PhotoExtractionResult:
+    """Build a result whose metadata honestly reflects the extracted rows."""
+    confidences = [r.confidence for r in rows]
+    mean_conf = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
+    uncertain = [
+        r for r in rows
+        if r.confidence < min_conf or r.status in ("UNREVIEWED", "PENDING")
+    ]
+    status = EXTRACTION_PARTIAL if uncertain else EXTRACTION_OK
+    if status == EXTRACTION_PARTIAL:
+        warn.append(
+            f"{len(uncertain)} of {len(rows)} extracted rows are uncertain and need "
+            "human review; they were not treated as ABSENT."
+        )
     return PhotoExtractionResult(
         image_path=image_path,
         rows=rows,
         source=source,
         warnings=warn,
         raw_llm_response=raw_response,
+        error=None,
+        extraction_status=status,
+        extraction_confidence=mean_conf,
+        extracted_chars=_count_extracted_chars(rows),
+        extraction_error=None,
+        honest_failure_message=None,
+        allow_llm_inference=True,
+    )
+
+
+def _unreadable_result(
+    image_path: str,
+    source: ExtractionSource,
+    warn: List[str],
+    code: str,
+    message: str,
+    raw_response: Optional[str] = None,
+    error: Optional[str] = None,
+) -> PhotoExtractionResult:
+    """Build an explicit, honest failure result: no rows and no LLM guessing."""
+    return PhotoExtractionResult(
+        image_path=image_path,
+        rows=[],
+        source=source,
+        warnings=warn,
+        raw_llm_response=raw_response,
+        error=error or code,
+        extraction_status=EXTRACTION_UNREADABLE,
+        extraction_confidence=0.0,
+        extracted_chars=0,
+        extraction_error=code,
+        honest_failure_message=message,
+        allow_llm_inference=False,
     )

@@ -19,6 +19,7 @@ Enforces:
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import logging
@@ -41,6 +42,59 @@ from tools.export_tool import export_tool, ExportResult
 from app.security.ai_policy import authorize_tool
 from app.auth.roles import Role
 from app.services.vision_client import create_vision_client
+
+# Guarded gatekeeper import (cooperative with gatekeeper.py)
+try:
+    from app.agent.gatekeeper import (
+        evaluate_user_intent as _gk_evaluate,
+        GATEKEEPER_DOMAIN_REFUSAL,
+        GATEKEEPER_SECURITY_REFUSAL,
+    )
+    _GK_AVAILABLE = True
+except ImportError:
+    _GK_AVAILABLE = False
+    GATEKEEPER_DOMAIN_REFUSAL = None  # will fallback to OUT_OF_DOMAIN_REFUSAL
+    GATEKEEPER_SECURITY_REFUSAL = "Security policy violation. Request blocked."
+
+try:
+    from app.services.document_extraction import (
+        DocumentExtractionError,
+        extract_document,
+        EXTRACTION_UNREADABLE,
+    )
+except ImportError:
+    class DocumentExtractionError(Exception):  # type: ignore
+        code = "unreadable"
+        honest_failure_message = ""
+    extract_document = None  # type: ignore
+    EXTRACTION_UNREADABLE = "unreadable"
+
+try:
+    from app.agent.guardrails import validate_agent_output
+except ImportError:
+    validate_agent_output = None  # type: ignore
+
+try:
+    from app.security.ai_input import wrap_untrusted_content
+except ImportError:
+    def wrap_untrusted_content(user_query: str, document_text: Optional[str] = None, *, tag: str = "user_query") -> str:  # type: ignore
+        res = f"<{tag}>\n{user_query}\n</{tag}>"
+        if document_text is not None:
+            res += f"\n<uploaded_document>\n{document_text}\n</uploaded_document>"
+        return res
+
+def _safe_run_coroutine_sync(coro: Any) -> Any:
+    """Async-safe synchronous bridge for evaluate_user_intent."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop and loop.is_running():
+        import concurrent.futures
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+    return asyncio.run(coro)
 
 logger = logging.getLogger("rollcall.agent")
 
@@ -210,6 +264,12 @@ COMMON_TYPO_MAP = {
 def normalize_typos(text: str) -> str:
     """Normalize common typos in user prompt into authoritative vocabulary."""
     cleaned = text or ""
+    # Normalize common USN typos (e.g. '!ds23cy037' -> '1DS23CY037', 'ids23cy037' -> '1DS23CY037', 'lds...' -> '1DS...')
+    cleaned = re.sub(
+        r"(?:^|(?<=[\s(!?\"'\-:;]))[!ilIL|]([A-Za-z]{2}\d{2}[A-Za-z0-9]{2,5})\b",
+        lambda m: f"1{m.group(1).upper()}",
+        cleaned,
+    )
     # Normalize semester number expressions: e.g. "5th dem" -> "5th semester", "dem 5" -> "semester 5"
     cleaned = re.sub(
         r"\b(\d+)(?:st|nd|rd|th)?\s*(?:dem|sem|semister|semeater|semster|sems|semseter|semestor)\b",
@@ -1050,6 +1110,7 @@ class AttendanceAgent:
         export_path: Optional[Union[str, Path]] = None,
         default_room: Optional[str] = None,
         default_branch: Optional[str] = None,
+        gatekeeper_decision: Optional[Any] = None,
     ) -> AgentResponse:
         """
         Process a user request through the guarded tool-calling pipeline.
@@ -1093,7 +1154,7 @@ class AttendanceAgent:
                 except Exception:
                     pass
 
-            return self._handle_file_pipeline(
+            file_resp = self._handle_file_pipeline(
                 file_path=resolved_file,
                 request_id=req_id,
                 user_input=input_str,
@@ -1104,6 +1165,7 @@ class AttendanceAgent:
                 default_room=default_room,
                 default_branch=default_branch,
             )
+            return self._finalize_output(file_resp, gk_decision=None)
 
         # Step 1: Normalization & Typo Resolution
         normalized_input = normalize_typos(input_str)
@@ -1136,9 +1198,74 @@ class AttendanceAgent:
                 tool_calls=[l.to_dict() for l in self.get_logs(req_id)],
             )
 
+        # Enhanced gatekeeper check using LLM-backed evaluate_user_intent (if available)
+        gk = gatekeeper_decision
+        if gk is None and _GK_AVAILABLE:
+            try:
+                role_str = str(getattr(self, "actor_role", "faculty")).lower().replace("role.", "")
+                gk = _safe_run_coroutine_sync(_gk_evaluate(input_str, user_role=role_str))
+            except Exception as _gk_err:
+                logger.debug("Gatekeeper check skipped: %s", _gk_err)
+
+        if gk is not None:
+            if gk.decision == "PROMPT_INJECTION":
+                refusal = getattr(gk, "refusal_message", None) or GATEKEEPER_SECURITY_REFUSAL
+                return self._finalize_output(AgentResponse(
+                    request_id=req_id,
+                    message=refusal,
+                    success=True,
+                    needs_confirmation=False,
+                    data=[],
+                    tool_calls=[l.to_dict() for l in self.get_logs(req_id)],
+                ), gk_decision=gk)
+            if gk.decision == "OUT_OF_SCOPE":
+                domain_msg = getattr(gk, "refusal_message", None) or GATEKEEPER_DOMAIN_REFUSAL or OUT_OF_DOMAIN_REFUSAL
+                return self._finalize_output(AgentResponse(
+                    request_id=req_id,
+                    message=domain_msg,
+                    success=True,
+                    needs_confirmation=False,
+                    data=[],
+                    tool_calls=[l.to_dict() for l in self.get_logs(req_id)],
+                ), gk_decision=gk)
+            # Direct intent bypass: If the user query is a recognized RollCall intent
+            # (department query, student query, USN query, schedule, defaulters, profile, etc.),
+            # do not intercept with an ambiguous gatekeeper clarification question.
+            is_direct_bypass = (
+                (any(w in clean for w in ["department", "dept"]) and any(w in clean for w in ["work", "belong", "which", "my", "where", "in which", "am i"]))
+                or any(w in clean for w in ["who is", "usn of", "what usn", "which usn", "what is the usn", "list 5th", "list sem", "list semester", "5th sem", "5th dem"])
+                or _is_confirmation_input(clean)
+                or _is_cancellation_input(clean)
+                or self._is_query_intent(input_str)
+                or self._is_greeting_intent(clean)
+                or self._is_calendar_intent(clean)
+                or self._is_defaulter_intent(clean)
+                or self._is_schedule_intent(clean)
+                or self._is_profile_intent(clean)
+                or self._is_summary_intent(clean)
+                or self._is_vacant_rooms_intent(clean)
+                or self._is_pending_intent(clean)
+            )
+
+            # Clarification question: only return if needs_clarification is True and question is set
+            if not is_direct_bypass and getattr(gk, "needs_clarification", False) and getattr(gk, "clarification_question", None):
+                return self._finalize_output(AgentResponse(
+                    request_id=req_id,
+                    message=gk.clarification_question,
+                    success=True,
+                    needs_confirmation=False,
+                    data=[],
+                    tool_calls=[l.to_dict() for l in self.get_logs(req_id)],
+                ), gk_decision=gk)
+            # If decision == "AMBIGUOUS" and needs_clarification is False, DO NOT block!
+            # Feed normalized_intent downstream
+            if getattr(gk, "normalized_intent", "").strip():
+                normalized_input = gk.normalized_intent.strip()
+                clean = normalized_input.lower().strip()
+
 
         # Check for unrecorded metrics not present in database schema (scores, gpa, grades, etc.)
-        unsupported_metrics = ["score", "gpa", "marks", "grade", "exam", "rank", "fee", "tuition", "salary"]
+        unsupported_metrics = ["score", "gpa", "marks", "grade", "rank", "fee", "tuition", "salary"]
         if any(m in clean for m in unsupported_metrics):
             sess_id = self._extract_session_id(input_str)
             self.registry.execute(
@@ -1158,7 +1285,7 @@ class AttendanceAgent:
             )
 
         # Validation bypass guardrail: reject attempts to summarise an unprovided or unvalidated attendance sheet/file
-        is_sheet_summary = any(w in clean for w in ["sheet", "file", "csv", "photo", "upload", "without validating"])
+        is_sheet_summary = any(w in clean for w in ["sheet", "file", "csv", "photo", "upload", "without validating", "without validation", "bypass", "unvalidated"])
         if ("summar" in clean) and is_sheet_summary:
             return AgentResponse(
                 request_id=req_id,
@@ -1175,6 +1302,41 @@ class AttendanceAgent:
                 success=False,
                 needs_confirmation=False,
             )
+
+        # 2. Greetings intent
+        resp = self._dispatch_intent(input_str, normalized_input, clean, req_id)
+        return self._finalize_output(resp, gk_decision=gk)
+
+    def _dispatch_intent(self, input_str: str, normalized_input: str, clean: str, req_id: str) -> AgentResponse:
+        # 1b. Department inquiry intent
+        if any(w in clean for w in ["department", "dept"]) and any(w in clean for w in ["work", "belong", "which", "my", "what", "where", "in which", "am i"]):
+            return self._handle_department_query(req_id)
+
+        # 1c. USN clarification intent
+        if clean in ("what usn", "which usn", "what is usn", "usn"):
+            return AgentResponse(
+                request_id=req_id,
+                message=(
+                    "Which student or session USN would you like to inspect? You can ask for a student by name "
+                    "(e.g., 'What is the USN of Yatish Balu?'), search by semester (e.g., 'List students in 5th semester'), "
+                    "or check session attendance (e.g., 'Show attendance details for session SESS-22CY53-20261128-6')."
+                ),
+                success=True,
+                needs_confirmation=False,
+                data=[],
+                tool_calls=[l.to_dict() for l in self.get_logs(req_id)],
+            )
+
+        # 1d. Multi-turn modification or query referencing previous uploaded file/image
+        if ("update" in clean or "change" in clean or "modify" in clean or "form b" in clean or "details of" in clean) and any(w in clean for w in ["details", "previous", "22cy72", "sheet", "image", "file", "marks", "vishal", "exam"]):
+            try:
+                from app.agent.context import context_manager
+                ctx = context_manager.get_or_create(self.actor_id or "default")
+                prev_file = ctx.scratchpad.get("last_uploaded_file")
+                if prev_file and Path(prev_file).exists():
+                    return self._handle_exam_form_b_file(Path(prev_file), req_id, user_input=input_str)
+            except Exception:
+                pass
 
         # 2. Greetings intent
         if self._is_greeting_intent(clean):
@@ -1227,6 +1389,76 @@ class AttendanceAgent:
         # 11. General open-ended or LLM intent
         return self._handle_general_intent(input_str, req_id)
 
+    def _finalize_output(self, response: AgentResponse, gk_decision: Optional[Any] = None) -> AgentResponse:
+        """Apply Track 1 validate_agent_output guard to sanitize system prompt leaks and off-topic drift."""
+        if response and response.message:
+            try:
+                if validate_agent_output is not None:
+                    out_res = validate_agent_output(
+                        response.message,
+                        tool_called=bool(response.tool_calls),
+                        gatekeeper_decision=gk_decision,
+                    )
+                    if not out_res.allowed or out_res.sanitized_response:
+                        response.message = out_res.sanitized_response
+            except Exception as exc:
+                logger.debug("validate_agent_output error: %s", exc)
+        return response
+
+    def _handle_plain_text_document(
+        self,
+        file_path: Path,
+        text: str,
+        user_input: str,
+        request_id: str,
+    ) -> AgentResponse:
+        """Handle valid freeform plain text files without tabular column headers."""
+        from app.security.ai_input import wrap_untrusted_content
+
+        wrapped_prompt = wrap_untrusted_content(
+            user_input or "Analyze uploaded text file",
+            document_text=text,
+            tag="user_query",
+        )
+
+        usns_found = re.findall(r"\b\d{1,2}[A-Za-z]{2}\d{2}[A-Za-z]{2}\d{3}\b", text)
+        clean_usns = sorted(set(u.upper() for u in usns_found))
+        if clean_usns:
+            usn_summary = f"Detected {len(clean_usns)} student USN(s) in '{file_path.name}': {', '.join(clean_usns)}."
+            self.tool_logger.log(
+                request_id=request_id,
+                tool_name="read_text_tool",
+                arguments={"file": file_path.name, "usn_count": len(clean_usns)},
+                success=True,
+                result_summary=usn_summary,
+                duration_seconds=0.005,
+            )
+            return AgentResponse(
+                request_id=request_id,
+                message=f"Read plain text from '{file_path.name}':\n\n{usn_summary}\n\nDocument contents:\n{text.strip()}",
+                success=True,
+                needs_confirmation=False,
+                data=[{"usn": u} for u in clean_usns],
+                tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+            )
+
+        self.tool_logger.log(
+            request_id=request_id,
+            tool_name="read_text_tool",
+            arguments={"file": file_path.name, "length": len(text)},
+            success=True,
+            result_summary="Read plain text file",
+            duration_seconds=0.005,
+        )
+        return AgentResponse(
+            request_id=request_id,
+            message=f"Read plain text from '{file_path.name}':\n\n{text.strip()}",
+            success=True,
+            needs_confirmation=False,
+            data=[],
+            tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+        )
+
     def _handle_file_pipeline(
         self,
         file_path: Path,
@@ -1277,10 +1509,82 @@ class AttendanceAgent:
             return self._handle_student_upload_file(file_path=file_path, request_id=request_id, user_input=user_input)
 
         # Step 1: Read input based on type
-        if suffix in (".csv", ".txt"):
+        if suffix == ".txt":
             try:
+                from app.services.document_extraction import (
+                    DocumentExtractionError,
+                    extract_document,
+                )
+                doc_res = extract_document(str(file_path)) if extract_document else {}
+                ext_status = doc_res.get("extraction_status")
+                allow_llm = doc_res.get("allow_llm_inference", True)
+
+                # Honest failure: unreadable or disallowed LLM inference
+                if ext_status == "unreadable" or allow_llm is False:
+                    fail_msg = (
+                        doc_res.get("honest_failure_message")
+                        or doc_res.get("extraction_error")
+                        or f"The uploaded text document '{file_path.name}' could not be read."
+                    )
+                    return AgentResponse(
+                        request_id=request_id,
+                        message=fail_msg,
+                        success=False,
+                        needs_confirmation=False,
+                        tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                    )
+
+                # Freeform plain text handling (.txt with no tabular columns)
+                if doc_res.get("content_type") == "plain_text" and allow_llm:
+                    return self._handle_plain_text_document(
+                        file_path=file_path,
+                        text=doc_res.get("text", ""),
+                        user_input=user_input,
+                        request_id=request_id,
+                    )
+
+                records = doc_res.get("records", [])
+                document_issues = doc_res.get("issues", [])
+            except DocumentExtractionError as exc:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=getattr(exc, "honest_failure_message", None) or str(exc),
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+            except Exception as exc:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=f"Error reading text document: {exc}",
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+        elif suffix == ".csv":
+            try:
+                from app.services.document_extraction import DocumentExtractionError
                 df = self.registry.execute("read_csv_tool", request_id=request_id, source=file_path)
+                ext_status = getattr(df, "extraction_status", "")
+                allow_llm = getattr(df, "allow_llm_inference", True)
+                if ext_status == "unreadable" or allow_llm is False:
+                    fail_msg = getattr(df, "honest_failure_message", None) or "The CSV could not be read."
+                    return AgentResponse(
+                        request_id=request_id,
+                        message=fail_msg,
+                        success=False,
+                        needs_confirmation=False,
+                        tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                    )
                 records = df.to_dict(orient="records")
+            except DocumentExtractionError as exc:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=getattr(exc, "honest_failure_message", None) or str(exc),
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
             except Exception as exc:
                 return AgentResponse(
                     request_id=request_id,
@@ -1299,6 +1603,14 @@ class AttendanceAgent:
                     records.append(row_dict)
                     if r.confidence < self.confidence_threshold:
                         low_confidence_rows.append(row_dict)
+                if not records:
+                    return AgentResponse(
+                        request_id=request_id,
+                        message=f"No attendance records could be extracted from image '{file_path.name}'. The image appears illegible, blank, or does not contain recognizable student attendance rows.",
+                        success=False,
+                        needs_confirmation=False,
+                        tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                    )
             except Exception as exc:
                 return AgentResponse(
                     request_id=request_id,
@@ -1314,6 +1626,7 @@ class AttendanceAgent:
             # faculty reviews them instead of the pipeline dropping them.
             try:
                 from app.services.document_extraction import (
+                    DocumentExtractionError,
                     extract_rows_from_pdf,
                     extract_rows_from_xlsx,
                 )
@@ -1322,6 +1635,14 @@ class AttendanceAgent:
                     records, document_issues = extract_rows_from_pdf(str(file_path))
                 else:
                     records, document_issues = extract_rows_from_xlsx(str(file_path))
+            except DocumentExtractionError as exc:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=getattr(exc, "honest_failure_message", None) or str(exc),
+                    success=False,
+                    needs_confirmation=False,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
             except Exception as exc:
                 return AgentResponse(
                     request_id=request_id,
@@ -2394,10 +2715,22 @@ class AttendanceAgent:
                                     branch=s_branch,
                                     subject_code=sc,
                                     seat_no=f"S-{idx:02d}",
-                                    status="PRESENT" if c.get("status") == "PRESENT" else "ABSENT",
+                                    status="ABSENT" if str(c.get("status", "")).upper() == "ABSENT" else "PRESENT",
                                 )
                                 self.db_target.add(seat)
                 self.db_target.commit()
+
+                # Persist into agent conversation scratchpad memory for multi-turn follow-ups
+                try:
+                    from app.agent.context import context_manager
+                    ctx = context_manager.get_or_create(self.actor_id or "default")
+                    ctx.scratchpad["last_uploaded_file"] = str(file_path)
+                    ctx.scratchpad["last_file_type"] = "exam_form_b"
+                    ctx.scratchpad["last_room_no"] = room_no
+                    ctx.scratchpad["last_subject_code"] = target_subject or (detected_columns[0].get("subject_code") if detected_columns else "22CY72")
+                    ctx.scratchpad["last_extracted_students"] = extracted_students
+                except Exception:
+                    pass
             except Exception as e:
                 logger.error("Failed to sync Form-B exam records: %s", e)
                 try:
@@ -3016,8 +3349,99 @@ class AttendanceAgent:
         # 1. Absentees query
         if "absent" in clean or "absentees" in clean:
             sess_id = self._extract_session_id(text)
-            room_match = re.search(r"(?:room)[\s_-]*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
-            room_id = room_match.group(1) if room_match else None
+            room_match = re.search(r"(?:room|hall)[\s_-]*([A-Za-z0-9_-]+)", text, re.IGNORECASE)
+            room_id = room_match.group(1).upper() if room_match else None
+            sub_match = re.search(r"\b(22[A-Za-z0-9]+|[A-Za-z]{2,4}\d{2,4}[A-Za-z0-9]*)\b", norm_text, re.IGNORECASE)
+            subject_code = sub_match.group(1).upper() if sub_match else None
+            is_count_query = any(w in clean for w in ["total", "count", "how many", "number of", "no.of", "no of", "no. of"])
+
+            # Check if user specified a subject code (e.g. 22CY72) or room across Form-B exams and classes
+            if (subject_code or room_id) and db:
+                from app.db.models import Exam, ExamSeating, Session, Attendance
+                exam_abs_query = db.query(ExamSeating).filter(ExamSeating.status == "ABSENT")
+                total_exam_query = db.query(ExamSeating)
+                if subject_code:
+                    exam_abs_query = exam_abs_query.filter(ExamSeating.subject_code.ilike(f"%{subject_code}%"))
+                    total_exam_query = total_exam_query.filter(ExamSeating.subject_code.ilike(f"%{subject_code}%"))
+                if room_id:
+                    exam_abs_query = exam_abs_query.filter(ExamSeating.room_no.ilike(f"%{room_id}%"))
+                    total_exam_query = total_exam_query.filter(ExamSeating.room_no.ilike(f"%{room_id}%"))
+
+                exam_absentees = exam_abs_query.all()
+                total_exam_seatings = total_exam_query.all()
+
+                class_abs_query = (
+                    db.query(Attendance)
+                    .join(Session, Attendance.session_id == Session.session_id)
+                    .filter(Attendance.status == "ABSENT")
+                )
+                if subject_code:
+                    class_abs_query = class_abs_query.filter(Session.subject_code.ilike(f"%{subject_code}%"))
+                class_absentees = class_abs_query.all() if not room_id else []
+
+                if exam_absentees or total_exam_seatings or class_absentees:
+                    all_abs = []
+                    for ea in exam_absentees:
+                        ex = db.get(Exam, ea.exam_id) if db else None
+                        ex_name = ex.name if ex else ea.exam_id
+                        all_abs.append({
+                            "usn": ea.usn,
+                            "name": ea.name,
+                            "room_no": ea.room_no,
+                            "subject_code": ea.subject_code,
+                            "context": f"Room {ea.room_no} ({ex_name})",
+                            "exam_id": ea.exam_id,
+                            "status": "ABSENT",
+                        })
+                    for ca in class_absentees:
+                        all_abs.append({
+                            "usn": ca.usn,
+                            "name": ca.usn,
+                            "context": f"Session {ca.session_id}",
+                            "status": "ABSENT",
+                        })
+
+                    count = len(all_abs)
+                    total = len(total_exam_seatings)
+                    present = total - count
+                    scope_label = f"in {subject_code}" if subject_code else f"in Room {room_id}"
+
+                    self.tool_logger.log(
+                        request_id=request_id,
+                        tool_name="query_tool",
+                        arguments={"query_type": "absentees", "subject": subject_code, "room": room_id},
+                        success=True,
+                        result_summary=f"Found {count} absentees {scope_label}",
+                        duration_seconds=0.005,
+                    )
+
+                    if count == 0:
+                        return AgentResponse(
+                            request_id=request_id,
+                            message=f"Great news! There are 0 students absent {scope_label}. All {total} enrolled students were marked PRESENT.",
+                            success=True,
+                            needs_confirmation=False,
+                            data=[],
+                            tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                        )
+
+                    plural = "1 student is" if count == 1 else f"{count} students are"
+                    lines = [f"• {a['name']} (USN: {a['usn']}) — {a['context']}" for a in all_abs]
+                    summary_stats = f"\n\nTotal Enrolled: {total} | Present: {present} | Absent: {count}" if total > 0 else ""
+
+                    if is_count_query:
+                        msg = f"There is 1 student absent {scope_label} (1 absent):\n\n" + "\n".join(lines) + summary_stats if count == 1 else f"There are {count} students absent {scope_label} ({count} absent):\n\n" + "\n".join(lines) + summary_stats
+                    else:
+                        msg = f"Found {count} absent student(s) {scope_label}:\n\n" + "\n".join(lines) + summary_stats
+
+                    return AgentResponse(
+                        request_id=request_id,
+                        message=msg,
+                        success=True,
+                        needs_confirmation=False,
+                        data=all_abs,
+                        tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                    )
 
             res: QueryResult = self.registry.execute(
                 "query_tool",
@@ -3046,7 +3470,7 @@ class AttendanceAgent:
             )
 
         # Check for unrecorded metrics not present in database schema (scores, gpa, grades, etc.)
-        unsupported_metrics = ["score", "gpa", "marks", "grade", "exam", "rank", "fee", "tuition", "salary"]
+        unsupported_metrics = ["score", "gpa", "marks", "grade", "rank", "fee", "tuition", "salary"]
         if any(m in clean for m in unsupported_metrics):
             sess_id = self._extract_session_id(text)
             self.registry.execute(
@@ -3178,38 +3602,244 @@ class AttendanceAgent:
                     )
 
                 # Also check the institutional user directory (faculty/admin).
-                if db is not None and hasattr(db, "query"):
+                if db is not None:
                     try:
-                        from sqlalchemy import func
+                        user_name = None
+                        user_role = None
+                        user_uid = None
+                        if hasattr(db, "query"):
+                            from sqlalchemy import func
+                            from app.db.models import User
+                            user_row = (
+                                db.query(User)
+                                .filter(func.lower(User.name).like(f"%{person_name.lower()}%"))
+                                .first()
+                            )
+                            if user_row is not None:
+                                user_name = user_row.name
+                                user_role = str(user_row.role).upper()
+                                user_uid = user_row.user_id
+                        elif hasattr(db, "execute"):
+                            from sqlalchemy import text
+                            u_res = db.execute(
+                                text("SELECT user_id, name, role FROM users WHERE LOWER(name) LIKE :nm"),
+                                {"nm": f"%{person_name.lower()}%"},
+                            ).fetchone()
+                            if u_res:
+                                user_uid, user_name, user_role = u_res[0], u_res[1], str(u_res[2]).upper()
 
-                        from app.db.models import User
+                        if not user_name and hasattr(db, "execute"):
+                            from sqlalchemy import text
+                            p_res = db.execute(
+                                text("SELECT user_id, full_name, designation FROM user_profiles WHERE LOWER(full_name) LIKE :nm"),
+                                {"nm": f"%{person_name.lower()}%"},
+                            ).fetchone()
+                            if p_res:
+                                user_uid, user_name, user_role = p_res[0], p_res[1], p_res[2] or "FACULTY"
 
-                        user_row = (
-                            db.query(User)
-                            .filter(func.lower(User.name).like(f"%{person_name.lower()}%"))
-                            .first()
-                        )
-                        if user_row is not None:
+                        if user_name is not None:
+                            is_usn_req = "usn" in clean
+                            usn_extra = " and does not have a student USN." if is_usn_req else "."
                             return AgentResponse(
                                 request_id=request_id,
                                 message=(
-                                    f"{user_row.name} is a {str(user_row.role).upper()} "
-                                    f"account (User ID: {user_row.user_id})."
+                                    f"{user_name} is an institutional {user_role} "
+                                    f"account (User ID: {user_uid}) at Dayananda Sagar College of Engineering{usn_extra}"
                                 ),
                                 success=True,
                                 needs_confirmation=False,
                                 data=[{
-                                    "user_id": user_row.user_id,
-                                    "name": user_row.name,
-                                    "role": str(user_row.role),
+                                    "user_id": user_uid,
+                                    "name": user_name,
+                                    "role": user_role,
                                 }],
                                 tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
                             )
+
+                        # Also search ExamSeating for student name if not in Student table
+                        if db is not None:
+                            try:
+                                from app.db.models import ExamSeating
+                                es_row = (
+                                    db.query(ExamSeating)
+                                    .filter(ExamSeating.name.ilike(f"%{person_name}%"))
+                                    .first()
+                                )
+                                if es_row is not None:
+                                    return AgentResponse(
+                                        request_id=request_id,
+                                        message=(
+                                            f"Student Record for {es_row.name}:\n\n"
+                                            f"• USN: {es_row.usn}\n"
+                                            f"• Name: {es_row.name}\n"
+                                            f"• Branch: {es_row.branch}\n"
+                                            f"• Status: Registered in Form-B Examination Roster"
+                                        ),
+                                        success=True,
+                                        needs_confirmation=False,
+                                        data=[{
+                                            "usn": es_row.usn,
+                                            "name": es_row.name,
+                                            "branch": es_row.branch,
+                                        }],
+                                        tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                                    )
+                            except Exception:
+                                pass
                     except Exception:
                         pass
 
-        # 3. Student query
+        # 3. Student / USN query
         usn_match = re.search(r"\b\d[A-Z]{2}\d{2}[A-Z]{2}\d{3}\b", norm_text, re.IGNORECASE)
+
+        # Handle targeted student USN queries across both Examination Form-B rosters and class sessions
+        if usn_match:
+            usn = usn_match.group(0).upper()
+            st_row = None
+            exam_seatings = []
+            class_records = []
+            if db:
+                from app.db.models import Student, ExamSeating, Exam, Attendance
+                if hasattr(db, "query"):
+                    # SQLAlchemy Session (production path)
+                    try:
+                        st_row = db.query(Student).filter(Student.usn == usn).first()
+                    except Exception:
+                        pass
+                    try:
+                        exam_seatings = db.query(ExamSeating).filter(ExamSeating.usn == usn).all()
+                    except Exception:
+                        pass
+                    try:
+                        class_records = db.query(Attendance).filter(Attendance.usn == usn).all()
+                    except Exception:
+                        pass
+                else:
+                    # Raw sqlite3 connection (unit tests / lightweight callers)
+                    def _fetch_rows(sql: str) -> list:
+                        try:
+                            cur = db.execute(sql, (usn,))
+                            cols = [d[0] for d in cur.description or []]
+                            return [dict(zip(cols, row)) for row in cur.fetchall()]
+                        except Exception:
+                            return []
+
+                    st_rows = _fetch_rows("SELECT usn, name, branch FROM students WHERE usn = ?")
+                    st_row = st_rows[0] if st_rows else None
+                    exam_seatings = _fetch_rows(
+                        "SELECT exam_id, subject_code, room_no, seat_no, status, name, branch "
+                        "FROM exam_seating WHERE usn = ?"
+                    )
+                    class_records = _fetch_rows(
+                        "SELECT session_id, usn, status FROM attendance WHERE usn = ?"
+                    )
+
+            def _val(obj, key, default=None):
+                if obj is None:
+                    return default
+                if isinstance(obj, dict):
+                    return obj.get(key, default)
+                return getattr(obj, key, default)
+
+            st_name = _val(st_row, "name") or (_val(exam_seatings[0], "name") if exam_seatings else None)
+            st_branch = _val(st_row, "branch") or (_val(exam_seatings[0], "branch") if exam_seatings else "CY")
+
+            # If USN has no records anywhere in the institutional database
+            if not st_row and not exam_seatings and not class_records:
+                return AgentResponse(
+                    request_id=request_id,
+                    message=NO_DATA_MESSAGE,
+                    success=True,
+                    needs_confirmation=False,
+                    data=[],
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+
+            # Check if user query asks for attendance, records, status, exam details, etc.
+            is_att_req = any(w in clean for w in ["attend", "attendance", "record", "status", "present", "absent", "exam", "cie", "form b", "form-b", "details", "show"])
+
+            if is_att_req or exam_seatings or class_records:
+                name_disp = st_name or usn
+                header = f"Attendance record for student {name_disp} (USN: {usn}, Branch: {st_branch}):\n"
+
+                # 1. Exam Form-B Attendance Section
+                if exam_seatings:
+                    header += "\n📝 Examination Attendance (Form-B Rosters):"
+                    for es in exam_seatings:
+                        es_exam_id = _val(es, "exam_id")
+                        ex_obj = db.get(Exam, es_exam_id) if db is not None and hasattr(db, "get") else None
+                        ex_title = _val(ex_obj, "name") or es_exam_id
+                        ex_date = f", Date: {_val(ex_obj, 'date')}" if ex_obj and _val(ex_obj, "date") else ""
+                        header += (
+                            f"\n• {ex_title} ({_val(es, 'subject_code')}){ex_date} "
+                            f"in Room {_val(es, 'room_no')} (Seat {_val(es, 'seat_no')}): {_val(es, 'status')}"
+                        )
+                else:
+                    header += "\n📝 Examination Attendance (Form-B): No exam attendance records found."
+
+                # 2. Regular Class Attendance Section
+                if class_records:
+                    tot = len(class_records)
+                    att = sum(1 for c in class_records if str(_val(c, "status") or "").upper() == "PRESENT")
+                    pct = round((att / tot) * 100, 1) if tot > 0 else 0.0
+                    header += f"\n\n📚 Regular Class Sessions:\n• Total Classes Recorded: {tot}\n• Classes Attended: {att}\n• Overall Class Attendance: {pct}%"
+                    status_str = "Eligible (Above 75% threshold)" if pct >= 75.0 else "Shortage Warning (< 75%)"
+                    header += f"\n• Status: {status_str}"
+                else:
+                    header += "\n\n📚 Regular Class Sessions: No regular lecture sessions marked yet."
+
+                msg = header.strip()
+                data_payload = [
+                    {
+                        "type": "exam_attendance",
+                        "usn": usn,
+                        "name": st_name,
+                        "branch": st_branch,
+                        "exam_id": _val(es, "exam_id"),
+                        "subject_code": _val(es, "subject_code"),
+                        "room_no": _val(es, "room_no"),
+                        "seat_no": _val(es, "seat_no"),
+                        "status": _val(es, "status"),
+                    }
+                    for es in exam_seatings
+                ] + [
+                    {
+                        "type": "class_attendance",
+                        "usn": usn,
+                        "session_id": _val(cr, "session_id"),
+                        "status": _val(cr, "status"),
+                    }
+                    for cr in class_records
+                ]
+
+                self.tool_logger.log(
+                    request_id=request_id,
+                    tool_name="query_tool",
+                    arguments={"query_type": "student_attendance", "usn": usn},
+                    success=True,
+                    result_summary=f"Found {len(exam_seatings)} exam and {len(class_records)} class attendance records for {usn}",
+                    duration_seconds=0.005,
+                )
+
+                return AgentResponse(
+                    request_id=request_id,
+                    message=msg,
+                    success=True,
+                    needs_confirmation=False,
+                    data=data_payload,
+                    tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+                )
+
+            # Plain student info lookup
+            return AgentResponse(
+                request_id=request_id,
+                message=f"Found student record: {st_name} ({usn}, Branch: {st_branch}).",
+                success=True,
+                needs_confirmation=False,
+                data=[{"usn": usn, "name": st_name, "branch": st_branch}],
+                tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+            )
+
         sem_match = re.search(r"\b([1-8])(?:st|nd|rd|th)?\s*(?:sem|semester)\b|\b(?:sem|semester)\s*([1-8])\b", norm_text, re.IGNORECASE)
         branch_match = re.search(r"\b(CY|CSE|ECE|ME|CV|AIML|ISE)\b", norm_text, re.IGNORECASE)
         target_sem = int(sem_match.group(1) or sem_match.group(2)) if sem_match else None
@@ -3217,13 +3847,11 @@ class AttendanceAgent:
         is_count_query = any(w in clean for w in ["total", "count", "how many", "number of", "no.of", "no of"])
         is_list_query = any(w in clean for w in ["list", "show", "all", "names", "roster"])
 
-        if usn_match or target_sem is not None or "student" in clean:
-            usn = usn_match.group(0).upper() if usn_match else None
+        if target_sem is not None or "student" in clean:
             res = self.registry.execute(
                 "query_tool",
                 request_id=request_id,
                 query_type="students",
-                usn=usn,
                 branch=target_branch,
                 semester=target_sem,
                 db_target=db,
@@ -3238,8 +3866,8 @@ class AttendanceAgent:
                     tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
                 )
 
-            # Case A: Specific USN or single-student targeted lookup without list/count intent
-            if usn or (len(res.data) == 1 and not is_count_query and not is_list_query and not target_sem):
+            # Case A: Single-student targeted lookup without list/count intent
+            if len(res.data) == 1 and not is_count_query and not is_list_query and not target_sem:
                 rec = res.data[0]
                 return AgentResponse(
                     request_id=request_id,
@@ -3341,10 +3969,13 @@ class AttendanceAgent:
         """
         explicit = re.search(r"\bSESS[-_][A-Za-z0-9_-]*", text, re.IGNORECASE)
         if explicit:
-            return explicit.group(0)
+            return explicit.group(0).upper()
         fallback = re.search(r"(?:session|sess)\b[\s_:-]*([A-Za-z0-9][A-Za-z0-9_-]*)", text, re.IGNORECASE)
         if fallback:
-            return fallback.group(1)
+            val = fallback.group(1).strip()
+            if val.lower().startswith("sess"):
+                return val.upper()
+            return val
         return None
 
     def _format_subject_display(self) -> str:
@@ -3385,7 +4016,7 @@ class AttendanceAgent:
             "how many", "who", "absent", "absentees", "present", "session",
             "student", "students", "records", "database", "query", "find",
             "sem", "semester", "dem", "dept", "department", "where do i work",
-            "which department", "roster", "usn"
+            "which department", "roster", "usn", "attendance", "attend", "exam", "form b", "form-b"
         ]
         return any(k in norm for k in keywords)
 
@@ -4295,18 +4926,30 @@ class AttendanceAgent:
         events: List[Dict[str, Any]] = []
         if self.db_target:
             try:
-                rows = self.db_target.execute(
-                    select(AcademicEvent).order_by(AcademicEvent.event_date.asc())
-                ).scalars().all()
-                for row in rows:
-                    events.append({
-                        "event_id": row.event_id,
-                        "title": row.title,
-                        "event_date": row.event_date,
-                        "end_date": row.end_date,
-                        "event_type": row.event_type,
-                        "description": row.description,
-                    })
+                if hasattr(self.db_target, "scalars"):
+                    rows = self.db_target.execute(
+                        select(AcademicEvent).order_by(AcademicEvent.event_date.asc())
+                    ).scalars().all()
+                    for row in rows:
+                        events.append({
+                            "event_id": row.event_id,
+                            "title": row.title,
+                            "event_date": row.event_date,
+                            "end_date": row.end_date,
+                            "event_type": row.event_type,
+                            "description": row.description,
+                        })
+                else:
+                    cur = self.db_target.execute(
+                        "SELECT event_id, title, event_date, end_date, event_type, description "
+                        "FROM academic_events ORDER BY event_date ASC"
+                    )
+                    raw_rows = cur.fetchall() if hasattr(cur, "fetchall") else list(cur)
+                    for r in raw_rows:
+                        mapping = dict(r) if hasattr(r, "keys") else dict(zip(
+                            ["event_id", "title", "event_date", "end_date", "event_type", "description"], r
+                        ))
+                        events.append(mapping)
             except Exception as exc:
                 logger.error("Failed to read academic calendar events: %s", exc)
 
@@ -4662,6 +5305,19 @@ class AttendanceAgent:
         )
 
     def _handle_general_intent(self, text: str, request_id: str) -> AgentResponse:
+        clean_q = text.strip().lower()
+        # Strict zero-hallucination guard: If user is asking for student attendance, USN records, or attendance stats,
+        # never allow general LLM to fabricate fake student names, class percentages, or numbers.
+        if any(w in clean_q for w in ["attendance", "present", "absent", "defaulter", "usn", "record", "percentage", "classes conducted"]):
+            return AgentResponse(
+                request_id=request_id,
+                message=NO_DATA_MESSAGE,
+                success=True,
+                needs_confirmation=False,
+                data=[],
+                tool_calls=[l.to_dict() for l in self.get_logs(request_id)],
+            )
+
         api_key = os.getenv("GEMINI_API_KEY", "").strip()
         if not api_key:
             from dotenv import load_dotenv

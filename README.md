@@ -312,7 +312,7 @@ npm run dev
 
 ```bash
 cd Roll_Call/backend
-# Execute the full Form-B and security test suite (966 tests)
+# Execute the full Form-B and security test suite (972 tests)
 pytest tests -q
 ```
 

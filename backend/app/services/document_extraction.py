@@ -17,11 +17,116 @@ import csv
 import io
 import logging
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("rollcall.services.document_extraction")
 
 USN_PATTERN = re.compile(r"\b\d{1,2}[A-Za-z]{2}\d{2}[A-Za-z]{2}\d{3}\b")
+
+# Honest-extraction contract shared across the document readers.
+EXTRACTION_OK = "ok"
+EXTRACTION_PARTIAL = "partial"
+EXTRACTION_UNREADABLE = "unreadable"
+
+
+def build_extraction_metadata(
+    status: str,
+    confidence: float,
+    extracted_chars: int,
+    extraction_error: Optional[str] = None,
+    honest_failure_message: Optional[str] = None,
+    allow_llm_inference: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """Return the standard metadata block attached to every extraction result."""
+    if allow_llm_inference is None:
+        allow_llm_inference = status != EXTRACTION_UNREADABLE
+    return {
+        "extraction_status": status,
+        "extraction_confidence": round(max(0.0, min(1.0, float(confidence))), 3),
+        "extracted_chars": int(max(0, extracted_chars)),
+        "extraction_error": extraction_error,
+        "honest_failure_message": honest_failure_message,
+        "allow_llm_inference": bool(allow_llm_inference),
+    }
+
+
+class DocumentExtractionResult(tuple):
+    """``(records, issues)`` tuple that also carries extraction metadata.
+
+    Tuple subclassing keeps every existing ``records, issues = fn(path)``
+    caller working while exposing ``.metadata`` / ``.to_dict()`` for the
+    honesty-aware callers and tests.
+    """
+
+    metadata: Dict[str, Any]
+
+    def __new__(
+        cls,
+        records: List[Dict[str, Any]],
+        issues: List[str],
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> "DocumentExtractionResult":
+        obj = super().__new__(cls, (records, issues))
+        obj.metadata = metadata or build_extraction_metadata(
+            EXTRACTION_UNREADABLE, 0.0, 0, "unreadable"
+        )
+        return obj
+
+    @property
+    def records(self) -> List[Dict[str, Any]]:
+        return self[0]
+
+    @property
+    def issues(self) -> List[str]:
+        return self[1]
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "records": self.records,
+            "issues": self.issues,
+        }
+        payload.update(self.metadata)
+        return payload
+
+
+def _rows_metadata(
+    records: List[Dict[str, Any]],
+    issues: List[str],
+    extracted_chars: int,
+) -> Dict[str, Any]:
+    """Summarise row extraction honestly (never invents a success)."""
+    if not records:
+        return build_extraction_metadata(
+            EXTRACTION_UNREADABLE,
+            0.0,
+            extracted_chars,
+            "no_rows_detected",
+            "No student rows could be read from this document. Check that it contains "
+            "a USN column and a status column.",
+            False,
+        )
+    flagged = [
+        r for r in records
+        if r.get("extraction_issue") in ("INVALID_IDENTIFIER", "AMBIGUOUS_STATUS")
+    ]
+    status = EXTRACTION_PARTIAL if flagged else EXTRACTION_OK
+    # A partial read is still useful, so keep it above the "unreadable" floor.
+    confidence = 1.0 if not flagged else 0.5 + 0.5 * (1.0 - len(flagged) / len(records))
+    message = None
+    if status == EXTRACTION_PARTIAL:
+        message = (
+            f"{len(flagged)} of {len(records)} rows are ambiguous or use an invalid "
+            "identifier and need manual review."
+        )
+    return build_extraction_metadata(
+        status,
+        confidence,
+        extracted_chars,
+        None,
+        message,
+        True,
+    )
 
 HEADER_ALIASES = {
     "usn": "usn",
@@ -63,7 +168,31 @@ STATUS_ALIASES = {
 
 
 class DocumentExtractionError(Exception):
-    """Raised when a document cannot be interpreted as an attendance roster."""
+    """Raised when a document cannot be interpreted as an attendance roster.
+
+    ``code`` is a stable machine-readable cause (``empty_file``,
+    ``unsupported_format``, ``malformed_csv``, ``no_extractable_text``, ...)
+    so callers can report a specific problem instead of a vague failure.
+    """
+
+    def __init__(self, message: str, code: str = "unreadable") -> None:
+        super().__init__(message)
+        self.code = code
+
+    @property
+    def extraction_error(self) -> str:
+        """The stable extraction-error code, matching the result metadata key."""
+        return self.code
+
+    @property
+    def honest_failure_message(self) -> str:
+        """User-facing explanation, matching the result metadata key."""
+        return str(self)
+
+    @property
+    def allow_llm_inference(self) -> bool:
+        """Unreadable documents never permit downstream inference."""
+        return False
 
 
 def _normalise_header(value: Any) -> str:
@@ -105,7 +234,8 @@ def _build_rows(rows: List[List[Any]]) -> Tuple[List[Dict[str, Any]], List[str]]
     if header_index is None:
         raise DocumentExtractionError(
             "No attendance header row was detected. The document must contain a header "
-            "with at least a USN column and a status column."
+            "with at least a USN column and a status column.",
+            code="missing_header_row",
         )
 
     records: List[Dict[str, Any]] = []
@@ -171,12 +301,25 @@ def extract_rows_from_xlsx(path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
 
     workbook = load_workbook(filename=path, read_only=True, data_only=True)
     try:
+        if not workbook.sheetnames:
+            raise DocumentExtractionError(
+                "The workbook contains no worksheets.", code="empty_file"
+            )
         sheet = workbook[workbook.sheetnames[0]]
         rows = [list(row) for row in sheet.iter_rows(values_only=True)]
     finally:
         workbook.close()
 
-    return _build_rows(rows)
+    if not any(any(str(cell or "").strip() for cell in row) for row in rows):
+        raise DocumentExtractionError(
+            "The workbook is empty.", code="empty_file"
+        )
+
+    records, issues = _build_rows(rows)
+    chars = sum(
+        len(str(cell)) for row in rows for cell in row if str(cell or "").strip()
+    )
+    return DocumentExtractionResult(records, issues, _rows_metadata(records, issues, chars))
 
 
 def _rows_from_words(words: List[Dict[str, Any]]) -> List[List[Any]]:
@@ -301,7 +444,8 @@ def extract_rows_from_pdf(path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
     if not rows:
         raise DocumentExtractionError(
             "No tabular content was found in the PDF. Upload a PDF that contains the "
-            "attendance table as text (not a scanned image)."
+            "attendance table as text (not a scanned image).",
+            code="no_extractable_text",
         )
 
     # Re-split the positional rows into their individual cells.
@@ -311,7 +455,11 @@ def extract_rows_from_pdf(path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
         if cells:
             refined.append(cells)
 
-    return _build_rows(refined)
+    records, issues = _build_rows(refined)
+    chars = len("\n".join(text_lines)) or sum(
+        len(str(cell)) for row in refined for cell in row if str(cell or "").strip()
+    )
+    return DocumentExtractionResult(records, issues, _rows_metadata(records, issues, chars))
 
 
 def extract_text_from_pdf(path: str, max_chars: int = 24000) -> str:
@@ -338,8 +486,239 @@ def extract_text_from_pdf(path: str, max_chars: int = 24000) -> str:
     return text.strip()[:max_chars]
 
 
-def extract_rows_from_csv(path: str) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """Extract attendance rows from a CSV document (used for consistency)."""
-    with open(path, "r", encoding="utf-8-sig", newline="") as handle:
-        rows = [row for row in csv.reader(handle)]
-    return _build_rows(rows)
+def extract_text_from_pdf_result(
+    path: str, max_chars: int = 24000
+) -> Dict[str, Any]:
+    """Return ``{"text", **metadata}`` for a PDF, honestly reporting blank scans.
+
+    ``extract_text_from_pdf`` keeps its historical ``str`` return for existing
+    callers; this variant is for callers that must distinguish "empty PDF" from
+    "PDF with text" before asking a model anything.
+    """
+    try:
+        text = extract_text_from_pdf(path, max_chars=max_chars)
+    except Exception as exc:  # defensive: extract_text_from_pdf already guards
+        return {
+            "text": "",
+            **build_extraction_metadata(
+                EXTRACTION_UNREADABLE,
+                0.0,
+                0,
+                "unreadable_pdf",
+                "The PDF could not be opened or parsed.",
+                False,
+            ),
+        }
+
+    if not text.strip():
+        return {
+            "text": "",
+            **build_extraction_metadata(
+                EXTRACTION_UNREADABLE,
+                0.0,
+                0,
+                "no_extractable_text",
+                (
+                    "The PDF contains no selectable text. It is probably a scan; "
+                    "upload a text-based PDF or a clear photo instead."
+                ),
+                False,
+            ),
+        }
+    return {
+        "text": text,
+        **build_extraction_metadata(EXTRACTION_OK, 1.0, len(text)),
+    }
+
+
+_TEXT_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1")
+
+
+def _read_text_with_fallback(path: str) -> str:
+    """Read a text/CSV file, tolerating BOMs, CRLF and non-UTF8 encodings."""
+    file_path = Path(path)
+    raw = file_path.read_bytes()
+    if not raw.strip():
+        raise DocumentExtractionError(
+            "The uploaded file is empty.", code="empty_file"
+        )
+    if b"\x00" in raw[:8192]:
+        raise DocumentExtractionError(
+            "The uploaded file looks binary, not a CSV or text file.",
+            code="malformed_csv",
+        )
+    for encoding in _TEXT_ENCODINGS:
+        try:
+            # utf-8-sig strips the BOM; the plain decoders keep CRLF intact.
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise DocumentExtractionError(
+        "The uploaded file could not be decoded as text.", code="malformed_csv"
+    )
+
+
+def _sniff_delimiter(text: str) -> str:
+    """Detect the column delimiter of a CSV/TXT attendance sheet."""
+    sample = "\n".join(text.splitlines()[:20])
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=",;\t|").delimiter
+    except csv.Error:
+        counts = {delimiter: sample.count(delimiter) for delimiter in (",", ";", "\t", "|")}
+        best = max(counts, key=counts.get)
+        return best if counts[best] else ","
+
+
+def extract_rows_from_csv(path: str) -> DocumentExtractionResult:
+    """Extract attendance rows from a CSV/TXT document.
+
+    Handles UTF-8 BOM, CRLF line endings, and comma/semicolon/tab/pipe
+    delimiters. Empty or binary files raise ``DocumentExtractionError`` with a
+    specific code instead of returning a bare empty list.
+    """
+    text = _read_text_with_fallback(path)
+    delimiter = _sniff_delimiter(text)
+    try:
+        rows = [row for row in csv.reader(io.StringIO(text, newline=""), delimiter=delimiter)]
+    except csv.Error as exc:
+        raise DocumentExtractionError(
+            f"The CSV could not be parsed: {exc}", code="malformed_csv"
+        ) from exc
+
+    if not any(any(str(cell or "").strip() for cell in row) for row in rows):
+        raise DocumentExtractionError(
+            "The uploaded file contains no data rows.", code="empty_file"
+        )
+
+    records, issues = _build_rows(rows)
+    return DocumentExtractionResult(
+        records, issues, _rows_metadata(records, issues, len(text))
+    )
+
+
+def extract_text_from_txt(path: str) -> Dict[str, Any]:
+    """Read a freeform ``.txt`` file as plain text (no roster assumptions).
+
+    Notes, notices, and raw lists of USNs legitimately have no CSV column
+    headers. Returning the text with ``extraction_status="ok"`` lets the agent
+    answer from the real content instead of rejecting the upload as a
+    malformed roster.
+    """
+    text = _read_text_with_fallback(path)
+    if not text.strip():
+        raise DocumentExtractionError(
+            "The uploaded text file is empty.", code="empty_file"
+        )
+    return {
+        "text": text,
+        **build_extraction_metadata(EXTRACTION_OK, 1.0, len(text)),
+    }
+
+
+def extract_document(path: str) -> Dict[str, Any]:
+    """Extract any supported attendance document into an honest result dict.
+
+    Never raises for unreadable input: the returned dict always carries
+    ``extraction_status``, ``extraction_error``, ``honest_failure_message``
+    and ``allow_llm_inference`` so the agent can report the real problem
+    instead of guessing. The suffix decides the reader.
+    """
+    suffix = Path(path).suffix.lower()
+
+    # A freeform .txt is not necessarily a CSV. Try the structured roster
+    # reader first, and only fall back to plain text when the file simply does
+    # not look like an attendance table. Header validation stays strict for
+    # .csv (and for .txt files that do contain tabular attendance data).
+    if suffix == ".txt":
+        try:
+            text_result = extract_text_from_txt(path)
+        except DocumentExtractionError as exc:
+            return {
+                "records": [],
+                "issues": [str(exc)],
+                **build_extraction_metadata(
+                    EXTRACTION_UNREADABLE,
+                    0.0,
+                    0,
+                    exc.code,
+                    str(exc),
+                    False,
+                ),
+            }
+        try:
+            result = extract_rows_from_csv(path)
+        except DocumentExtractionError as exc:
+            if exc.code != "missing_header_row":
+                return {
+                    "records": [],
+                    "issues": [str(exc)],
+                    **build_extraction_metadata(
+                        EXTRACTION_UNREADABLE,
+                        0.0,
+                        0,
+                        exc.code,
+                        str(exc),
+                        False,
+                    ),
+                }
+            metadata = {
+                key: text_result[key]
+                for key in (
+                    "extraction_status",
+                    "extraction_confidence",
+                    "extracted_chars",
+                    "extraction_error",
+                    "honest_failure_message",
+                    "allow_llm_inference",
+                )
+            }
+            return {
+                "records": [],
+                "issues": [],
+                "text": text_result["text"],
+                "content_type": "plain_text",
+                **metadata,
+            }
+        else:
+            return {**result.to_dict(), "content_type": "attendance_table"}
+
+    try:
+        if suffix == ".csv":
+            result = extract_rows_from_csv(path)
+        elif suffix == ".pdf":
+            result = extract_rows_from_pdf(path)
+        elif suffix in (".xlsx", ".xls"):
+            result = extract_rows_from_xlsx(path)
+        else:
+            raise DocumentExtractionError(
+                f"Unsupported file format '{suffix}'.",
+                code="unsupported_format",
+            )
+    except DocumentExtractionError as exc:
+        return {
+            "records": [],
+            "issues": [str(exc)],
+            **build_extraction_metadata(
+                EXTRACTION_UNREADABLE,
+                0.0,
+                0,
+                exc.code,
+                str(exc),
+                False,
+            ),
+        }
+    except Exception as exc:  # pragma: no cover - defensive
+        return {
+            "records": [],
+            "issues": [str(exc)],
+            **build_extraction_metadata(
+                EXTRACTION_UNREADABLE,
+                0.0,
+                0,
+                "unreadable_document",
+                f"The document could not be read: {exc}",
+                False,
+            ),
+        }
+
+    return result.to_dict()

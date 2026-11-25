@@ -41,6 +41,7 @@ from tools.read_photo_tool import (
     DEFAULT_MIN_CONFIDENCE,
     VALID_STATUSES,
     ExtractionSource,
+    OcrTimeoutError,
     PhotoExtractionResult,
     PhotoRow,
     _detect_skew_angle,
@@ -608,3 +609,148 @@ class TestPhotoIntegration:
         # Should use OCR fallback and not crash
         assert isinstance(result, PhotoExtractionResult)
         assert result.source == ExtractionSource.OCR_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# 7. Honest-extraction contract
+# ---------------------------------------------------------------------------
+
+class TestHonestExtractionContract:
+    """Unreadable input must be reported as such, never as an empty success."""
+
+    def test_result_dict_exposes_all_metadata_keys(self, attendance_image):
+        response = json.dumps([
+            {"usn": "1MS21CS001", "name": "Alice", "status": "PRESENT", "confidence": 0.95},
+        ])
+        with patch("tools.read_photo_tool._call_gemini", return_value=response):
+            result = read_photo_tool(str(attendance_image), api_key="fake-key")
+        payload = result.to_dict()
+        for key in (
+            "extraction_status",
+            "extraction_confidence",
+            "extracted_chars",
+            "extraction_error",
+            "honest_failure_message",
+            "allow_llm_inference",
+        ):
+            assert key in payload
+        assert payload["extraction_status"] == "ok"
+        assert payload["allow_llm_inference"] is True
+        assert payload["extracted_chars"] > 0
+        assert payload["extraction_error"] is None
+
+    def test_blank_white_image_is_unreadable_and_never_calls_llm(self, white_image):
+        with patch("tools.read_photo_tool._call_gemini") as mock_llm:
+            result = read_photo_tool(str(white_image), api_key="fake-key")
+        mock_llm.assert_not_called()
+        assert result.rows == []
+        assert result.extraction_status == "unreadable"
+        assert result.allow_llm_inference is False
+        assert result.extraction_error in ("blank_or_empty_image", "low_legibility_image")
+        assert result.honest_failure_message
+
+    @skip_if_no_photos
+    def test_blank_sample_sheet_is_unreadable(self):
+        path = PHOTOS_DIR / "sheet_empty.jpg"
+        with patch("tools.read_photo_tool._call_gemini") as mock_llm:
+            result = read_photo_tool(str(path), api_key="fake-key")
+        mock_llm.assert_not_called()
+        assert result.rows == []
+        assert result.extraction_status == "unreadable"
+        assert result.allow_llm_inference is False
+
+    def test_heavy_noise_image_is_unreadable(self, tmp_path):
+        rng = np.random.default_rng(7)
+        noise = rng.normal(128, 60, (260, 620)).clip(0, 255).astype(np.uint8)
+        path = tmp_path / "noise.jpg"
+        cv2.imwrite(str(path), noise)
+
+        with patch("tools.read_photo_tool._call_gemini") as mock_llm:
+            result = read_photo_tool(str(path), api_key="fake-key")
+        mock_llm.assert_not_called()
+        assert result.rows == []
+        assert result.extraction_status == "unreadable"
+        assert result.allow_llm_inference is False
+
+    def test_zero_byte_upload_is_empty_file(self, tmp_path):
+        path = tmp_path / "empty.jpg"
+        path.write_bytes(b"")
+        result = read_photo_tool(str(path), api_key="fake-key")
+        assert result.extraction_status == "unreadable"
+        assert result.extraction_error == "empty_file"
+        assert result.allow_llm_inference is False
+
+    def test_vision_and_ocr_timeout_is_reported(self, attendance_image):
+        with patch(
+            "tools.read_photo_tool._call_gemini",
+            side_effect=TimeoutError("deadline exceeded"),
+        ), patch(
+            "tools.read_photo_tool._run_ocr_with_timeout",
+            side_effect=OcrTimeoutError("OCR exceeded 90s"),
+        ):
+            result = read_photo_tool(str(attendance_image), api_key="fake-key")
+        assert result.rows == []
+        assert result.extraction_status == "unreadable"
+        assert result.extraction_error == "ocr_timeout"
+        assert result.allow_llm_inference is False
+        assert "timed out" in (result.honest_failure_message or "").lower()
+
+    def test_llm_empty_list_does_not_become_silent_success(self, attendance_image):
+        with patch("tools.read_photo_tool._call_gemini", return_value="[]"), patch(
+            "tools.read_photo_tool._run_ocr_with_timeout", return_value=[]
+        ):
+            result = read_photo_tool(str(attendance_image), api_key="fake-key")
+        assert result.rows == []
+        assert result.extraction_status == "unreadable"
+        assert result.extraction_error == "no_rows_detected"
+        assert result.allow_llm_inference is False
+
+    def test_uncertain_rows_are_partial_not_ok(self, attendance_image):
+        response = json.dumps([
+            {"usn": "1MS21CS001", "name": "Alice", "status": "PENDING", "confidence": 0.9},
+        ])
+        with patch("tools.read_photo_tool._call_gemini", return_value=response):
+            result = read_photo_tool(str(attendance_image), api_key="fake-key")
+        assert result.extraction_status == "partial"
+        assert result.allow_llm_inference is True
+        assert result.rows[0].status == "PENDING"
+        assert result.rows[0].status != "ABSENT"
+
+    @skip_if_no_photos
+    def test_ambiguous_sheet_is_partial_with_unreviewed_rows(self):
+        path = PHOTOS_DIR / "sheet_ambiguous.jpg"
+        response = json.dumps([
+            {"usn": "1MS21CS001", "name": "Alice", "status": "PRESENT", "confidence": 0.35},
+            {"usn": "1MS21CS002", "name": "Bob", "status": "PRESENT", "confidence": 0.40},
+        ])
+        with patch("tools.read_photo_tool._call_gemini", return_value=response):
+            result = read_photo_tool(str(path), api_key="fake-key", min_confidence=0.5)
+        assert result.extraction_status == "partial"
+        assert result.allow_llm_inference is True
+        assert all(row.status == "UNREVIEWED" for row in result.rows)
+        assert all(row.status != "ABSENT" for row in result.rows)
+
+
+def test_mobile_pipeline_propagates_unreadable_photo(white_image, monkeypatch):
+    """The mobile intake dict must not report success when the photo is unreadable."""
+    from app.services import image_pipeline
+
+    unreadable = PhotoExtractionResult(
+        image_path="ignored.jpg",
+        rows=[],
+        source=ExtractionSource.LLM,
+        extraction_status="unreadable",
+        extraction_error="low_legibility_image",
+        honest_failure_message="The image does not contain a readable attendance table.",
+        allow_llm_inference=False,
+    )
+    monkeypatch.setattr(image_pipeline, "read_photo_tool", lambda image_path: unreadable)
+
+    out = image_pipeline.process_mobile_attendance_sheet(white_image.read_bytes())
+
+    assert out["success"] is False
+    assert out["rows"] == []
+    assert out["extraction_status"] == "unreadable"
+    assert out["extraction_error"] == "low_legibility_image"
+    assert out["allow_llm_inference"] is False
+    assert out["honest_failure_message"]

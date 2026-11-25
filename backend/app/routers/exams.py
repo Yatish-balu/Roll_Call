@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, joinedload
 
 from app.auth import Role, get_current_user, require_roles
-from app.db.models import Exam, ExamSeating, RoomAssignment, User
+from app.db.models import Exam, ExamSeating, RoomAssignment, User, Student, TimetableEntry
 from app.dependencies import get_db
 from app.schemas.auth import AuthenticatedUser
 from app.schemas.exams import (
@@ -90,8 +90,14 @@ def _is_jit_masked(exam: Exam, current_user: AuthenticatedUser) -> tuple[bool, O
 
 
 def _get_cutoff_dt(exam: Exam) -> tuple[Optional[datetime], Optional[str]]:
-    """Compute Form-B submission cutoff timestamp."""
+    """Compute Form-B submission cutoff timestamp.
+
+    When cutoff_minutes is 0 (demo mode) the cutoff is disabled – returns
+    ``None`` so that no LATE_LOCKED status is applied.
+    """
     try:
+        if exam.cutoff_minutes == 0:
+            return None, None
         date_parts = [int(p) for p in exam.date.split("-")]
         time_clean = exam.start_time.split("Z")[0].split("+")[0].strip()
         time_parts = [int(p) for p in time_clean.split(":")[:2]]
@@ -100,7 +106,7 @@ def _get_cutoff_dt(exam: Exam) -> tuple[Optional[datetime], Optional[str]]:
             time_parts[0], time_parts[1],
             tzinfo=timezone.utc,
         )
-        cutoff_dt = start_dt + timedelta(minutes=exam.cutoff_minutes or 30)
+        cutoff_dt = start_dt + timedelta(minutes=exam.cutoff_minutes)
         return cutoff_dt, cutoff_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     except Exception as e:
         logger.debug("Failed to calculate cutoff datetime: %s", e)
@@ -108,7 +114,23 @@ def _get_cutoff_dt(exam: Exam) -> tuple[Optional[datetime], Optional[str]]:
 
 
 def _check_and_update_cutoff(exam: Exam, assignment: RoomAssignment, db: Optional[Session] = None) -> str:
-    """If submission cutoff window has passed and Form-B is not SUBMITTED, lock as LATE_LOCKED."""
+    """If submission cutoff window has passed and Form-B is not SUBMITTED, lock it.
+
+    Demo mode is identified by ``cutoff_minutes == 0``: the lock is disabled and
+    any legacy ``LATE_LOCKED`` room is reset to ``OPEN``.  Exams configured with
+    a real cutoff window (CIE 30 min / SEE 45 min) keep the original enforcement
+    so the audit/security contract remains intact.
+    """
+    if exam.cutoff_minutes == 0:
+        if assignment.status == "LATE_LOCKED":
+            assignment.status = "OPEN"
+            if db:
+                try:
+                    db.commit()
+                except Exception:
+                    pass
+        return assignment.status
+
     if assignment.status in ("SUBMITTED", "LATE_LOCKED"):
         return assignment.status
 
@@ -230,6 +252,51 @@ def create_exam(
     db.add(exam)
     db.commit()
     db.refresh(exam)
+
+    # Initialize room assignments and Form-B student rosters if initial rooms provided
+    if payload.rooms:
+        for r_no in payload.rooms:
+            clean_r = str(r_no).strip().upper()
+            if clean_r:
+                existing_r = (
+                    db.query(RoomAssignment)
+                    .filter(RoomAssignment.exam_id == exam.exam_id, RoomAssignment.room_no == clean_r)
+                    .first()
+                )
+                if not existing_r:
+                    db.add(RoomAssignment(
+                        exam_id=exam.exam_id,
+                        room_no=clean_r,
+                        capacity=30,
+                        status="OPEN",
+                    ))
+        db.commit()
+
+        # Auto-populate Form-B student seating if students exist for this semester/branch
+        sem_id = f"SEM-{payload.semester}" if payload.semester else None
+        st_query = db.query(Student)
+        if sem_id:
+            st_query = st_query.filter(Student.semester_id == sem_id)
+        if payload.department:
+            st_query = st_query.filter(Student.branch == payload.department.upper())
+        st_list = st_query.order_by(Student.usn.asc()).all()
+
+        if st_list:
+            num_rooms = len(payload.rooms)
+            for idx, st in enumerate(st_list):
+                room_target = payload.rooms[idx % num_rooms].strip().upper()
+                db.add(ExamSeating(
+                    exam_id=exam.exam_id,
+                    room_no=room_target,
+                    sl_no=idx + 1,
+                    usn=st.usn,
+                    name=st.name,
+                    branch=st.branch,
+                    subject_code=payload.subject_code,
+                    seat_no=f"D-{(idx // num_rooms) + 1}",
+                    status="PRESENT",
+                ))
+            db.commit()
 
     log_security_event(
         "exam_created",
@@ -428,6 +495,78 @@ async def upload_seating_csv(
     }
 
 
+@router.get("/{exam_id}/invigilator-candidates", summary="Get faculty invigilator candidates with timetable conflict detection")
+def get_invigilator_candidates(
+    exam_id: str,
+    current_user: AuthenticatedUser = Depends(require_roles(Role.ADMIN)),
+    db: Session = Depends(get_db),
+):
+    exam = db.get(Exam, exam_id)
+    if not exam:
+        raise HTTPException(status_code=404, detail="Exam not found.")
+
+    exam_weekday = "Monday"
+    try:
+        dt = datetime.strptime(exam.date, "%Y-%m-%d")
+        exam_weekday = dt.strftime("%A")
+    except Exception:
+        pass
+
+    # Get already assigned invigilators for this exam
+    assignments = db.query(RoomAssignment).filter(RoomAssignment.exam_id == exam_id).all()
+    assigned_map = {r.invigilator_id: r.room_no for r in assignments if r.invigilator_id}
+
+    # Fetch all faculty users
+    faculty_users = db.query(User).filter(User.role == Role.FACULTY.value).all()
+
+    # Fetch timetable entries on this weekday
+    day_entries = (
+        db.query(TimetableEntry)
+        .filter(TimetableEntry.day_of_week == exam_weekday)
+        .all()
+    )
+
+    candidates = []
+    e_start = exam.start_time[:5]
+    e_end = exam.end_time[:5]
+
+    for f in faculty_users:
+        teacher_entries = [e for e in day_entries if e.faculty_id == f.user_id]
+        conflict_msg = None
+        has_conflict = False
+
+        for te in teacher_entries:
+            te_start = te.start_time[:5]
+            te_end = te.end_time[:5]
+            if te_start < e_end and te_end > e_start:
+                has_conflict = True
+                conflict_msg = f"Period {te.period_number} ({te.start_time}-{te.end_time}): {te.subject_code} in {te.room_id}"
+                break
+
+        already_room = assigned_map.get(f.user_id)
+        is_assigned = bool(already_room)
+
+        priority = 0
+        if is_assigned:
+            priority = 2
+        elif has_conflict:
+            priority = 1
+
+        candidates.append({
+            "user_id": f.user_id,
+            "name": f.name or f.user_id,
+            "has_timetable_conflict": has_conflict,
+            "conflict_details": conflict_msg,
+            "is_already_assigned": is_assigned,
+            "assigned_room": already_room,
+            "is_recommended": not has_conflict and not is_assigned,
+            "priority": priority,
+        })
+
+    candidates.sort(key=lambda c: (c["priority"], c["name"]))
+    return candidates
+
+
 @router.post("/{exam_id}/rooms/{room_no}/assign", response_model=RoomAssignmentOut, summary="Assign invigilator and block to a room")
 def assign_room_invigilator(
     exam_id: str,
@@ -553,10 +692,15 @@ def mark_room_attendance(
 
     # Check cutoff timer and lock
     current_status = _check_and_update_cutoff(assignment.exam, assignment, db)
-    if current_status in ("SUBMITTED", "LATE_LOCKED") and current_user.role != Role.ADMIN.value:
+    if current_status == "LATE_LOCKED" and current_user.role != Role.ADMIN.value:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Room Form-B is already {current_status} and cannot be modified by invigilator. Contact Admin for override.",
+            detail="Room Form-B is LATE_LOCKED: the Form-B submission cutoff time expired. Contact Admin for override.",
+        )
+    if current_status == "SUBMITTED" and current_user.role != Role.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Room Form-B is already SUBMITTED to Exam Cell and cannot be modified. Contact Admin for override.",
         )
 
     now_iso = _utcnow_iso()
@@ -619,10 +763,15 @@ async def scan_form_b_photo(
         raise HTTPException(status_code=403, detail="Access denied.")
 
     current_status = _check_and_update_cutoff(assignment.exam, assignment, db)
-    if current_status in ("SUBMITTED", "LATE_LOCKED") and current_user.role != Role.ADMIN.value:
+    if current_status == "LATE_LOCKED" and current_user.role != Role.ADMIN.value:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Room Form-B is {current_status} and cannot be modified by invigilator. Contact Admin for override.",
+            detail="Room Form-B is LATE_LOCKED: the submission cutoff time expired. Contact Admin for override.",
+        )
+    if current_status == "SUBMITTED" and current_user.role != Role.ADMIN.value:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Room Form-B is already SUBMITTED. Contact Admin for override.",
         )
 
     contents = await file.read()
@@ -816,6 +965,56 @@ def submit_form_b(
     assignment.status = "SUBMITTED"
     assignment.submitted_at = now_iso
     assignment.submitted_by = current_user.user_id
+
+    # Mirror Form-B attendance marks into core attendance table for database transparency
+    try:
+        from app.db.models import Attendance, Room as DbRoom, Session as DbSession, Student as DbStudent
+        seating_rows = db.query(ExamSeating).filter(
+            ExamSeating.exam_id == exam_id,
+            ExamSeating.room_no == assignment.room_no,
+        ).all()
+        session_code = f"EXAM-{exam_id}-{assignment.room_no}"
+        if seating_rows and not db.get(DbSession, session_code):
+            # The core attendance table has FKs to sessions/rooms/students;
+            # create the mirrored parents once before linking Form-B rows.
+            db.add(DbSession(
+                session_id=session_code,
+                date=assignment.exam.date,
+                subject=assignment.exam.subject_code or assignment.exam.name,
+                subject_code=assignment.exam.subject_code,
+                created_at=now_iso,
+            ))
+            db.flush()
+        if seating_rows and not db.get(DbRoom, assignment.room_no):
+            db.add(DbRoom(room_id=assignment.room_no, name=assignment.room_no))
+            db.flush()
+        for s in seating_rows:
+            if not db.get(DbStudent, s.usn):
+                db.add(DbStudent(
+                    usn=s.usn,
+                    name=getattr(s, "name", None) or s.usn,
+                    branch=getattr(s, "branch", None) or "GENERAL",
+                ))
+        db.flush()
+        for s in seating_rows:
+            existing_att = db.query(Attendance).filter(
+                Attendance.session_id == session_code,
+                Attendance.usn == s.usn,
+            ).first()
+            if not existing_att:
+                att_record = Attendance(
+                    session_id=session_code,
+                    usn=s.usn,
+                    room_id=assignment.room_no,
+                    status=s.status or "PRESENT",
+                    source="FORM_B",
+                    confidence=1.0,
+                )
+                db.add(att_record)
+            else:
+                existing_att.status = s.status or "PRESENT"
+    except Exception as att_exc:
+        logger.warning("Mirroring Form-B to attendance table failed: %s", att_exc)
 
     # Emit audit log
     log_security_event(

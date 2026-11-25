@@ -162,11 +162,53 @@ function getContextualActions(m: ChatMessage): ContextAction[] {
   const lower = text.toLowerCase();
   const actions: ContextAction[] = [];
 
-  // Form-B Exam Attendance Sheet
-  if (lower.includes("form-b") || lower.includes("exam attendance")) {
+  // Student Record / Person Lookup (e.g. "Student Record for YATISH BALU", USN match)
+  const usnMatch = text.match(/\b(1DS\d{2}[A-Z]{2}\d{3})\b/i);
+  if (lower.includes("student record for") || usnMatch) {
+    const usnVal = usnMatch ? usnMatch[1].toUpperCase() : "";
+    const nameMatch = text.match(/Student Record for ([^\n:]+)/i);
+    const targetName = nameMatch ? nameMatch[1].trim() : usnVal;
     return [
-      { label: "📝 Open Exam Hall Module", prompt: "", variant: "primary", href: "/exams" },
-      { label: "📋 My Invigilation Rooms", prompt: "", href: "/invigilation" },
+      {
+        label: `📋 ${targetName ? targetName.split(" ")[0] : "Student"}'s Attendance`,
+        prompt: usnVal ? `Show attendance records for ${usnVal}` : `Show attendance records for ${targetName}`,
+        variant: "primary",
+      },
+      {
+        label: "⚠️ Defaulter Shortage Check",
+        prompt: usnVal ? `Check if student ${usnVal} is below 75% attendance` : "List students with attendance below 75%",
+      },
+      {
+        label: "👥 List 5th Sem Students",
+        prompt: "list 5th sem students",
+      },
+    ];
+  }
+
+  // Student Semester Roster (e.g. "Found 66 students in 5th Semester")
+  if (lower.includes("students in") && (lower.includes("semester") || lower.includes("sem"))) {
+    return [
+      { label: "⚠️ Semester Defaulters (<75%)", prompt: "List students in 5th semester with attendance below 75%", variant: "primary" },
+      { label: "📅 Class Timetable", prompt: "Show timetable for 5th semester" },
+      { label: "📊 Overall Attendance", prompt: "Summarize today's overall attendance" },
+    ];
+  }
+
+  // Department Inquiry Response
+  if (lower.includes("department profile for") || (lower.includes("department") && lower.includes("institution"))) {
+    return [
+      { label: "📅 My Teaching Schedule", prompt: "Show my class schedule for today", variant: "primary" },
+      { label: "👥 List Department Students", prompt: "list 5th sem students" },
+      { label: "🚪 Find Vacant Rooms", prompt: "Find vacant classrooms right now" },
+    ];
+  }
+
+  // Form-B Exam Attendance Sheet
+  if (lower.includes("form-b") || lower.includes("exam attendance") || lower.includes("invigilation")) {
+    return [
+      { label: "📝 Open Form-B Sheet", prompt: "", variant: "primary", href: "/invigilation" },
+      { label: "🏢 All Exam Rooms (CIE)", prompt: "", href: "/exams" },
+      { label: "📑 Download Absentees", prompt: "Download Form-B absentees PDF for current exam" },
     ];
   }
 

@@ -266,6 +266,50 @@ def agent_chat(
     # Execute the AttendanceAgent with verified database queries and guardrails.
     # It returns a structured response (message, success, data, tool_calls,
     # needs_confirmation, confirmation_request) that the contract tests rely on.
+    from app.agent.gatekeeper import evaluate_user_intent, GATEKEEPER_DOMAIN_REFUSAL, GATEKEEPER_SECURITY_REFUSAL
+    from app.agent.orchestrator import _run_coroutine_sync
+    from app.agent.guardrails import validate_agent_output
+
+    gk_decision = _run_coroutine_sync(evaluate_user_intent(contextual_query, user_role=role_str.lower()))
+    req_id = str(uuid.uuid4())
+
+    if gk_decision.decision in ("OUT_OF_SCOPE", "PROMPT_INJECTION"):
+        refusal = gk_decision.refusal_message or (
+            GATEKEEPER_DOMAIN_REFUSAL if gk_decision.decision == "OUT_OF_SCOPE" else GATEKEEPER_SECURITY_REFUSAL
+        )
+        return {
+            "request_id": req_id,
+            "message": refusal,
+            "success": True,
+            "needs_confirmation": False,
+            "data": [],
+            "tool_calls": [],
+        }
+
+    from app.agent.legacy_agent import _is_confirmation_input, _is_cancellation_input
+
+    effective_query = getattr(gk_decision, "normalized_intent", "").strip() or contextual_query
+    clean_check = effective_query.lower()
+    is_direct_query = (
+        (any(w in clean_check for w in ["department", "dept"]) and any(w in clean_check for w in ["work", "belong", "which", "my", "where", "in which"]))
+        or any(w in clean_check for w in ["who is", "usn of", "what usn", "which usn", "what is the usn"])
+        or _is_confirmation_input(clean_check)
+        or _is_cancellation_input(clean_check)
+        or "mobile" in clean_check
+        or "session" in clean_check
+        or any(w in clean_check for w in ["profile", "attendance summary", "overall attendance", "vacant", "schedule", "defaulter"])
+    )
+
+    if not is_direct_query and getattr(gk_decision, "needs_clarification", False) and getattr(gk_decision, "clarification_question", None):
+        return {
+            "request_id": req_id,
+            "message": gk_decision.clarification_question,
+            "success": True,
+            "needs_confirmation": False,
+            "data": [],
+            "tool_calls": [],
+        }
+
     agent = AttendanceAgent(
         db_target=db,
         scope=scope,
@@ -275,9 +319,36 @@ def agent_chat(
         actor_name=actor_name,
         assigned_subjects=assigned_subs,
     )
-    req_id = str(uuid.uuid4())
-    resp = agent.process_request(user_input=contextual_query, request_id=req_id)
-    return resp.to_dict()
+    try:
+        resp = agent.process_request(
+            user_input=effective_query,
+            request_id=req_id,
+            gatekeeper_decision=gk_decision,
+        )
+        out_check = validate_agent_output(
+            resp.message or "",
+            tool_called=bool(resp.tool_calls),
+            gatekeeper_decision=gk_decision,
+        )
+        if not out_check.allowed or out_check.sanitized_response:
+            resp.message = out_check.sanitized_response
+        return resp.to_dict()
+    except Exception as exc:  # pragma: no cover - defensive boundary
+        # A malformed query or a data/backend hiccup must never surface as a
+        # bare HTTP 500 in the chat UI. Log the details server-side and return
+        # a structured, non-hallucinating response the frontend can render.
+        logger.exception("Agent chat failed for actor %s: %s", current_user.user_id, exc)
+        return {
+            "request_id": req_id,
+            "message": (
+                "I couldn't complete that request right now. Please try again "
+                "or rephrase your question about attendance, schedules, or students."
+            ),
+            "success": False,
+            "needs_confirmation": False,
+            "data": [],
+            "tool_calls": [],
+        }
 
 
 # ==============================================================================

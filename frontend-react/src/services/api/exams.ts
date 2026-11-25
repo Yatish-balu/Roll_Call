@@ -4,7 +4,7 @@
 
 import { apiClient } from "./client";
 
-export type ExamType = "THEORY_CIE" | "LAB_CIE" | "LAB_EXTERNAL" | "THEORY_SEE";
+export type ExamType = "THEORY_CIE" | "MID_TERM" | "LAB_CIE" | "LAB_EXTERNAL" | "THEORY_SEE";
 export type RoomStatus = "SCHEDULED" | "OPEN" | "SUBMITTED" | "LATE_LOCKED";
 
 export interface ExamCreatePayload {
@@ -19,6 +19,7 @@ export interface ExamCreatePayload {
   cutoff_minutes?: number;
   subject_code: string;
   subject_name?: string;
+  rooms?: string[];
 }
 
 export interface ExamItem {
@@ -197,6 +198,16 @@ export interface FormBScanResult {
   };
 }
 
+/**
+ * Demo mode: Form-B cutoffs are disabled server-side (cutoff_minutes = 0).
+ * Any legacy LATE_LOCKED assignment is normalised to OPEN so the UI never
+ * shows a lock that can no longer be produced.
+ */
+function normalizeRoom<T extends { status: RoomStatus; cutoff_at?: string }>(room: T): T {
+  if (room.status !== "LATE_LOCKED") return room;
+  return { ...room, status: "OPEN", cutoff_at: undefined };
+}
+
 export const examsApi = {
   // Admin Endpoints
   async listExams(params?: { date?: string; exam_type?: string }): Promise<ExamItem[]> {
@@ -229,13 +240,15 @@ export const examsApi = {
   },
 
   async listExamRooms(examId: string): Promise<RoomAssignmentItem[]> {
-    return apiClient.get<RoomAssignmentItem[]>(`/api/v1/exams/${encodeURIComponent(examId)}/rooms`);
+    const rooms = await apiClient.get<RoomAssignmentItem[]>(`/api/v1/exams/${encodeURIComponent(examId)}/rooms`);
+    return rooms.map(normalizeRoom);
   },
 
   async getRoomAssignment(examId: string, roomNo: string): Promise<RoomAssignmentItem> {
-    return apiClient.get<RoomAssignmentItem>(
+    const room = await apiClient.get<RoomAssignmentItem>(
       `/api/v1/exams/${encodeURIComponent(examId)}/rooms/${encodeURIComponent(roomNo)}`
     );
+    return normalizeRoom(room);
   },
 
   async assignRoomInvigilator(
@@ -250,10 +263,24 @@ export const examsApi = {
       coordinator_id?: string;
     }
   ): Promise<RoomAssignmentItem> {
-    return apiClient.post<RoomAssignmentItem>(
+    const room = await apiClient.post<RoomAssignmentItem>(
       `/api/v1/exams/${encodeURIComponent(examId)}/rooms/${encodeURIComponent(roomNo)}/assign`,
-      payload
+      { room_no: roomNo, ...payload }
     );
+    return normalizeRoom(room);
+  },
+
+  async getInvigilatorCandidates(examId: string): Promise<Array<{
+    user_id: string;
+    name: string;
+    has_timetable_conflict: boolean;
+    conflict_details?: string;
+    is_already_assigned: boolean;
+    assigned_room?: string;
+    is_recommended: boolean;
+    priority: number;
+  }>> {
+    return apiClient.get(`/api/v1/exams/${encodeURIComponent(examId)}/invigilator-candidates`);
   },
 
   async adminOverrideRoom(
@@ -269,7 +296,8 @@ export const examsApi = {
 
   // Invigilator Endpoints
   async getMyAssignedRooms(): Promise<RoomAssignmentItem[]> {
-    return apiClient.get<RoomAssignmentItem[]>("/api/v1/exams/my-rooms");
+    const rooms = await apiClient.get<RoomAssignmentItem[]>("/api/v1/exams/my-rooms");
+    return rooms.map(normalizeRoom);
   },
 
   async getRoomRoster(examId: string, roomNo: string): Promise<ExamSeatingItem[]> {
@@ -313,9 +341,10 @@ export const examsApi = {
 
   // Summaries & PDF Exports
   async getRoomWiseSummary(examId: string): Promise<RoomSummaryItem[]> {
-    return apiClient.get<RoomSummaryItem[]>(
+    const rooms = await apiClient.get<RoomSummaryItem[]>(
       `/api/v1/exams/${encodeURIComponent(examId)}/summary/room-wise`
     );
+    return rooms.map((r) => ({ ...r, status: r.status === "LATE_LOCKED" ? "OPEN" : r.status }));
   },
 
   async getBranchWiseSummary(examId: string): Promise<BranchSummaryItem[]> {

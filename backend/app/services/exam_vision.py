@@ -27,6 +27,14 @@ PREFERRED_MODELS = (
 VISION_MODEL_ATTEMPTS = 2
 
 
+def _looks_like_timeout(exc: BaseException) -> bool:
+    """Recognise timeout/deadline failures across SDK and HTTP error types."""
+    name = type(exc).__name__.lower()
+    text = str(exc).lower()
+    markers = ("timeout", "timed out", "deadline", "deadlineexceeded", "504")
+    return ("timeout" in name or "deadline" in name) or any(m in text for m in markers)
+
+
 class ExamScanResultList(list):
     """List subclass that retains extracted metadata (tally, detected columns)
 
@@ -39,11 +47,50 @@ class ExamScanResultList(list):
         tally: Optional[Dict[str, Any]] = None,
         detected_columns: Optional[List[Dict[str, Any]]] = None,
         target_column_matched: Optional[Dict[str, Any]] = None,
+        extraction_status: str = "unreadable",
+        extraction_confidence: float = 0.0,
+        extracted_chars: int = 0,
+        extraction_error: Optional[str] = None,
+        honest_failure_message: Optional[str] = None,
+        allow_llm_inference: bool = False,
     ):
         super().__init__(rows or [])
         self.tally = tally or {}
         self.detected_columns = detected_columns or []
         self.target_column_matched = target_column_matched or {}
+        self.extraction_status = extraction_status
+        self.extraction_confidence = extraction_confidence
+        self.extracted_chars = extracted_chars
+        self.extraction_error = extraction_error
+        self.honest_failure_message = honest_failure_message
+        self.allow_llm_inference = allow_llm_inference
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "records": list(self),
+            "tally": self.tally,
+            "detected_columns": self.detected_columns,
+            "target_column_matched": self.target_column_matched,
+            "extraction_status": self.extraction_status,
+            "extraction_confidence": self.extraction_confidence,
+            "extracted_chars": self.extracted_chars,
+            "extraction_error": self.extraction_error,
+            "honest_failure_message": self.honest_failure_message,
+            "allow_llm_inference": self.allow_llm_inference,
+        }
+
+
+def _unreadable_scan(
+    code: str, message: str, **kwargs: Any
+) -> ExamScanResultList:
+    """Return an explicit failure list rather than a silent empty success."""
+    return ExamScanResultList(
+        extraction_status="unreadable",
+        extraction_error=code,
+        honest_failure_message=message,
+        allow_llm_inference=False,
+        **kwargs,
+    )
 
 
 def build_exam_form_b_prompt(
@@ -141,7 +188,11 @@ def scan_form_b_image(
     api_key = os.getenv("GEMINI_API_KEY", "").strip()
     if not api_key:
         logger.warning("GEMINI_API_KEY not configured. Cannot run vision scan.")
-        return ExamScanResultList()
+        return _unreadable_scan(
+            "vision_unavailable",
+            "The vision service is not configured on the server, so the Form-B "
+            "photo cannot be read right now. Please mark attendance manually.",
+        )
 
     # 1. Preprocess and normalize image (orientation, contrast, bounded scaling)
     processed_bytes = image_bytes
@@ -174,6 +225,7 @@ def scan_form_b_image(
     # same models through a second SDK only doubled the wait.
     raw_response_text = None
     last_err = None
+    timed_out = False
     modern_sdk_available = False
 
     try:
@@ -203,6 +255,8 @@ def scan_form_b_image(
             except Exception as exc:
                 last_err = exc
                 err_str = str(exc)
+                if _looks_like_timeout(exc):
+                    timed_out = True
                 if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
                     logger.warning("Model %s hit rate-limit (429), switching to next model.", model_name)
                 else:
@@ -228,13 +282,25 @@ def scan_form_b_image(
                         break
                 except Exception as exc:
                     last_err = exc
+                    if _looks_like_timeout(exc):
+                        timed_out = True
                     logger.debug("Legacy genai model %s failed: %s", model_name, exc)
         except Exception as legacy_err:
             logger.error("Failed to run legacy genai: %s", legacy_err)
 
     if not raw_response_text:
         logger.error("All Gemini vision models failed for Form-B scan: %s", last_err)
-        return ExamScanResultList()
+        if timed_out:
+            return _unreadable_scan(
+                "vision_timeout",
+                "The Form-B photo scan timed out before any student rows could be "
+                "read. Please retry, or upload a smaller, sharper photo.",
+            )
+        return _unreadable_scan(
+            "vision_failed",
+            "The Form-B photo could not be scanned. Please retry, or mark the "
+            "attendance manually.",
+        )
 
     # Parse JSON output
     cleaned_text = raw_response_text
@@ -252,9 +318,17 @@ def scan_form_b_image(
             try:
                 parsed = json.loads(match.group(1))
             except Exception:
-                return ExamScanResultList()
+                return _unreadable_scan(
+                    "malformed_vision_response",
+                    "The vision service returned an unreadable response for this photo. "
+                    "Please retry the scan.",
+                )
         else:
-            return ExamScanResultList()
+            return _unreadable_scan(
+                "malformed_vision_response",
+                "The vision service returned an unreadable response for this photo. "
+                "Please retry the scan.",
+            )
 
     tally_data = {}
     detected_cols = []
@@ -282,9 +356,41 @@ def scan_form_b_image(
                 "confidence": float(item.get("confidence", 0.9)),
             })
 
+    if not valid_rows:
+        return _unreadable_scan(
+            "no_rows_detected",
+            "No student rows could be read from the Form-B photo. Please re-scan "
+            "with the full sheet in frame and good lighting.",
+            tally=tally_data,
+            detected_columns=detected_cols,
+            target_column_matched=target_matched,
+        )
+
+    confidences = [float(row.get("confidence", 0.0)) for row in valid_rows]
+    mean_conf = round(sum(confidences) / len(confidences), 3) if confidences else 0.0
+    uncertain = [
+        row for row in valid_rows
+        if float(row.get("confidence", 0.0)) < 0.70 or row.get("status") == "UNREVIEWED"
+    ]
+    status = "partial" if uncertain else "ok"
+    message = None
+    if status == "partial":
+        message = (
+            f"{len(uncertain)} of {len(valid_rows)} scanned rows are low-confidence "
+            "and need invigilator review."
+        )
+
     return ExamScanResultList(
         rows=valid_rows,
         tally=tally_data,
         detected_columns=detected_cols,
         target_column_matched=target_matched,
+        extraction_status=status,
+        extraction_confidence=mean_conf,
+        extracted_chars=sum(
+            len(str(row.get("usn", ""))) + len(str(row.get("name", ""))) + len(str(row.get("status", "")))
+            for row in valid_rows
+        ),
+        honest_failure_message=message,
+        allow_llm_inference=True,
     )

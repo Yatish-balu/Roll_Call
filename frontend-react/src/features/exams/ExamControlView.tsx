@@ -5,10 +5,12 @@ import { useNavigate } from "react-router-dom";
 import {
   examsApi,
   type ExamItem,
+  type ExamType,
   type RoomSummaryItem,
   type BranchSummaryItem,
   type MultiExamConsolidationResponse,
 } from "@/services/api/exams";
+import { apiClient } from "@/services/api/client";
 import { useAuth } from "@/hooks/useAuth";
 import { RoomCard } from "./components/RoomCard";
 import { BranchSummaryTable } from "./components/BranchSummaryTable";
@@ -38,6 +40,177 @@ export function ExamControlView() {
   const [overrideStatus, setOverrideStatus] = useState<"OPEN" | "SUBMITTED">("OPEN");
   const [isSubmittingOverride, setIsSubmittingOverride] = useState(false);
   const [overrideMsg, setOverrideMsg] = useState<string | null>(null);
+
+  // Admin Invigilator Assignment Modal state
+  const [assignModalRoomNo, setAssignModalRoomNo] = useState<string | null>(null);
+  const [selectedTeacherId, setSelectedTeacherId] = useState<string>("");
+  const [isAssigning, setIsAssigning] = useState(false);
+  const [candidates, setCandidates] = useState<Array<{
+    user_id: string;
+    name: string;
+    has_timetable_conflict: boolean;
+    conflict_details?: string;
+    is_already_assigned: boolean;
+    assigned_room?: string;
+    is_recommended: boolean;
+    priority: number;
+  }>>([]);
+  const [isLoadingCandidates, setIsLoadingCandidates] = useState(false);
+
+  const DEFAULT_FACULTY = [
+    { id: "pallavi", name: "Dr. Pallavi Kulkarni (CY)" },
+    { id: "mangala", name: "Mangala L (CY)" },
+    { id: "shankar", name: "Dr. Shankar Gowda (CY)" },
+    { id: "test_faculty", name: "Prof. Faculty (Faculty Demo)" },
+  ];
+
+  // Fetch candidates with live timetable conflict analysis
+  useEffect(() => {
+    async function loadCandidates() {
+      if (!selectedExamId || !assignModalRoomNo) return;
+      setIsLoadingCandidates(true);
+      try {
+        const list = await examsApi.getInvigilatorCandidates(selectedExamId);
+        setCandidates(list);
+        const rec = list.find((c) => c.is_recommended);
+        if (rec) {
+          setSelectedTeacherId(rec.user_id);
+        } else if (list.length > 0) {
+          setSelectedTeacherId(list[0].user_id);
+        }
+      } catch (e) {
+        console.warn("Could not load invigilator candidates with conflicts", e);
+      } finally {
+        setIsLoadingCandidates(false);
+      }
+    }
+    loadCandidates();
+  }, [selectedExamId, assignModalRoomNo]);
+
+  // Admin Exam Sitting Creation Modal State (Points: Semester, CIE, Mid, Lab, SEE)
+  const [isCreateExamOpen, setIsCreateExamOpen] = useState(false);
+  const [createExamType, setCreateExamType] = useState<ExamType>("THEORY_CIE");
+  const [createSemester, setCreateSemester] = useState<number>(5);
+  const [createDept, setCreateDept] = useState("CY");
+  const [createSubjectCode, setCreateSubjectCode] = useState("22CY52");
+  const [createSubjectName, setCreateSubjectName] = useState("Computer Networks");
+  const [createExamName, setCreateExamName] = useState("5th Sem CIE-2 Cyber Security");
+  const [createDate, setCreateDate] = useState(() => new Date().toISOString().split("T")[0]);
+  const [createStartTime, setCreateStartTime] = useState("09:30");
+  const [createEndTime, setCreateEndTime] = useState("11:00");
+  const [createRooms, setCreateRooms] = useState("CDS-105, CDS-106");
+  const [isSubmittingCreate, setIsSubmittingCreate] = useState(false);
+
+  // Standard Department Subjects reference
+  const DEPARTMENT_SUBJECTS: Record<number, Array<{ code: string; name: string }>> = {
+    3: [
+      { code: "22CY31", name: "Data Structures & Applications" },
+      { code: "22CY32", name: "Digital Design & Computer Organization" },
+      { code: "22CY33", name: "Operating Systems Principles" },
+    ],
+    5: [
+      { code: "22CY51", name: "Software Engineering & Architecture" },
+      { code: "22CY52", name: "Computer Networks & Protocols" },
+      { code: "22CY53", name: "Database Systems & Administration" },
+      { code: "22CY54", name: "Theory of Computation" },
+    ],
+    7: [
+      { code: "22CY71", name: "Applied Cryptography & Network Security" },
+      { code: "22CY72", name: "Cloud Infrastructure & Application Security" },
+      { code: "22HS71A", name: "Constitution of India, Ethics & Cyber Law" },
+    ],
+  };
+
+  const handleSemesterChange = (sem: number) => {
+    setCreateSemester(sem);
+    const subs = DEPARTMENT_SUBJECTS[sem];
+    if (subs && subs.length > 0) {
+      setCreateSubjectCode(subs[0].code);
+      setCreateSubjectName(subs[0].name);
+      setCreateExamName(`${sem}th Sem ${getExamTypeLabel(createExamType)} ${subs[0].code}`);
+    } else {
+      setCreateExamName(`${sem}th Sem ${getExamTypeLabel(createExamType)} Examination`);
+    }
+  };
+
+  const getExamTypeLabel = (type: ExamType) => {
+    switch (type) {
+      case "THEORY_CIE": return "Internal Assessment (CIE)";
+      case "MID_TERM": return "Mid-Term Examination";
+      case "LAB_CIE": return "Laboratory Practical CIE";
+      case "THEORY_SEE": return "Semester End Exam (SEE Theory)";
+      case "LAB_EXTERNAL": return "SEE Lab Practical Exam";
+      default: return "Examination";
+    }
+  };
+
+  const handleCreateExamSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!createExamName.trim() || !createSubjectCode.trim() || !createDate) {
+      alert("Please fill all required exam details.");
+      return;
+    }
+    const cleanExamId = `EXAM-${createDate.replace(/-/g, "")}-${createSubjectCode.replace(/[^A-Za-z0-9]/g, "")}-${createExamType.slice(0, 3)}`;
+    const parsedRooms = createRooms
+      .split(/[,;\s]+/)
+      .map((r) => r.trim().toUpperCase())
+      .filter(Boolean);
+
+    try {
+      setIsSubmittingCreate(true);
+      const newExam = await examsApi.createExam({
+        exam_id: cleanExamId,
+        name: createExamName.trim(),
+        exam_type: createExamType,
+        semester: Number(createSemester),
+        department: createDept.trim().toUpperCase(),
+        date: createDate,
+        start_time: createStartTime,
+        end_time: createEndTime,
+        cutoff_minutes: 0, // Demo mode: cutoff disabled
+        subject_code: createSubjectCode.trim().toUpperCase(),
+        subject_name: createSubjectName.trim(),
+        rooms: parsedRooms,
+      });
+
+      setOverrideMsg(
+        `Exam Sitting '${newExam.name}' (${newExam.exam_id}) created successfully with Form-B attendance sheets for rooms: ${parsedRooms.join(", ") || "No rooms specified"}.`
+      );
+      setIsCreateExamOpen(false);
+      await loadExams();
+      setSelectedExamId(newExam.exam_id);
+    } catch (err: unknown) {
+      alert("Failed to schedule exam: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsSubmittingCreate(false);
+    }
+  };
+
+  // Handle Invigilator Assignment
+  const handleAssignSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedExamId || !assignModalRoomNo || !selectedTeacherId) {
+      alert("Please select a faculty invigilator to assign to this exam room.");
+      return;
+    }
+    try {
+      setIsAssigning(true);
+      await examsApi.assignRoomInvigilator(selectedExamId, assignModalRoomNo, {
+        invigilator_id: selectedTeacherId,
+      });
+      const teacherName =
+        candidates.find((c) => c.user_id === selectedTeacherId)?.name ||
+        DEFAULT_FACULTY.find((f) => f.id === selectedTeacherId)?.name ||
+        selectedTeacherId;
+      setOverrideMsg(`Successfully assigned ${teacherName} to Room ${assignModalRoomNo} for exam ${selectedExamId}.`);
+      setAssignModalRoomNo(null);
+      await loadSummaries(selectedExamId);
+    } catch (err: unknown) {
+      alert("Assignment failed: " + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsAssigning(false);
+    }
+  };
 
   // Load initial exams
   const loadExams = useCallback(async () => {
@@ -164,20 +337,32 @@ export function ExamControlView() {
         </div>
 
         {activeTab === "rooms" && (
-          <div className="flex items-center gap-3">
-            <label htmlFor="exam-select" className="text-xs font-semibold text-gray-600">Select Exam:</label>
-            <select
-              id="exam-select"
-              value={selectedExamId}
-              onChange={(e) => setSelectedExamId(e.target.value)}
-              className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 shadow-sm focus:border-[#3F451F] focus:outline-none"
-            >
-              {exams.map((ex) => (
-                <option key={ex.exam_id} value={ex.exam_id}>
-                  {ex.name} ({ex.exam_id})
-                </option>
-              ))}
-            </select>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex items-center gap-2">
+              <label htmlFor="exam-select" className="text-xs font-semibold text-gray-600">Select Exam:</label>
+              <select
+                id="exam-select"
+                value={selectedExamId}
+                onChange={(e) => setSelectedExamId(e.target.value)}
+                className="rounded-xl border border-gray-300 bg-white px-3 py-2 text-sm font-medium text-gray-800 shadow-sm focus:border-[#3F451F] focus:outline-none"
+              >
+                {exams.map((ex) => (
+                  <option key={ex.exam_id} value={ex.exam_id}>
+                    {ex.name} ({ex.exam_id})
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            {isAdmin && (
+              <button
+                type="button"
+                onClick={() => setIsCreateExamOpen(true)}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-[#3F451F] text-white text-xs font-semibold shadow hover:bg-[#343919] transition-colors whitespace-nowrap"
+              >
+                <span>➕</span> Schedule Exam Sitting
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -243,7 +428,7 @@ export function ExamControlView() {
                   </div>
                   <h3 className="text-lg font-bold text-gray-900 mt-1">{selectedExam.name}</h3>
                   <p className="text-xs text-gray-600">
-                    Date: <strong>{selectedExam.date}</strong> · Time: <strong>{selectedExam.start_time} - {selectedExam.end_time}</strong> · Cutoff: <strong>{selectedExam.cutoff_minutes} mins</strong>
+                    Date: <strong>{selectedExam.date}</strong> · Time: <strong>{selectedExam.start_time} - {selectedExam.end_time}</strong> · Cutoff: <strong>{selectedExam.cutoff_minutes === 0 ? "No lock (demo)" : `${selectedExam.cutoff_minutes} mins`}</strong>
                   </p>
                 </div>
 
@@ -288,6 +473,9 @@ export function ExamControlView() {
                     isAdmin={isAdmin}
                     onSelect={(roomNo) => navigate(`/exams/${selectedExamId}/rooms/${encodeURIComponent(roomNo)}`)}
                     onAdminOverride={(roomNo) => setOverrideRoomNo(roomNo)}
+                    onAssignInvigilator={(roomNo) => {
+                      setAssignModalRoomNo(roomNo);
+                    }}
                   />
                 ))}
               </div>
@@ -356,6 +544,386 @@ export function ExamControlView() {
                   className="px-4 py-2 rounded-xl text-xs font-semibold bg-[#3F451F] text-white hover:bg-[#343919]"
                 >
                   {isSubmittingOverride ? "Applying..." : "Confirm Override"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Invigilator Assignment Modal with Timetable Conflict Detection */}
+      {assignModalRoomNo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-gray-200">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xl">👤</span>
+              <h4 className="text-lg font-bold text-gray-900">
+                Assign Invigilator: Room {assignModalRoomNo}
+              </h4>
+            </div>
+            <p className="text-xs text-gray-500 mb-4">
+              Allocate an active faculty member to invigilate exam <strong>{selectedExamId}</strong> in room <strong>{assignModalRoomNo}</strong>. The system checks the institutional timetable to prevent double-booking teaching faculty.
+            </p>
+
+            <form onSubmit={handleAssignSubmit} className="space-y-4">
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Select Faculty Teacher <span className="text-red-500">*</span>
+                </label>
+                {isLoadingCandidates ? (
+                  <div className="p-3 text-xs text-gray-500 bg-gray-50 rounded-xl border border-gray-200">
+                    Checking timetable schedules & faculty availability...
+                  </div>
+                ) : (
+                  <select
+                    required
+                    value={selectedTeacherId}
+                    onChange={(e) => setSelectedTeacherId(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 bg-white p-2.5 text-sm font-medium text-gray-800 shadow-xs focus:border-[#3F451F] focus:outline-none"
+                  >
+                    <option value="" disabled>-- Select a faculty member --</option>
+                    {candidates.length > 0 ? (
+                      <>
+                        <optgroup label="🟢 Available Faculty (No Timetable Conflict)">
+                          {candidates
+                            .filter((c) => !c.has_timetable_conflict && !c.is_already_assigned)
+                            .map((c) => (
+                              <option key={c.user_id} value={c.user_id}>
+                                {c.name} — ✅ Available & Free
+                              </option>
+                            ))}
+                        </optgroup>
+                        <optgroup label="⚠️ Class Conflict (Busy Teaching Timetable Period)">
+                          {candidates
+                            .filter((c) => c.has_timetable_conflict && !c.is_already_assigned)
+                            .map((c) => (
+                              <option key={c.user_id} value={c.user_id}>
+                                {c.name} — ⚠️ {c.conflict_details || "Teaching Class"}
+                              </option>
+                            ))}
+                        </optgroup>
+                        <optgroup label="🔒 Already Assigned to Another Room">
+                          {candidates
+                            .filter((c) => c.is_already_assigned)
+                            .map((c) => (
+                              <option key={c.user_id} value={c.user_id}>
+                                {c.name} — 🔒 Assigned to Room {c.assigned_room}
+                              </option>
+                            ))}
+                        </optgroup>
+                      </>
+                    ) : (
+                      DEFAULT_FACULTY.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}
+                        </option>
+                      ))
+                    )}
+                  </select>
+                )}
+              </div>
+
+              {/* Conflict Analysis Banner */}
+              {(() => {
+                const candidate = candidates.find((c) => c.user_id === selectedTeacherId);
+                if (!candidate) return null;
+                if (candidate.has_timetable_conflict) {
+                  return (
+                    <div className="p-3 bg-amber-50 border border-amber-300 rounded-xl text-xs text-amber-900 flex items-start gap-2">
+                      <span className="text-base">⚠️</span>
+                      <div>
+                        <strong className="block font-semibold">Timetable Conflict Detected:</strong>
+                        <span>{candidate.name} is scheduled to teach during this exam period: <strong>{candidate.conflict_details}</strong>.</span>
+                        <p className="mt-1 text-amber-800">
+                          To avoid missing regular lectures, consider selecting an available faculty member from the green recommended list above.
+                        </p>
+                      </div>
+                    </div>
+                  );
+                }
+                if (candidate.is_already_assigned) {
+                  return (
+                    <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-xs text-red-800 flex items-center gap-2">
+                      <span>🔒</span>
+                      <span><strong>{candidate.name}</strong> is already assigned to invigilate <strong>Room {candidate.assigned_room}</strong> for this exam sitting.</span>
+                    </div>
+                  );
+                }
+                return (
+                  <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl text-xs text-emerald-900 flex items-center gap-2">
+                    <span>✅</span>
+                    <span><strong>{candidate.name}</strong> has no timetable teaching conflicts and is fully available.</span>
+                  </div>
+                );
+              })()}
+
+              <div className="p-3 bg-blue-50/70 border border-blue-200/60 rounded-xl text-xs text-blue-900">
+                💡 <strong>Auto-Sync:</strong> Once assigned, this room will instantly synchronize to the teacher&apos;s &ldquo;My Invigilation&rdquo; dashboard with official VTU/DSCE Form-B digital rosters.
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setAssignModalRoomNo(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-600 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isAssigning}
+                  className="px-4 py-2 rounded-xl text-xs font-bold bg-[#3F451F] text-white hover:bg-[#343919]"
+                >
+                  {isAssigning ? "Assigning..." : "Confirm Assignment"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Admin Exam Sitting Creation Modal (All Semesters, CIE, Mid-Term, Lab, SEE) */}
+      {isCreateExamOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl max-w-xl w-full p-6 shadow-xl border border-gray-200 my-8">
+            <div className="flex items-center justify-between mb-2">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">📅</span>
+                <h4 className="text-lg font-bold text-gray-900">
+                  Schedule College Exam Sitting
+                </h4>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsCreateExamOpen(false)}
+                className="text-gray-400 hover:text-gray-600 text-lg font-bold"
+              >
+                ✕
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-5">
+              Create an institutional examination across any Semester (1st-8th), Category (CIE Internal, Mid-Term, Lab CIE, SEE Theory, SEE Lab), and Subject with auto-generated Form-B attendance rosters.
+            </p>
+
+            <form onSubmit={handleCreateExamSubmit} className="space-y-4">
+              {/* Exam Category */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1.5">
+                  Exam Type / Category <span className="text-red-500">*</span>
+                </label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {[
+                    { id: "THEORY_CIE", label: "CIE Internal", icon: "📝" },
+                    { id: "MID_TERM", label: "Mid-Term Exam", icon: "📑" },
+                    { id: "LAB_CIE", label: "Lab Practical CIE", icon: "🔬" },
+                    { id: "THEORY_SEE", label: "SEE Theory", icon: "🏛️" },
+                    { id: "LAB_EXTERNAL", label: "SEE Lab Exam", icon: "🧪" },
+                  ].map((cat) => (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => {
+                        setCreateExamType(cat.id as ExamType);
+                        setCreateExamName(`${createSemester}th Sem ${getExamTypeLabel(cat.id as ExamType)} ${createSubjectCode}`);
+                      }}
+                      className={`p-2.5 rounded-xl border text-left text-xs font-semibold flex items-center gap-2 transition-all ${
+                        createExamType === cat.id
+                          ? "border-[#3F451F] bg-[#3F451F]/10 text-[#3F451F] ring-1 ring-[#3F451F]"
+                          : "border-gray-200 text-gray-700 hover:bg-gray-50"
+                      }`}
+                    >
+                      <span>{cat.icon}</span>
+                      <span>{cat.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Semester & Department */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Semester <span className="text-red-500">*</span>
+                  </label>
+                  <select
+                    value={createSemester}
+                    onChange={(e) => handleSemesterChange(Number(e.target.value))}
+                    className="w-full rounded-xl border border-gray-300 bg-white p-2.5 text-xs font-medium text-gray-800"
+                  >
+                    {[1, 2, 3, 4, 5, 6, 7, 8].map((sem) => (
+                      <option key={sem} value={sem}>
+                        {sem}th Semester
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Department / Branch <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={createDept}
+                    onChange={(e) => setCreateDept(e.target.value)}
+                    placeholder="e.g. CY, CSE, ISE, ECE"
+                    className="w-full rounded-xl border border-gray-300 p-2 text-xs uppercase font-medium"
+                  />
+                </div>
+              </div>
+
+              {/* Subject Code & Name */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Subject Code <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={createSubjectCode}
+                    onChange={(e) => {
+                      setCreateSubjectCode(e.target.value);
+                      setCreateExamName(`${createSemester}th Sem ${getExamTypeLabel(createExamType)} ${e.target.value}`);
+                    }}
+                    placeholder="e.g. 22CY52"
+                    className="w-full rounded-xl border border-gray-300 p-2 text-xs uppercase font-bold"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Subject Name
+                  </label>
+                  <input
+                    type="text"
+                    value={createSubjectName}
+                    onChange={(e) => setCreateSubjectName(e.target.value)}
+                    placeholder="e.g. Computer Networks & Protocols"
+                    className="w-full rounded-xl border border-gray-300 p-2 text-xs"
+                  />
+                </div>
+              </div>
+
+              {/* Exam Title */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Exam Title / Sitting Name <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={createExamName}
+                  onChange={(e) => setCreateExamName(e.target.value)}
+                  className="w-full rounded-xl border border-gray-300 p-2 text-xs font-medium"
+                />
+              </div>
+
+              {/* Date & Time */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Exam Date <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={createDate}
+                    onChange={(e) => setCreateDate(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 p-2 text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    Start Time <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={createStartTime}
+                    onChange={(e) => setCreateStartTime(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 p-2 text-xs"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-gray-700 mb-1">
+                    End Time <span className="text-red-500">*</span>
+                  </label>
+                  <input
+                    type="time"
+                    required
+                    value={createEndTime}
+                    onChange={(e) => setCreateEndTime(e.target.value)}
+                    className="w-full rounded-xl border border-gray-300 p-2 text-xs"
+                  />
+                </div>
+              </div>
+
+              {/* Quick Time Presets */}
+              <div className="flex items-center gap-2 text-xs text-gray-500">
+                <span className="font-semibold text-gray-700">Quick Slots:</span>
+                <button
+                  type="button"
+                  onClick={() => { setCreateStartTime("09:30"); setCreateEndTime("11:00"); }}
+                  className="px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded-lg text-xs font-medium text-gray-700"
+                >
+                  Forenoon (09:30 - 11:00)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setCreateStartTime("14:00"); setCreateEndTime("15:30"); }}
+                  className="px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded-lg text-xs font-medium text-gray-700"
+                >
+                  Afternoon (14:00 - 15:30)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setCreateStartTime("14:00"); setCreateEndTime("17:00"); }}
+                  className="px-2 py-1 bg-gray-100 hover:bg-gray-200 rounded-lg text-xs font-medium text-gray-700"
+                >
+                  3-Hr SEE (14:00 - 17:00)
+                </button>
+              </div>
+
+              {/* Exam Halls / Rooms */}
+              <div>
+                <label className="block text-xs font-semibold text-gray-700 mb-1">
+                  Exam Halls / Rooms (Comma-separated) <span className="text-red-500">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  value={createRooms}
+                  onChange={(e) => setCreateRooms(e.target.value)}
+                  placeholder="e.g. CDS-105, CDS-106, CDS-107"
+                  className="w-full rounded-xl border border-gray-300 p-2 text-xs font-bold uppercase"
+                />
+                <span className="text-[11px] text-gray-500 mt-1 block">
+                  Students enrolled in Semester {createSemester} ({createDept}) will be automatically allocated across these rooms with individual Form-B seating entries.
+                </span>
+              </div>
+
+              <div className="p-3 bg-emerald-50/70 border border-emerald-200/60 rounded-xl text-xs text-emerald-900">
+                📋 <strong>Automated Form-B Sync:</strong> Creating this exam will automatically generate VTU/DSCE Form-B attendance sheets for all specified rooms and register them for invigilator allocation.
+              </div>
+
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsCreateExamOpen(false)}
+                  className="px-4 py-2 rounded-xl text-xs font-medium text-gray-600 hover:bg-gray-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmittingCreate}
+                  className="px-5 py-2 rounded-xl text-xs font-bold bg-[#3F451F] text-white hover:bg-[#343919] shadow"
+                >
+                  {isSubmittingCreate ? "Scheduling..." : "Schedule Exam & Generate Form-B"}
                 </button>
               </div>
             </form>
